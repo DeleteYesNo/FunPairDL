@@ -28,6 +28,14 @@ It is a Windows desktop **GUI** (PySide6) with a local **FastAPI** backend and a
 
 ### Install & run
 
+**Easiest (Windows):** just double-click **`run.bat`**. On first run it
+checks for the required packages and installs them if needed, creates
+`config.json` from the template, and then starts the app (no console
+window). Later runs skip straight to launching. The only prerequisite is
+[Python 3.11+](https://www.python.org/downloads/) on your PATH.
+
+**Manual (any platform):**
+
 ```bash
 # 1. Install dependencies
 pip install -r requirements.txt
@@ -42,10 +50,8 @@ copy config.example.json config.json   # Windows
 python run.py
 ```
 
-On Windows the easiest way is to double-click **`run.bat`** — it launches
-the app without a console window from wherever you cloned the repo. (You can
-also double-click `FunPairDL.pyw` directly.) If the app doesn't appear, run
-`python run.py` in a terminal to see the error.
+If the app doesn't appear when launched via `run.bat`, run `python run.py`
+in a terminal to see the error.
 
 **Optional — desktop shortcut with icon (Windows):** run
 
@@ -91,6 +97,10 @@ Released under the **PolyForm Noncommercial License 1.0.0** — free for any non
 
 ### 安裝與執行
 
+**最簡單(Windows):** 直接雙擊 **`run.bat`**。首次執行時它會檢查所需套件、缺少就自動安裝,從範本建立 `config.json`,然後啟動 app(無主控台視窗);之後再執行就直接開啟。唯一前提是系統 PATH 上有 [Python 3.11 以上](https://www.python.org/downloads/)。
+
+**手動(任何平台):**
+
 ```bash
 # 1. 安裝相依套件
 pip install -r requirements.txt
@@ -103,7 +113,7 @@ copy config.example.json config.json   # Windows
 python run.py
 ```
 
-Windows 上最簡單的方式是雙擊 **`run.bat`**——它會從 repo 所在資料夾啟動 app(無主控台視窗)。(也可以直接雙擊 `FunPairDL.pyw`。)若視窗沒出現,可在終端機執行 `python run.py` 查看錯誤訊息。
+若用 `run.bat` 啟動後視窗沒出現,可在終端機執行 `python run.py` 查看錯誤訊息。
 
 **選用——建立帶圖示的桌面捷徑(Windows):** 執行
 
