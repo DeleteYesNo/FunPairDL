@@ -44,6 +44,16 @@ python run.py
 
 On Windows you can also double-click **`FunPairDL.pyw`** to start without a console window.
 
+**Optional — desktop shortcut with icon (Windows):** run
+
+```bash
+python create_shortcut.py
+```
+
+This creates a `FunPairDL` shortcut on your desktop that launches the app
+(via `pythonw.exe`, no console window) using the bundled icon. It will
+auto-install `winshell` and `pywin32` if they are missing.
+
 A headless **server mode** is available via `python run_server.py`.
 
 ### Configuration
@@ -91,6 +101,14 @@ python run.py
 ```
 
 Windows 上也可以直接雙擊 **`FunPairDL.pyw`**,以無主控台視窗的方式啟動。
+
+**選用——建立帶圖示的桌面捷徑(Windows):** 執行
+
+```bash
+python create_shortcut.py
+```
+
+會在桌面建立一個 `FunPairDL` 捷徑,用內附的 icon、以 `pythonw.exe` 啟動(無主控台視窗)。若缺少 `winshell`、`pywin32` 會自動安裝。
 
 另有無介面的 **server 模式**:`python run_server.py`。
 
