@@ -71,3 +71,8 @@ class TestCleanTitle:
         assert QueueManager._is_bundle_url("https://mega.nz/folder/abc#key")
         assert not QueueManager._is_bundle_url("https://pixeldrain.com/u/abc123")
         assert not QueueManager._is_bundle_url("https://mega.nz/file/abc#key")
+        # A single file *within* a folder is not a bundle — it must not be
+        # re-expanded once resolved, or it would loop on the folder URL.
+        assert not QueueManager._is_bundle_url(
+            "https://mega.nz/folder/abc#key/file/FILEHANDLE"
+        )

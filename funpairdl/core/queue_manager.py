@@ -363,8 +363,10 @@ class QueueManager:
         if "pixeldrain.com" in host and path.startswith("l/"):
             return True
 
-        # MEGA folder: /folder/ in URL
-        if ("mega.nz" in host or "mega.co.nz" in host) and "/folder/" in url:
+        # MEGA folder: /folder/ in URL — but NOT a single file within a
+        # folder (mega.nz/folder/H#K/file/FH), which is already one file.
+        if (("mega.nz" in host or "mega.co.nz" in host)
+                and "/folder/" in url and "/file/" not in url):
             return True
 
         return False
@@ -581,7 +583,19 @@ class QueueManager:
         from funpairdl.providers.pixeldrain import PixeldrainProvider
         from funpairdl.persistence.settings import Settings
 
-        bundle_items = [i for i in pair.items if i.is_bundle]
+        # Pick bundle items to expand. Besides those already flagged, also
+        # catch items whose URL is a bundle but whose flag is False — e.g.
+        # queue entries persisted before this fix, or a single-file MEGA
+        # folder that previously failed to expand and got stuck on the raw
+        # /folder/ URL. Mark them so the replacement step at the end removes
+        # the placeholder instead of leaving the un-downloadable folder URL.
+        bundle_items = []
+        for i in pair.items:
+            if i.state == ItemState.COMPLETED:
+                continue
+            if i.is_bundle or self._is_bundle_url(i.url):
+                i.is_bundle = True
+                bundle_items.append(i)
         if not bundle_items:
             return False
 
@@ -592,6 +606,11 @@ class QueueManager:
             try:
                 url = bundle_item.url
                 provider = bundle_item.provider_name
+                if not provider:  # self-healed item may lack a provider name
+                    if "mega" in url:
+                        provider = "mega"
+                    elif "pixeldrain" in url:
+                        provider = "pixeldrain"
                 resolved_files = []
 
                 if provider == "pixeldrain":
