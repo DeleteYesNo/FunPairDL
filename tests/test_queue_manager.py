@@ -68,6 +68,8 @@ class TestAddPairAuthors:
 class TestCleanTitle:
     def test_bundle_url_detection(self):
         assert QueueManager._is_bundle_url("https://pixeldrain.com/l/abc123")
+        # /d/ is a filesystem folder (may hold per-pack subfolders) — a bundle.
+        assert QueueManager._is_bundle_url("https://pixeldrain.com/d/6tpQwDwA")
         assert QueueManager._is_bundle_url("https://mega.nz/folder/abc#key")
         assert not QueueManager._is_bundle_url("https://pixeldrain.com/u/abc123")
         assert not QueueManager._is_bundle_url("https://mega.nz/file/abc#key")

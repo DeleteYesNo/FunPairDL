@@ -64,7 +64,7 @@ function isBundleUrl(url) {
     const u = new URL(url);
     const host = u.hostname.toLowerCase();
     const path = u.pathname;
-    if (host.includes("pixeldrain.com") && /^\/l\//.test(path)) return true;
+    if (host.includes("pixeldrain.com") && /^\/(l|d)\//.test(path)) return true;
     if ((host.includes("mega.nz") || host.includes("mega.co.nz")) && path.includes("/folder/")) return true;
     if (host.includes("gofile.io") && /^\/d\//.test(path)) return true;
   } catch (e) {}

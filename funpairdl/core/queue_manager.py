@@ -359,8 +359,9 @@ class QueueManager:
         host = (parsed.hostname or "").lower()
         path = parsed.path.strip("/")
 
-        # Pixeldrain list: /l/{list_id}
-        if "pixeldrain.com" in host and path.startswith("l/"):
+        # Pixeldrain list (/l/) or filesystem folder (/d/) — both may hold
+        # multiple files. /u/ is a single file and is intentionally excluded.
+        if "pixeldrain.com" in host and (path.startswith("l/") or path.startswith("d/")):
             return True
 
         # MEGA folder: /folder/ in URL — but NOT a single file within a
@@ -615,7 +616,12 @@ class QueueManager:
 
                 if provider == "pixeldrain":
                     pd = PixeldrainProvider(api_key=settings.pixeldrain_api_key)
-                    resolved_files = await pd.resolve_list_all(url)
+                    # /l/ = legacy list; /d/ (and /api/filesystem/) = folder
+                    # tree that may hold per-pack subfolders of video+script.
+                    if "/l/" in url:
+                        resolved_files = await pd.resolve_list_all(url)
+                    else:
+                        resolved_files = await pd.resolve_folder_all(url)
                 elif provider == "mega":
                     from funpairdl.utils.mega_api import probe_mega_folder
                     result = await probe_mega_folder(url)
