@@ -385,6 +385,28 @@ async def probe_url(req: ProbeRequest) -> dict:
                             }
                         return {"success": False, "error": f"Status {resp.status}"}
 
+                # Folder URL: /d/{id} (filesystem bucket — may hold per-pack
+                # subfolders). Walk it so the UI can list/expand the contents.
+                if path.startswith("d/"):
+                    from funpairdl.providers.pixeldrain import PixeldrainProvider
+                    from funpairdl.persistence.settings import Settings
+                    pd = PixeldrainProvider(api_key=Settings.load().pixeldrain_api_key)
+                    rfs = await pd.resolve_folder_all(req.url)
+                    if rfs:
+                        file_list = [
+                            {"name": rf.filename, "size": rf.total_size,
+                             "url": rf.direct_url}
+                            for rf in rfs
+                        ]
+                        return {
+                            "success": True,
+                            "provider": "pixeldrain",
+                            "size": sum(rf.total_size for rf in rfs),
+                            "filename": f"{len(file_list)} files",
+                            "files": file_list,
+                        }
+                    return {"success": False, "error": "Empty Pixeldrain folder"}
+
                 # Single file URL: /u/{fileId}
                 file_id = extract_pixeldrain_id(req.url)
                 if not file_id:
