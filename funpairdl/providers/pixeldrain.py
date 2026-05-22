@@ -453,3 +453,45 @@ class PixeldrainProvider(BaseProvider):
                 headers=headers,
             ))
         return results
+
+    async def resolve_folder_all(self, url: str) -> list[ResolvedFile]:
+        """Resolve every file leaf in a Pixeldrain `/d/` filesystem folder.
+
+        Walks the directory tree recursively, so a folder of per-pack
+        subfolders (each holding a video + funscript) flattens into one
+        ResolvedFile per file — the bundle path then auto-splits them back
+        into pairs by filename."""
+        parsed = urlparse(url)
+        path_parts = parsed.path.strip("/").split("/")
+        if path_parts and path_parts[0] == "api" and len(path_parts) >= 2 and path_parts[1] == "filesystem":
+            fs_path = "/" + "/".join(path_parts[2:])
+        elif path_parts and path_parts[0] in ("d", "u") and len(path_parts) >= 2:
+            fs_path = "/" + path_parts[1]
+        else:
+            # Not a filesystem URL — fall back to single-file resolve.
+            return [await self.resolve(url)]
+
+        headers = self._auth_headers()
+        async with aiohttp.ClientSession(headers=headers) as session:
+            root, _children, err = await self.fetch_node_children(fs_path, session)
+            if err:
+                logger.warning("Pixeldrain folder probe failed for %s: %s", url, err)
+                return []
+            if not root.is_dir:
+                # A /d/ id that is actually a single file.
+                return [await self.resolve(url)]
+            leaves = await self.expand_directory_recursive(root, session)
+
+        results = []
+        for leaf in leaves:
+            # Skip Pixeldrain's hidden search index and other dotfiles.
+            if leaf.name.startswith("."):
+                continue
+            results.append(ResolvedFile(
+                direct_url=leaf.download_url,
+                filename=sanitize_filename(leaf.name),
+                total_size=leaf.size,
+                supports_range=True,
+                headers=headers,
+            ))
+        return results
