@@ -347,7 +347,11 @@ async def probe_mega_folder(url: str) -> dict:
             "provider": "mega",
             "size": total_size,
             "filename": f"{len(files)} files" if len(files) != 1 else (files[0]["name"] if files else ""),
-            "files": files if len(files) > 1 else None,
+            # Always return the file list, even for a single-file folder. The
+            # per-file download URL only exists inside this list; nulling it
+            # out for len==1 made single-file folders impossible to expand,
+            # so they fell back to the raw /folder/ URL and failed to download.
+            "files": files or None,
         }
     except Exception as e:
         logger.error("MEGA folder probe failed: %s", e)
