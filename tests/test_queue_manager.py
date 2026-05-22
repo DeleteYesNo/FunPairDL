@@ -1,6 +1,45 @@
 """Tests for QueueManager.add_pair with script_authors."""
-from funpairdl.core.pair import FileType
+from funpairdl.core.pair import FileType, Pair, PairItem
 from funpairdl.core.queue_manager import QueueManager
+
+
+def _vi(name, ftype):
+    return PairItem(url="u/" + name, filename=name, file_type=ftype)
+
+
+class TestAutoSplitBundlePair:
+    def test_splits_distinct_works(self):
+        # A folder of distinct scenes (each video + its script) must split
+        # into one pair per work — NOT collapse into one pair with the
+        # extra scripts promoted to .alt variants.
+        names = ["[Gweda] Shenhe", "[Teamboobs]Shenhe", "[simao] Shenhe"]
+        items = []
+        for n in names:
+            items.append(_vi(n + ".mp4", FileType.VIDEO))
+            items.append(_vi(n + ".funscript", FileType.FUNSCRIPT))
+        result = QueueManager()._auto_split_bundle_pair(Pair(name="Pack", items=items))
+        assert result is not None
+        assert len(result) == 3
+        for p in result:
+            assert sum(1 for i in p.items if i.file_type == FileType.VIDEO) == 1
+            assert sum(1 for i in p.items if i.file_type == FileType.FUNSCRIPT) == 1
+
+    def test_mirror_videos_not_split(self):
+        # Same work mirrored on two hosts (identical name) is one pair.
+        items = [
+            _vi("Shenhe.mp4", FileType.VIDEO),
+            _vi("Shenhe.mp4", FileType.VIDEO),
+            _vi("Shenhe.funscript", FileType.FUNSCRIPT),
+        ]
+        assert QueueManager()._auto_split_bundle_pair(Pair(name="Shenhe", items=items)) is None
+
+    def test_single_video_not_split(self):
+        items = [
+            _vi("A.mp4", FileType.VIDEO),
+            _vi("A.funscript", FileType.FUNSCRIPT),
+            _vi("A.pitch.funscript", FileType.FUNSCRIPT),
+        ]
+        assert QueueManager()._auto_split_bundle_pair(Pair(name="A", items=items)) is None
 
 
 class TestAddPairAuthors:
