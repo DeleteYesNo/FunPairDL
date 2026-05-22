@@ -853,6 +853,18 @@ class QueueManager:
 
             original_url = item.url  # Use original page URL for yt-dlp
 
+            def _progress_hook(d):
+                # Surface HLS progress on the item so the UI isn't stuck at 0%
+                # and slow downloads are visible. Plain attribute writes only —
+                # no Qt callbacks from this worker thread.
+                if d.get("status") == "downloading":
+                    item.downloaded_bytes = d.get("downloaded_bytes") or item.downloaded_bytes
+                    item.total_bytes = (
+                        d.get("total_bytes") or d.get("total_bytes_estimate")
+                        or item.total_bytes
+                    )
+                    item.speed_bps = int(d.get("speed") or 0)
+
             def _download():
                 import yt_dlp
                 output_dir.mkdir(parents=True, exist_ok=True)
@@ -863,6 +875,12 @@ class QueueManager:
                     "quiet": True,
                     "no_warnings": True,
                     "outtmpl": output_template,
+                    # HLS playlists are fetched fragment-by-fragment; without
+                    # parallelism a single slow CDN connection (~200 KiB/s seen
+                    # on xvideos) makes large formats blow past the timeout.
+                    # Download fragments concurrently to keep speed up.
+                    "concurrent_fragment_downloads": 16,
+                    "progress_hooks": [_progress_hook],
                 }
                 # Use impersonation to bypass Cloudflare (requires curl_cffi)
                 try:
@@ -885,10 +903,18 @@ class QueueManager:
                     info = ydl.extract_info(original_url, download=True)
                     return info
 
+            # Generous cap: a guard against a truly hung download, not a limit
+            # on legitimate large videos. With concurrent fragments a normal
+            # HLS finishes in minutes; large/slow ones still need headroom.
+            HLS_TIMEOUT = 3600
             try:
-                info = await asyncio.wait_for(asyncio.to_thread(_download), timeout=600)
+                info = await asyncio.wait_for(
+                    asyncio.to_thread(_download), timeout=HLS_TIMEOUT
+                )
             except asyncio.TimeoutError:
-                raise TimeoutError(f"HLS download timed out after 600s: {item.url[:80]}")
+                raise TimeoutError(
+                    f"HLS download timed out after {HLS_TIMEOUT}s: {item.url[:80]}"
+                )
 
             if info:
                 ext = info.get("ext", "mp4")
