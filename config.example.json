@@ -1,0 +1,49 @@
+{
+  "download_dir": "C:\\Downloads\\FunPairDL",
+  "max_segments": 32,
+  "api_host": "127.0.0.1",
+  "api_port": 9172,
+  "minimize_to_tray": true,
+  "cookies_from_browser": "brave",
+  "default_resolution": "1080",
+  "script_variant_mode": "flat",
+  "max_concurrent_pairs": 8,
+
+  "_comment_credentials": "Fill in only the services you use. Leave the rest blank. This file is a template — copy it to config.json (which is gitignored).",
+  "pixeldrain_api_key": "",
+  "mega_email": "",
+  "mega_password": "",
+  "mega_sid": "",
+  "gofile_token": "",
+  "eroscripts_username": "",
+  "eroscripts_password": "",
+  "eroscripts_cookies": "",
+  "eroscripts_cookie_jar": [],
+
+  "browser_tabs": [],
+  "browser_active_tab": 0,
+  "browser_scroll_positions": [],
+
+  "clipboard_watch_enabled": true,
+  "clipboard_watch_domains": ["pixeldrain.com"],
+  "clipboard_notify_tray": true,
+  "clipboard_notify_flash": false,
+  "clipboard_dedupe_seconds": 30,
+  "clipboard_skip_in_queue": true,
+  "clipboard_dnd_enabled": false,
+
+  "pixeldrain_picker_columns": {
+    "name": true,
+    "ext": true,
+    "size": true,
+    "as_type": true,
+    "uploaded": false,
+    "url": false,
+    "id": false
+  },
+  "pixeldrain_picker_column_widths": {},
+  "pixeldrain_picker_sort_column": 1,
+  "pixeldrain_picker_sort_order": 0,
+  "default_rename_direction": "video_first",
+  "pixeldrain_skip_preview_when_confident": false
+}
