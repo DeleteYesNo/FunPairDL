@@ -853,17 +853,38 @@ class QueueManager:
 
             original_url = item.url  # Use original page URL for yt-dlp
 
+            # yt-dlp runs in a worker thread, so its progress hook must hop
+            # back to the event loop to touch UI callbacks safely. Capture the
+            # loop here (we're on it now) and throttle refreshes to ~2/sec so
+            # the GUI doesn't need a manual pause/resume to update.
+            import time as _time
+            loop = asyncio.get_running_loop()
+            _last_emit = [0.0]
+
+            def _notify_update():
+                if self.on_item_updated:
+                    loop.call_soon_threadsafe(self.on_item_updated, item)
+
             def _progress_hook(d):
-                # Surface HLS progress on the item so the UI isn't stuck at 0%
-                # and slow downloads are visible. Plain attribute writes only —
-                # no Qt callbacks from this worker thread.
-                if d.get("status") == "downloading":
+                status = d.get("status")
+                if status == "downloading":
                     item.downloaded_bytes = d.get("downloaded_bytes") or item.downloaded_bytes
                     item.total_bytes = (
                         d.get("total_bytes") or d.get("total_bytes_estimate")
                         or item.total_bytes
                     )
                     item.speed_bps = int(d.get("speed") or 0)
+                    now = _time.monotonic()
+                    if now - _last_emit[0] >= 0.5:
+                        _last_emit[0] = now
+                        _notify_update()
+                elif status == "finished":
+                    # Fragments done (remux/fixup may follow) — push one update
+                    # so the bar reaches 100% instead of resting at ~99.8%.
+                    item.speed_bps = 0
+                    if item.total_bytes:
+                        item.downloaded_bytes = item.total_bytes
+                    _notify_update()
 
             def _download():
                 import yt_dlp
