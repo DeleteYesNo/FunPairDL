@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      width: 280px;
+      padding: 16px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid #333;
+    }
+    .header h1 {
+      font-size: 16px;
+      font-weight: 700;
+      color: #4a90d9;
+    }
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #dc3545;
+    }
+    .status-dot.online { background: #28a745; }
+    .status-text { font-size: 13px; }
+    .info {
+      font-size: 12px;
+      color: #888;
+      margin-top: 8px;
+    }
+    .info span { color: #4a90d9; font-weight: 600; }
+    .queue-info {
+      background: #16213e;
+      padding: 10px;
+      border-radius: 6px;
+      margin-top: 10px;
+      font-size: 13px;
+    }
+    .queue-info .label { color: #888; }
+    .queue-info .value { color: #4a90d9; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <span style="font-size: 20px;">⬇</span>
+    <h1>FunPairDL</h1>
+  </div>
+  <div class="status">
+    <div class="status-dot" id="statusDot"></div>
+    <span class="status-text" id="statusText">Checking...</span>
+  </div>
+  <div class="queue-info" id="queueInfo" style="display: none;">
+    <div><span class="label">Queue: </span><span class="value" id="queueCount">0</span> pairs</div>
+  </div>
+  <div class="info">
+    <p>Server: <span>127.0.0.1:9172</span></p>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

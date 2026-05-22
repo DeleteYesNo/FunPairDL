@@ -1,0 +1,30 @@
+# ── Secrets & local state (NEVER commit) ─────────────────────────────
+# config.json holds API keys, plaintext passwords and live session
+# cookies. Ship config.example.json instead.
+config.json
+queue.json
+*.log
+
+# Dev / analysis artifacts
+analysis_output.txt
+
+# ── Python ───────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# ── Editors / OS ─────────────────────────────────────────────────────
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ── Claude Code local settings (keep machine-specific perms private) ──
+.claude/settings.local.json

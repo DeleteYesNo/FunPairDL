@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "FunPairDL Sender",
+  "version": "1.0.0",
+  "description": "Send video + funscript pairs from EroScripts to FunPairDL download manager",
+  "permissions": ["contextMenus", "activeTab", "cookies", "storage"],
+  "host_permissions": [
+    "http://127.0.0.1:9172/*",
+    "*://discuss.eroscripts.com/*",
+    "*://api.gofile.io/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["*://discuss.eroscripts.com/t/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
