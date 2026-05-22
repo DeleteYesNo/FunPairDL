@@ -42,7 +42,10 @@ copy config.example.json config.json   # Windows
 python run.py
 ```
 
-On Windows you can also double-click **`FunPairDL.pyw`** to start without a console window.
+On Windows the easiest way is to double-click **`run.bat`** — it launches
+the app without a console window from wherever you cloned the repo. (You can
+also double-click `FunPairDL.pyw` directly.) If the app doesn't appear, run
+`python run.py` in a terminal to see the error.
 
 **Optional — desktop shortcut with icon (Windows):** run
 
@@ -100,7 +103,7 @@ copy config.example.json config.json   # Windows
 python run.py
 ```
 
-Windows 上也可以直接雙擊 **`FunPairDL.pyw`**,以無主控台視窗的方式啟動。
+Windows 上最簡單的方式是雙擊 **`run.bat`**——它會從 repo 所在資料夾啟動 app(無主控台視窗)。(也可以直接雙擊 `FunPairDL.pyw`。)若視窗沒出現,可在終端機執行 `python run.py` 查看錯誤訊息。
 
 **選用——建立帶圖示的桌面捷徑(Windows):** 執行
 
