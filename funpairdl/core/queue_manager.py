@@ -1004,8 +1004,12 @@ class QueueManager:
         # Resolve bundle URLs before downloading
         had_bundles = await self._resolve_bundles(pair)
 
-        # Auto-split only after bundle expansion (not for user-picked video mirrors)
-        new_pairs = self._auto_split_bundle_pair(pair) if had_bundles else None
+        # Split a pair that holds multiple distinct works into one pair each,
+        # whether the videos came from a bundle we just expanded OR arrived
+        # pre-expanded (e.g. the user expanded a bundle's file list before
+        # sending). _auto_split_bundle_pair bails on single-video or
+        # mirror-only pairs, so this is safe to attempt unconditionally.
+        new_pairs = self._auto_split_bundle_pair(pair)
         if new_pairs:
             for np in new_pairs:
                 self.pairs.append(np)
@@ -1337,6 +1341,17 @@ class QueueManager:
         """
         videos = [i for i in pair.items if i.file_type == FileType.VIDEO]
         if len(videos) <= 1:
+            return None
+
+        # Don't split a mirror set: when every video reduces to the same
+        # normalized name they're the same work on different hosts (or the
+        # same file picked twice) — keep them in one pair. Only split when
+        # there are genuinely distinct works (e.g. a 5-pack folder of
+        # separate scenes, whether bundle-expanded or sent pre-expanded).
+        def _norm_stem(fn: str) -> str:
+            return "".join(c for c in Path(fn).stem.lower() if c.isalnum())
+        distinct_stems = {_norm_stem(v.filename) for v in videos if v.filename}
+        if len(distinct_stems) <= 1:
             return None
 
         scripts = [i for i in pair.items if i.file_type == FileType.FUNSCRIPT]
