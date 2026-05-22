@@ -652,7 +652,13 @@ function parseAllPosts() {
     for (let i = 0; i < p.subGroups.length; i++) {
       const sg = p.subGroups[i];
       let groupName;
-      if (p.isOP && i === 0) {
+      // OP content all lands in Main — multiple videos in the OP are
+      // distinct works, not Alt variants, so don't scatter them into
+      // Alt 1/2/3. The user groups manually if needed, and the backend
+      // auto-splits genuinely distinct works into separate pairs on send.
+      // Only other posts (comments) become Alt groups — an alternate
+      // script posted by someone else is a real "alt".
+      if (p.isOP) {
         groupName = "Main";
       } else {
         altCounter += 1;
