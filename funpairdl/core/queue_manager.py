@@ -83,7 +83,13 @@ class QueueManager:
         """Initialize download resources — runs in download thread."""
         from funpairdl.constants import BROWSER_USER_AGENT
 
-        connector = aiohttp.TCPConnector(limit=50, limit_per_host=10)
+        # ssl=False disables certificate verification for this download-only
+        # session. Media CDNs (e.g. rule34video's boomio-cdn) routinely ship
+        # expired/misconfigured certs that would otherwise abort the download;
+        # the connection is still TLS-encrypted, we just don't reject on a bad
+        # cert — an acceptable trade-off for fetching public media, and the
+        # same lenient posture yt-dlp takes by default.
+        connector = aiohttp.TCPConnector(limit=50, limit_per_host=10, ssl=False)
         self._session = aiohttp.ClientSession(
             connector=connector,
             headers={"User-Agent": BROWSER_USER_AGENT},
