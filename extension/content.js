@@ -1330,7 +1330,13 @@ function buildSinglePanelHTML(parsed) {
     return `<div class="funpairdl-empty">No video or script links found</div>`;
   }
 
-  return _buildGroupsRootHTML(parsed);
+  const toolbar = `<div class="funpairdl-collection-toolbar">
+    <label class="funpairdl-item funpairdl-select-all">
+      <input type="checkbox" id="funpairdl-select-all" checked>
+      <span class="funpairdl-label" style="font-weight:700">全選 / 全不選</span>
+    </label>
+  </div>`;
+  return toolbar + _buildGroupsRootHTML(parsed);
 }
 
 /**
@@ -2075,6 +2081,102 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
   }
 }
 
+// ─── Selection helpers (drag-paint + select all/none) ───
+
+// Selectable item checkboxes (excludes auto-rename, Alt-inherit toggles, the
+// master select-all itself, and section collapse arrows).
+const _SELECTABLE_CB = 'input[name="video"], input[name="script"], ' +
+  '.funpairdl-bundle-cb, .funpairdl-section-cb';
+
+function _dragTargetCheckbox(el) {
+  if (el && el.tagName === "INPUT" && el.type === "checkbox") {
+    return el.matches(_SELECTABLE_CB) ? el : null;
+  }
+  // Clicking anywhere on an item / bundle-file row toggles its checkbox.
+  const label = el && el.closest && el.closest("label.funpairdl-item, label.funpairdl-bundle-file");
+  if (label && !label.classList.contains("funpairdl-select-all")) {
+    const cb = label.querySelector('input[type="checkbox"]');
+    return cb && cb.matches(_SELECTABLE_CB) ? cb : null;
+  }
+  return null;
+}
+
+// Press on a checkbox/row and drag across others to set them all to the same
+// state (the value the first one flips to) — fast way to (un)check a range.
+function _enableDragSelect(panel) {
+  let dragging = false;
+  let paintValue = false;
+  let suppressClick = false;
+
+  function paint(cb) {
+    if (cb && cb.checked !== paintValue) {
+      cb.checked = paintValue;
+      cb.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  }
+
+  panel.addEventListener("mousedown", (e) => {
+    suppressClick = false;
+    if (e.button !== 0) return;
+    if (e.target.closest && e.target.closest(
+        "select, button, .funpairdl-section-toggle, .funpairdl-tag-bundle, .funpairdl-item-group-select")) return;
+    const cb = _dragTargetCheckbox(e.target);
+    if (!cb) return;
+    dragging = true;
+    paintValue = !cb.checked;
+    paint(cb);
+    suppressClick = true;   // we toggled manually; cancel the native click
+    e.preventDefault();     // also stops text selection while dragging
+  });
+
+  panel.addEventListener("mouseover", (e) => {
+    if (!dragging) return;
+    paint(_dragTargetCheckbox(e.target));
+  });
+
+  // Cancel the native toggle that would otherwise undo our manual mousedown
+  // toggle (mouseup fires before click, so we clear the flag here, not on up).
+  panel.addEventListener("click", (e) => {
+    if (suppressClick && _dragTargetCheckbox(e.target)) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      suppressClick = false;
+    }
+  }, true);
+
+  document.addEventListener("mouseup", () => { dragging = false; });
+}
+
+// Single-mode master checkbox: toggles every item/bundle checkbox and reflects
+// the aggregate state (checked / unchecked / indeterminate).
+function _setupSingleSelectAll(panel) {
+  const master = panel.querySelector("#funpairdl-select-all");
+  if (!master) return;
+  const items = () => panel.querySelectorAll(_SELECTABLE_CB);
+
+  master.addEventListener("change", () => {
+    items().forEach((cb) => {
+      if (cb.checked !== master.checked) {
+        cb.checked = master.checked;
+        cb.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+  });
+
+  function sync() {
+    const all = [...items()];
+    const checked = all.filter((c) => c.checked).length;
+    master.checked = all.length > 0 && checked === all.length;
+    master.indeterminate = checked > 0 && checked < all.length;
+  }
+  panel.addEventListener("change", (e) => {
+    if (e.target !== master && e.target.matches && e.target.matches(_SELECTABLE_CB)) sync();
+  });
+  // Bundle dropdowns are added asynchronously after probing; re-sync once they
+  // settle so the master reflects them too.
+  setTimeout(sync, 1500);
+}
+
 // ─── Main injection ───
 
 function injectButton() {
@@ -2139,7 +2241,12 @@ function injectButton() {
     // Collection mode events
     if (freshParsed.mode === "collection") {
       setupCollectionEvents(panel, freshParsed);
+    } else {
+      _setupSingleSelectAll(panel);
     }
+
+    // Drag across checkboxes to (un)check a range at once (both modes).
+    _enableDragSelect(panel);
 
     // Close button — slide out
     panel.querySelector("#funpairdl-close").addEventListener("click", () => {
