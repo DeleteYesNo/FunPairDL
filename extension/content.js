@@ -54,7 +54,18 @@ const AXIS_REGEX_ANY = /\.([a-zA-Z][a-zA-Z0-9]{1,30})\.funscript$/;
 
 function isNonVideoPath(url) {
   try {
-    const path = new URL(url).pathname.toLowerCase();
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase().replace("www.", "");
+    const path = u.pathname.toLowerCase();
+    // Twitter/X: only a /status/<id> tweet can embed a video. A bare profile
+    // link (x.com/SomeArtist) is just an author credit — counting it as a
+    // "video" makes its section look like a video section and wrongly trips
+    // collection mode, splitting a single post into per-heading folders.
+    if ((host === "x.com" || host === "twitter.com" ||
+         host.endsWith(".x.com") || host.endsWith(".twitter.com")) &&
+        !path.includes("/status/")) {
+      return true;
+    }
     return /^\/(members|users|channels?|model|pornstar|profile|account)\b/.test(path);
   } catch (e) { return false; }
 }
@@ -211,7 +222,20 @@ function extractLinksFromElement(containerEl, isOP) {
       const host = u.hostname.toLowerCase().replace("www.", "");
       const isKnown = VIDEO_DOMAINS.some((d) => host.includes(d));
       if (isKnown && !isNonVideoPath(href)) {
-        if (!videos.some((v) => v.url === href)) {
+        const metaFn = _linkMetaFilename(href);
+        if (_isScriptFilename(metaFn)) {
+          // Funscript hosted on a file-locker (pixeldrain/mega/...) — classify
+          // as a script with its real filename so it pairs with the video
+          // instead of becoming a stray "video" in its own group.
+          if (!scripts.some((s) => s.url === href)) {
+            const axis = detectAxis(metaFn);
+            scripts.push({
+              url: href, source: isOP ? "OP" : "comment",
+              filename: metaFn, axis, isMultiAxis: axis !== "main",
+              author: detectScriptAuthor(link),
+            });
+          }
+        } else if (!videos.some((v) => v.url === href)) {
           videos.push({
             url: href, priority: getVideoPriority(href, !isOP),
             source: isOP ? "OP" : "comment", label: getVideoLabel(href),
@@ -385,7 +409,20 @@ function parseOPSections(cookedEl) {
       const host = new URL(href).hostname.toLowerCase().replace("www.", "");
       if (VIDEO_DOMAINS.some((d) => host.includes(d)) && !isNonVideoPath(href)) {
         const sec = findSection(link);
-        if (sec && !sec.videos.some((v) => v.url === href)) {
+        if (!sec) return;
+        const metaFn = _linkMetaFilename(href);
+        if (_isScriptFilename(metaFn)) {
+          // A funscript hosted on a file-locker — count it as a script so it
+          // doesn't make its section look like a "video section" and wrongly
+          // trip collection mode.
+          if (!sec.scripts.some((s) => s.url === href)) {
+            const axis = detectAxis(metaFn);
+            sec.scripts.push({
+              url: href, source: "OP", filename: metaFn, axis,
+              isMultiAxis: axis !== "main", author: detectScriptAuthor(link),
+            });
+          }
+        } else if (!sec.videos.some((v) => v.url === href)) {
           sec.videos.push({
             url: href, priority: getVideoPriority(href, false),
             source: "OP", label: getVideoLabel(href), isBundle: isBundleUrl(href),
@@ -459,6 +496,99 @@ function _getPreloadedPosts() {
     console.warn("FunPairDL: Failed to parse preloaded posts:", e);
   }
   return [];
+}
+
+// Discourse embeds per-post link metadata (`link_counts`) in the preloaded
+// topic JSON, including each link's resolved title — e.g. a pixeldrain link's
+// title is "Script Sub 64_2026.funscript ~ pixeldrain". This is the only
+// reliable way to tell, at parse time (before any probe), that a funscript is
+// hosted on a file-locker (pixeldrain/mega/gofile) rather than uploaded as a
+// .funscript. Without it such a link looks identical to a video link and both
+// gets miscounted as a "video" (breaking section/collection detection) and
+// misclassified downstream.
+let LINK_FILENAME_MAP = null;
+let _METADATA_TOPIC_ID = null;  // topic id the current map was fetched for
+
+function _mapFromPosts(posts, map) {
+  for (const p of (posts || [])) {
+    for (const lc of (p.link_counts || [])) {
+      // title is "<filename> ~ <host>" for file hosts; strip the host part.
+      if (lc && lc.url && lc.title) {
+        const fn = lc.title.split(" ~ ")[0].trim();
+        if (fn) map[lc.url] = fn;
+      }
+    }
+  }
+  return map;
+}
+
+// SSR fallback: the `#data-preloaded` blob holds the topic's posts ONLY on a
+// direct full-page load. After SPA navigation it carries the previous page
+// (e.g. the category listing) instead, so this often comes back empty — the
+// authoritative source is ensureLinkMetadata()'s fetch.
+function _buildLinkFilenameMap() {
+  const map = {};
+  try {
+    const el = document.querySelector("#data-preloaded");
+    if (el && el.dataset.preloaded) {
+      const preloaded = JSON.parse(el.dataset.preloaded);
+      for (const [key, value] of Object.entries(preloaded)) {
+        if (!key.startsWith("topic_")) continue;
+        _mapFromPosts(JSON.parse(value).post_stream?.posts, map);
+        break;
+      }
+    }
+  } catch (e) {
+    console.warn("FunPairDL: link metadata parse failed:", e);
+  }
+  return map;
+}
+
+function _currentTopicId() {
+  const m = location.pathname.match(/\/t\/[^/]+\/(\d+)/);
+  return m ? m[1] : null;
+}
+
+// Fetch the topic JSON to get every link's resolved title (filename). Reliable
+// regardless of how the topic was reached (full load vs SPA). Cached per topic.
+async function ensureLinkMetadata() {
+  const tid = _currentTopicId();
+  if (!tid) return;
+  if (_METADATA_TOPIC_ID === tid && LINK_FILENAME_MAP) return;
+  try {
+    const resp = await fetch(`/t/${tid}.json`, { credentials: "include" });
+    if (!resp.ok) return;
+    const data = await resp.json();
+    LINK_FILENAME_MAP = _mapFromPosts(data.post_stream?.posts, {});
+    _METADATA_TOPIC_ID = tid;
+  } catch (e) {
+    console.warn("FunPairDL: topic metadata fetch failed:", e);
+  }
+}
+
+function _linkMetaFilename(url) {
+  if (LINK_FILENAME_MAP === null) LINK_FILENAME_MAP = _buildLinkFilenameMap();
+  return LINK_FILENAME_MAP[url] || "";
+}
+
+function _isScriptFilename(fn) {
+  return /\.funscript$/i.test((fn || "").trim());
+}
+
+// True when a section heading is a generic container label ("Downloads",
+// "Video link", "1080p", "Remake", …) rather than the work's real name —
+// such sections should borrow the topic title instead of naming a folder
+// after the heading. Leading/trailing decorative characters that posters add
+// (༺ ༻ ─ ✧ emoji …) are stripped first so "༺Downloads" still reads generic.
+function _isGenericSectionName(name) {
+  const sname = (name || "").trim()
+    .replace(/^[^\p{L}\p{N}]+/u, "").replace(/[^\p{L}\p{N}]+$/u, "")
+    .replace(/:+$/, "").replace(/\s*\(.*\)\s*$/, "").trim();
+  return (
+    /^(videos?|funscripts?|scripts?|downloads?|direct\s*downloads?|links?|files?|media|mega|gofile|pixeldrain|dropbox|google\s*drive|onedrive|mirror|aio|drives?|sources?|embeds?|embedded|streams?|streaming|host(?:ing|ed)?|cloud|storage|bundles?|packs?|collections?|all[\s-]*in[\s-]*one|free|paid|premium|previews?)\s*\d*\b/i.test(sname) ||
+    /^\d{3,4}p?$/i.test(sname) || /^[248]k$/i.test(sname) ||
+    /^(remake|remade|original|remaster(?:ed)?|updated?|re-?script(?:ed)?|v\d+|version\s*\d*|alt(?:ernate|ernative)?)\b/i.test(sname)
+  );
 }
 
 // ─── Per-post in-DOM pairing helpers (for auto-grouping) ───
@@ -543,6 +673,13 @@ function _pairWithinPost(cookedEl, videos, scripts) {
 function parseAllPosts() {
   const posts = document.querySelectorAll(".topic-post");
   if (posts.length === 0) return null;
+
+  // Prefer the metadata ensureLinkMetadata() fetched for THIS topic. Only fall
+  // back to the SSR blob when we don't have a fetched map for the current
+  // topic (e.g. parsed before the fetch resolved, or a direct full-page load).
+  if (_METADATA_TOPIC_ID !== _currentTopicId()) {
+    LINK_FILENAME_MAP = _buildLinkFilenameMap();
+  }
 
   const title = getTopicTitle();
   const opCooked = posts[0]?.querySelector(".cooked");
@@ -805,6 +942,7 @@ async function sendPairToServer(data) {
       video_urls: g.videoUrls || [],
       script_urls: g.scriptUrls || [],
       script_authors: g.scriptAuthors || {},
+      filenames: g.filenames || {},
       inherit_multi_axis: g.inheritMultiAxis !== false,
       display_name: (g.displayName || "").trim(),
     }));
@@ -813,6 +951,9 @@ async function sendPairToServer(data) {
     payload.script_urls = data.scriptUrls || [];
     if (data.scriptAuthors && Object.keys(data.scriptAuthors).length > 0) {
       payload.script_authors = data.scriptAuthors;
+    }
+    if (data.filenames && Object.keys(data.filenames).length > 0) {
+      payload.filenames = data.filenames;
     }
   }
   // In embedded mode, send data directly; in extension, wrap in "data" field
@@ -1484,6 +1625,10 @@ function setupProbing(panel, parsed) {
     probeUrl(v.url).then((info) => {
       if (!info) { sizeEl.textContent = "?"; return; }
       probeResults[probeKey] = info;
+      // A file-locker URL (pixeldrain /u/, mega /file/, ...) carries no type
+      // hint, so a funscript hosted there is initially treated as a "video".
+      // Remember the probed filename so send-time can re-route it to scripts.
+      if (info.filename) v.probedFilename = info.filename;
       updateVideoSize(probeKey, info);
       showProbeExtras(sizeEl, probeKey, info);
     });
@@ -1674,7 +1819,7 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
   // bucket first is to keep the group association after resolution.
   const buckets = {}; // groupName → { videoUrls, scriptUrls, scriptAuthorMap }
   function _bucket(g) {
-    if (!buckets[g]) buckets[g] = { videoUrls: [], scriptUrls: [], scriptAuthorMap: {} };
+    if (!buckets[g]) buckets[g] = { videoUrls: [], scriptUrls: [], scriptAuthorMap: {}, filenames: {} };
     return buckets[g];
   }
 
@@ -1688,11 +1833,21 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
     if (bundleCbs.length > 0) {
       bundleCbs.forEach((bcb) => {
         if (bcb.checked) {
-          const fn = (bcb.dataset.fileName || "").toLowerCase();
+          const realName = bcb.dataset.fileName || "";
+          const fn = realName.toLowerCase();
+          // Carry the real filename — bundle file URLs are random ids, so
+          // without this the backend can't name pairs or match scripts.
+          if (realName) b.filenames[bcb.dataset.fileUrl] = realName;
           if (fn.endsWith(".funscript")) b.scriptUrls.push(bcb.dataset.fileUrl);
           else b.videoUrls.push(bcb.dataset.fileUrl);
         }
       });
+    } else if ((video.probedFilename || "").toLowerCase().endsWith(".funscript")) {
+      // Probe revealed this "video" link is actually a funscript (common when
+      // the script is hosted on pixeldrain/mega rather than as a .funscript
+      // upload). Route it to scripts so it pairs with the real video instead
+      // of landing in a separate group as an orphaned "video".
+      b.scriptUrls.push(video.url);
     } else {
       b.videoUrls.push(video.url);
     }
@@ -1722,11 +1877,17 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
       const author = b.scriptAuthorMap[b.scriptUrls[i]];
       if (author) resolvedAuthors[resolvedS[i]] = author;
     }
+    // Re-key the real filenames onto the resolved URLs (the backend stores
+    // items by their resolved URL).
+    const resolvedFilenames = {};
+    resolvedV.forEach((u, i) => { if (b.filenames[b.videoUrls[i]]) resolvedFilenames[u] = b.filenames[b.videoUrls[i]]; });
+    resolvedS.forEach((u, i) => { if (b.filenames[b.scriptUrls[i]]) resolvedFilenames[u] = b.filenames[b.scriptUrls[i]]; });
     groups.push({
       name: gname,
       videoUrls: resolvedV,
       scriptUrls: resolvedS,
       scriptAuthors: resolvedAuthors,
+      filenames: resolvedFilenames,
       inheritMultiAxis: (parsed.groupState && parsed.groupState.inheritAxes[gname] !== false),
       displayName: (parsed.groupState && parsed.groupState.altNames && parsed.groupState.altNames[gname]) || "",
     });
@@ -1773,6 +1934,7 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
     const videoUrls = [];
     const scriptUrls = [];
     const scriptAuthorMap = {};
+    const filenameMap = {};
 
     // Collect checked videos in this section
     panel.querySelectorAll(`input[name="sv-${si}"]:checked`).forEach((cb) => {
@@ -1782,11 +1944,17 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
       if (bundleCbs.length > 0) {
         bundleCbs.forEach((bcb) => {
           if (bcb.checked) {
-            const fn = (bcb.dataset.fileName || "").toLowerCase();
+            const realName = bcb.dataset.fileName || "";
+            const fn = realName.toLowerCase();
+            if (realName) filenameMap[bcb.dataset.fileUrl] = realName;
             if (fn.endsWith(".funscript")) scriptUrls.push(bcb.dataset.fileUrl);
             else videoUrls.push(bcb.dataset.fileUrl);
           }
         });
+      } else if ((v.probedFilename || "").toLowerCase().endsWith(".funscript")) {
+        // Probe revealed this "video" link is actually a funscript — route it
+        // to scripts so it pairs instead of becoming an orphaned video.
+        scriptUrls.push(v.url);
       } else {
         videoUrls.push(v.url);
       }
@@ -1800,17 +1968,9 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
     });
 
     if (videoUrls.length > 0 || scriptUrls.length > 0) {
-      // Use topic title if section name is generic (e.g. "Video link", "Script", "Download")
-      // Strip trailing colon and parenthetical annotations before testing
-      const sname = section.name.trim().replace(/:+$/, "").replace(/\s*\(.*\)\s*$/, "").trim();
-      const generic =
-        // Common section header words (with plurals)
-        /^(videos?|scripts?|downloads?|direct\s*downloads?|links?|files?|media|mega|gofile|pixeldrain|dropbox|google\s*drive|onedrive|mirror|aio|drives?|sources?|embeds?|embedded|streams?|streaming|host(?:ing|ed)?|cloud|storage|bundles?|packs?|collections?|all[\s-]*in[\s-]*one|free|paid|premium|previews?)\s*\d*\b/i.test(sname) ||
-        // Resolution labels: "720p", "1080p", "4K", etc.
-        /^\d{3,4}p?$/i.test(sname) || /^[248]k$/i.test(sname) ||
-        // Version/variant labels: "Remake", "Original", "V2", "Updated", etc.
-        /^(remake|remade|original|remaster(?:ed)?|updated?|re-?script(?:ed)?|v\d+|version\s*\d*|alt(?:ernate|ernative)?)\b/i.test(sname);
-      const pairName = generic ? parsed.title : section.name;
+      // Generic section heading ("Video link", "Downloads", "1080p", …) →
+      // borrow the topic title; a real work name → keep it as the folder name.
+      const pairName = _isGenericSectionName(section.name) ? parsed.title : section.name;
 
       // Merge into existing pair with same name
       const existing = pairs.find((p) => p.name === pairName);
@@ -1818,8 +1978,9 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
         existing.videoUrls.push(...videoUrls);
         existing.scriptUrls.push(...scriptUrls);
         Object.assign(existing.scriptAuthorMap, scriptAuthorMap);
+        Object.assign(existing.filenameMap, filenameMap);
       } else {
-        pairs.push({ name: pairName, videoUrls, scriptUrls, scriptAuthorMap });
+        pairs.push({ name: pairName, videoUrls, scriptUrls, scriptAuthorMap, filenameMap });
       }
     }
   });
@@ -1846,7 +2007,7 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
         existing.scriptUrls.push(...cScriptUrls);
         Object.assign(existing.scriptAuthorMap, cScriptAuthorMap);
       } else {
-        pairs.push({ name: parsed.title, videoUrls: cVideoUrls, scriptUrls: cScriptUrls, scriptAuthorMap: cScriptAuthorMap });
+        pairs.push({ name: parsed.title, videoUrls: cVideoUrls, scriptUrls: cScriptUrls, scriptAuthorMap: cScriptAuthorMap, filenameMap: {} });
       }
     }
   }
@@ -1878,10 +2039,18 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
       }
     }
 
+    // Re-key real filenames onto resolved URLs (backend stores by resolved URL)
+    const resolvedFilenames = {};
+    if (p.filenameMap) {
+      resolvedV.forEach((u, j) => { if (p.filenameMap[p.videoUrls[j]]) resolvedFilenames[u] = p.filenameMap[p.videoUrls[j]]; });
+      resolvedS.forEach((u, j) => { if (p.filenameMap[p.scriptUrls[j]]) resolvedFilenames[u] = p.filenameMap[p.scriptUrls[j]]; });
+    }
+
     sendBtn.textContent = `Sending (${i + 1}/${pairs.length})...`;
     const result = await sendPairToServer({
       title: p.name, videoUrls: resolvedV, scriptUrls: resolvedS,
       preferredResolution, scriptAuthors: resolvedAuthors, autoRename,
+      filenames: resolvedFilenames,
     });
 
     if (result.success) sentCount++;
@@ -1911,6 +2080,9 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
 function injectButton() {
   if (document.getElementById("funpairdl-send-btn")) return;
 
+  // Warm the link metadata cache so it's ready by the time the user clicks.
+  ensureLinkMetadata();
+
   const parsed = parseAllPosts();
   if (!parsed) return;
 
@@ -1935,7 +2107,7 @@ function injectButton() {
     <span class="funpairdl-count">${countText}</span>
   `;
 
-  btn.addEventListener("click", () => {
+  btn.addEventListener("click", async () => {
     let panel = document.getElementById("funpairdl-panel");
     if (panel) {
       // Slide out and remove
@@ -1944,6 +2116,10 @@ function injectButton() {
       return;
     }
 
+    // Make sure link metadata is loaded before we parse — it decides whether a
+    // file-locker link is a video or a hosted funscript, which drives
+    // collection-vs-single mode and folder naming.
+    await ensureLinkMetadata();
     const freshParsed = parseAllPosts();
     panel = createPanel(freshParsed);
     document.body.appendChild(panel);

@@ -91,6 +91,7 @@ async def add_pair(req: AddPairRequest) -> dict:
         script_authors=req.script_authors,
         auto_rename=req.auto_rename,
         groups=groups_payload,
+        filenames=req.filenames,
     )
 
     logger.info("Pair added via API: %s (%d items)", pair.name, len(pair.items))

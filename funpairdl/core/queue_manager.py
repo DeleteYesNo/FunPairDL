@@ -221,6 +221,7 @@ class QueueManager:
         auto_rename: bool = True,
         output_dir_override: str = "",
         groups: list[dict] | None = None,
+        filenames: dict[str, str] | None = None,
     ) -> Pair:
         """Add a Pair to the queue.
 
@@ -245,6 +246,7 @@ class QueueManager:
                 "video_urls": video_urls or [],
                 "script_urls": script_urls or [],
                 "script_authors": script_authors or {},
+                "filenames": filenames or {},
                 "inherit_multi_axis": False,
             }]
 
@@ -287,6 +289,9 @@ class QueueManager:
             grp_videos = grp.get("video_urls") or []
             grp_scripts = grp.get("script_urls") or []
             grp_authors = grp.get("script_authors") or {}
+            # Real filenames the extension already knows (probed bundle files);
+            # prefer these over guessing a name from the URL's random file id.
+            grp_filenames = grp.get("filenames") or {}
 
             if grp_name != "Main":
                 pair.alt_group_config[grp_name] = {
@@ -306,7 +311,7 @@ class QueueManager:
                         group=grp_name,
                     )
                 else:
-                    filename = self._guess_filename(url, "video")
+                    filename = grp_filenames.get(url) or self._guess_filename(url, "video")
                     item = PairItem(
                         url=url,
                         filename=filename,
@@ -318,7 +323,7 @@ class QueueManager:
 
             for url in grp_scripts:
                 provider = detect_provider(url)
-                filename = self._guess_filename(url, "funscript")
+                filename = grp_filenames.get(url) or self._guess_filename(url, "funscript")
                 item = PairItem(
                     url=url,
                     filename=filename,
@@ -785,13 +790,22 @@ class QueueManager:
                         "MEGA session valid — account type: %s",
                         sid_info["type"],
                     )
-                else:
+                elif sid_info.get("auth_error"):
                     logger.warning(
                         "MEGA session invalid (%s) — falling back to anonymous. "
                         "Open mega.nz in embedded browser to refresh.",
                         sid_info["error"],
                     )
                     settings.mega_sid = ""  # Don't use expired sid
+                else:
+                    # Transient server hiccup (overload/throttle/network) —
+                    # the sid is probably fine, keep using it rather than
+                    # crippling the download with anonymous bandwidth limits.
+                    logger.warning(
+                        "MEGA sid validation inconclusive (%s) — keeping session "
+                        "and proceeding.",
+                        sid_info["error"],
+                    )
             else:
                 logger.warning("No MEGA session ID configured — downloading anonymously")
 
@@ -1075,7 +1089,12 @@ class QueueManager:
         # If items fail, re-resolve (CDN URLs may expire) and retry up to
         # MAX_ITEM_RETRIES times before giving up.
         MAX_ITEM_RETRIES = 2
-        mega_sem = asyncio.Semaphore(4)  # Limit concurrent MEGA downloads
+        # One MEGA file at a time. MEGA throttles per-connection, so total
+        # speed is bounded by total connections regardless of how they're
+        # split across files; a single file using all ~32 segments gets full
+        # bandwidth (~8 MB/s) without crossing the ~48-connection reset
+        # threshold that "files × segments" would hit if run in parallel.
+        mega_sem = asyncio.Semaphore(1)
 
         async def _mega_with_limit(item, out_dir):
             async with mega_sem:
