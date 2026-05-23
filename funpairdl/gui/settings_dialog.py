@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QPushButton,
     QSpinBox,
     QTabWidget,
@@ -47,6 +48,27 @@ class SettingsDialog(QDialog):
         btn_browse.clicked.connect(self._browse_dir)
         dir_layout.addWidget(btn_browse)
         form.addRow("Download directory:", dir_layout)
+
+        # Extra library paths (besides download dir) for re-download reconcile
+        self.library_paths_edit = QPlainTextEdit()
+        self.library_paths_edit.setPlaceholderText("(optional) one folder per line")
+        self.library_paths_edit.setPlainText("\n".join(self.settings.library_paths or []))
+        self.library_paths_edit.setFixedHeight(58)
+        self.library_paths_edit.setToolTip(
+            "Extra folders scanned (besides the download directory) to find a "
+            "work that already exists, when re-downloading."
+        )
+        form.addRow("Extra library paths:", self.library_paths_edit)
+
+        # Reconcile on re-download
+        self.reconcile_check = QCheckBox()
+        self.reconcile_check.setChecked(self.settings.reconcile_on_redownload)
+        self.reconcile_check.setToolTip(
+            "When re-downloading a work already in the library, merge new axes "
+            "into its folder and route changed scripts to an .alt variant "
+            "instead of creating a duplicate folder."
+        )
+        form.addRow("Reconcile on re-download:", self.reconcile_check)
 
         # Max segments
         self.segments_spin = QSpinBox()
@@ -199,6 +221,10 @@ class SettingsDialog(QDialog):
         # are preserved.
         s = self.settings
         s.download_dir = self.dir_edit.text()
+        s.library_paths = [
+            p.strip() for p in self.library_paths_edit.toPlainText().splitlines() if p.strip()
+        ]
+        s.reconcile_on_redownload = self.reconcile_check.isChecked()
         s.max_segments = self.segments_spin.value()
         s.max_concurrent_pairs = self.concurrent_pairs_spin.value()
         s.api_port = self.port_spin.value()
