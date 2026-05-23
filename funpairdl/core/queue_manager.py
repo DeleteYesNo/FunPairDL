@@ -83,13 +83,10 @@ class QueueManager:
         """Initialize download resources — runs in download thread."""
         from funpairdl.constants import BROWSER_USER_AGENT
 
-        # ssl=False disables certificate verification for this download-only
-        # session. Media CDNs (e.g. rule34video's boomio-cdn) routinely ship
-        # expired/misconfigured certs that would otherwise abort the download;
-        # the connection is still TLS-encrypted, we just don't reject on a bad
-        # cert — an acceptable trade-off for fetching public media, and the
-        # same lenient posture yt-dlp takes by default.
-        connector = aiohttp.TCPConnector(limit=50, limit_per_host=10, ssl=False)
+        # TLS verification stays ON here. SegmentDownloader relaxes it per-host
+        # only when a cert is actually rejected (e.g. a CDN's expired cert), so
+        # valid-cert hosts keep full verification.
+        connector = aiohttp.TCPConnector(limit=50, limit_per_host=10)
         self._session = aiohttp.ClientSession(
             connector=connector,
             headers={"User-Agent": BROWSER_USER_AGENT},

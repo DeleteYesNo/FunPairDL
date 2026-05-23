@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import ssl
 import threading
 import time
 from pathlib import Path
@@ -77,106 +78,120 @@ class SegmentDownloader:
                 logger.debug("Segment %d already complete", self.index)
                 return
 
-        actual_start = self.range_start + self.downloaded
-        req_headers = {**self.headers}
-        if self.use_range:
-            req_headers["Range"] = f"bytes={actual_start}-{self.range_end}"
+        async def _attempt(verify_tls: bool) -> None:
+            actual_start = self.range_start + self.downloaded
+            req_headers = {**self.headers}
+            if self.use_range:
+                req_headers["Range"] = f"bytes={actual_start}-{self.range_end}"
 
-        logger.debug(
-            "Segment %d: downloading bytes %d-%d",
-            self.index, actual_start, self.range_end,
-        )
+            logger.debug(
+                "Segment %d: downloading bytes %d-%d",
+                self.index, actual_start, self.range_end,
+            )
 
-        # Initialised before the try so the except/finally flush paths can
-        # reference them even when the connection itself fails (e.g. an SSL
-        # error) before we reach the streaming loop — otherwise we'd raise an
-        # UnboundLocalError that masks the real cause.
-        buf = bytearray()
-        file_path = self.temp_file
-        mode = "ab" if self.downloaded > 0 else "wb"
-        first_flush = True
+            # Initialised before the try so the except/flush paths can reference
+            # them even when the connection itself fails (e.g. a TLS error)
+            # before the streaming loop — otherwise we'd raise an
+            # UnboundLocalError that masks the real cause.
+            buf = bytearray()
+            file_path = self.temp_file
+            mode = "ab" if self.downloaded > 0 else "wb"
+            first_flush = True
 
-        try:
-            expected_statuses = (200, 206) if self.use_range else (200,)
-            async with session.get(
-                self.url, headers=req_headers,
-                timeout=aiohttp.ClientTimeout(total=None, sock_read=SEGMENT_SOCK_READ),
-            ) as resp:
-                if resp.status not in expected_statuses:
-                    # 4xx (except 429) are permanent — don't waste time retrying
-                    if 400 <= resp.status < 500 and resp.status != 429:
-                        raise RuntimeError(
-                            f"HTTP {resp.status} (permanent) for segment {self.index}"
+            try:
+                expected_statuses = (200, 206) if self.use_range else (200,)
+                async with session.get(
+                    self.url, headers=req_headers, ssl=verify_tls,
+                    timeout=aiohttp.ClientTimeout(total=None, sock_read=SEGMENT_SOCK_READ),
+                ) as resp:
+                    if resp.status not in expected_statuses:
+                        # 4xx (except 429) are permanent — don't retry
+                        if 400 <= resp.status < 500 and resp.status != 429:
+                            raise RuntimeError(
+                                f"HTTP {resp.status} (permanent) for segment {self.index}"
+                            )
+                        raise aiohttp.ClientResponseError(
+                            resp.request_info,
+                            resp.history,
+                            status=resp.status,
+                            message=f"Unexpected status {resp.status} for segment {self.index}",
                         )
-                    raise aiohttp.ClientResponseError(
-                        resp.request_info,
-                        resp.history,
-                        status=resp.status,
-                        message=f"Unexpected status {resp.status} for segment {self.index}",
-                    )
 
-                self.temp_file.parent.mkdir(parents=True, exist_ok=True)
+                    self.temp_file.parent.mkdir(parents=True, exist_ok=True)
 
-                # Buffer writes and flush to disk in a background thread
-                # to avoid blocking the Qt/async event loop.
-                def _flush(data: bytes, fpath, wmode: str):
-                    with _disk_write_sem:
-                        with open(fpath, wmode) as f:
-                            f.write(data)
+                    # Buffer writes and flush to disk in a background thread
+                    # to avoid blocking the Qt/async event loop.
+                    def _flush(data: bytes, fpath, wmode: str):
+                        with _disk_write_sem:
+                            with open(fpath, wmode) as f:
+                                f.write(data)
 
-                async for chunk in resp.content.iter_chunked(CHUNK_SIZE):
-                    if self._cancelled:
-                        logger.debug("Segment %d cancelled", self.index)
-                        break
+                    async for chunk in resp.content.iter_chunked(CHUNK_SIZE):
+                        if self._cancelled:
+                            logger.debug("Segment %d cancelled", self.index)
+                            break
 
-                    # Wait if paused
-                    await self._pause_event.wait()
+                        # Wait if paused
+                        await self._pause_event.wait()
 
-                    if self._cancelled:
-                        break
+                        if self._cancelled:
+                            break
 
-                    buf.extend(chunk)
-                    self.downloaded += len(chunk)
+                        buf.extend(chunk)
+                        self.downloaded += len(chunk)
 
-                    if len(buf) >= _FLUSH_SIZE:
+                        if len(buf) >= _FLUSH_SIZE:
+                            wm = mode if first_flush else "ab"
+                            await asyncio.to_thread(_flush, bytes(buf), file_path, wm)
+                            buf.clear()
+                            first_flush = False
+
+                        if self.on_progress:
+                            now = time.monotonic()
+                            if now - self._last_progress_time >= 0.15:
+                                self._last_progress_time = now
+                                self.on_progress(self.index, self.downloaded)
+
+                    # Final flush
+                    if buf and not self._cancelled:
                         wm = mode if first_flush else "ab"
                         await asyncio.to_thread(_flush, bytes(buf), file_path, wm)
-                        buf.clear()
-                        first_flush = False
 
-                    if self.on_progress:
-                        now = time.monotonic()
-                        if now - self._last_progress_time >= 0.15:
-                            self._last_progress_time = now
-                            self.on_progress(self.index, self.downloaded)
+                    # Always report final progress so download_task sees 100%
+                    if self.on_progress and not self._cancelled:
+                        self.on_progress(self.index, self.downloaded)
 
-                # Final flush
-                if buf and not self._cancelled:
-                    wm = mode if first_flush else "ab"
-                    await asyncio.to_thread(_flush, bytes(buf), file_path, wm)
+            except asyncio.CancelledError:
+                # Best-effort flush so retries resume from where we left off
+                if buf:
+                    try:
+                        wm = mode if first_flush else "ab"
+                        await asyncio.to_thread(_flush, bytes(buf), file_path, wm)
+                    except Exception:
+                        pass
+                logger.debug("Segment %d task cancelled", self.index)
+                raise
+            except Exception as e:
+                # Best-effort flush so retries resume from where we left off
+                # instead of losing up to 4 MB of buffered data per segment.
+                if buf:
+                    try:
+                        wm = mode if first_flush else "ab"
+                        await asyncio.to_thread(_flush, bytes(buf), file_path, wm)
+                    except Exception:
+                        pass
+                logger.error("Segment %d error: %s", self.index, e)
+                raise
 
-                # Always report final progress so download_task sees 100%
-                if self.on_progress and not self._cancelled:
-                    self.on_progress(self.index, self.downloaded)
-
-        except asyncio.CancelledError:
-            # Best-effort flush so retries resume from where we left off
-            if buf:
-                try:
-                    wm = mode if first_flush else "ab"
-                    await asyncio.to_thread(_flush, bytes(buf), file_path, wm)
-                except Exception:
-                    pass
-            logger.debug("Segment %d task cancelled", self.index)
-            raise
-        except Exception as e:
-            # Best-effort flush so retries resume from where we left off
-            # instead of losing up to 2 MB of buffered data per segment.
-            if buf:
-                try:
-                    wm = mode if first_flush else "ab"
-                    await asyncio.to_thread(_flush, bytes(buf), file_path, wm)
-                except Exception:
-                    pass
-            logger.error("Segment %d error: %s", self.index, e)
-            raise
+        # Verify TLS certs by default; only if a host presents a broken cert
+        # (expired/misconfigured) do we retry THAT host without verification.
+        # Hosts with valid certs (pixeldrain, mega, …) keep full verification.
+        try:
+            await _attempt(True)
+        except (aiohttp.ClientSSLError, ssl.SSLError) as e:
+            logger.warning(
+                "Segment %d: TLS certificate rejected (%s) — retrying this host "
+                "without certificate verification",
+                self.index, e,
+            )
+            await _attempt(False)
