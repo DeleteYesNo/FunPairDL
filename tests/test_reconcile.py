@@ -105,6 +105,43 @@ def test_extra_library_path_is_scanned(tmp_path, monkeypatch):
     assert (work / "Work.surge.funscript").read_text() == "SURGE"
 
 
+def test_realistic_bracketed_name_multiaxis(tmp_path, monkeypatch):
+    # Real-world shapes: bracketed/punctuated name + multi-axis suffixes.
+    # Same post re-downloaded (same name): a new axis merges, a changed axis
+    # becomes an .alt variant, identical axes are dropped.
+    _stub_settings(monkeypatch, reconcile_on_redownload=True)
+    qm = QueueManager(download_dir=tmp_path)
+    base = "(ZZ-TEST-0001)(Casey Sample) Demo Load"
+    work = _existing_work(
+        tmp_path, base, b"V",
+        {f"{base}.funscript": "L0",
+         f"{base}.pitch.funscript": "PITCH",
+         f"{base}.roll.funscript": "ROLL",
+         f"{base}.surge.funscript": "SURGE"},
+    )
+    temp = tmp_path / "redl"
+    temp.mkdir()
+    (temp / f"{base}.mp4").write_bytes(b"V")
+    items = [PairItem(url="u/v", filename=f"{base}.mp4", file_type=FileType.VIDEO)]
+    redl = {
+        f"{base}.funscript": "L0",            # identical -> drop
+        f"{base}.pitch.funscript": "PITCH-2",  # changed -> .alt
+        f"{base}.twist.funscript": "TWIST",    # new axis -> merge into folder
+    }
+    for fn, content in redl.items():
+        (temp / fn).write_text(content)
+        items.append(PairItem(url="u/" + fn, filename=fn, file_type=FileType.FUNSCRIPT))
+    pair = Pair(name=base, items=items)
+    pair.output_dir = str(temp)
+
+    assert qm._reconcile_with_library(pair) is True
+    assert (work / f"{base}.twist.funscript").read_text() == "TWIST"   # new axis merged
+    assert (work / f"{base}.pitch.funscript").read_text() == "PITCH"   # original kept
+    alt = work / f"{base}.alt"
+    assert (alt / f"{base}.alt.pitch.funscript").read_text() == "PITCH-2"  # changed -> variant
+    assert (alt / f"{base}.alt.mp4").exists()
+
+
 def test_toggle_off_skips_reconcile(tmp_path, monkeypatch):
     _stub_settings(monkeypatch, reconcile_on_redownload=False)
     qm = QueueManager(download_dir=tmp_path)
