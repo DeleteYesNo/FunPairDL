@@ -1384,8 +1384,6 @@ class QueueManager:
         scripts = [i for i in pair.items if i.file_type == FileType.FUNSCRIPT]
         others = [i for i in pair.items if i.file_type == FileType.OTHER]
 
-        import re
-
         def _strip_axis(name: str) -> str:
             base = name
             if base.lower().endswith(".funscript"):
@@ -1395,24 +1393,10 @@ class QueueManager:
                 base = parts[0]
             return base
 
-        # Comparison key for matching a script to its video. Drops the tokens
-        # that routinely differ between a video and its script — resolution
-        # (`1080p`/`2160p`/`4k`), fps (`60fps`), watermark flags (`no-wm`) — and
-        # collapses to alphanumerics. With strip_prefix it also removes leading
-        # bracketed tags scripts often carry but the video doesn't, e.g.
-        # "(SHADOWHEART)…", "(Left)…", "[ISOBEL]…".
-        def _key(name: str, strip_prefix: bool = False) -> str:
-            s = name.lower()
-            if strip_prefix:
-                s = re.sub(r"^(\s*[\(\[（][^\)\]）]*[\)\]）]\s*)+", "", s)
-            # Drop resolution/fps/watermark tokens. Use alnum lookarounds rather
-            # than \b so a token glued by an underscore ("nyl2_2160p") is still
-            # recognised — \b sees "_" as a word char and would miss it.
-            s = re.sub(
-                r"(?<![a-z0-9])(?:\d{3,4}p|[248]k|\d{1,3}fps|no[-_ ]?wm|wm)(?![a-z0-9])",
-                " ", s,
-            )
-            return re.sub(r"[^a-z0-9]+", "", s)
+        # Comparison key for matching a script to its video — drops tokens that
+        # differ between a video and its script (resolution/fps/watermark) and
+        # optionally a leading bracketed prefix. Shared with library reconcile.
+        _key = self._match_key
 
         # (video, real stem for naming, match key) — longest key first so the
         # most specific video wins a containment match.
@@ -1568,6 +1552,197 @@ class QueueManager:
             for it in items:
                 it.group = alt_name
 
+    _VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".wmv", ".ts", ".flv"}
+
+    @staticmethod
+    def _match_key(name: str, strip_prefix: bool = False) -> str:
+        """Normalized key for matching a work by name: drop resolution/fps/wm
+        tokens (and optionally a leading bracketed prefix), collapse to
+        alphanumerics. Shared by bundle auto-split and library reconcile."""
+        import re
+        s = name.lower()
+        if strip_prefix:
+            s = re.sub(r"^(\s*[\(\[（][^\)\]）]*[\)\]）]\s*)+", "", s)
+        s = re.sub(
+            r"(?<![a-z0-9])(?:\d{3,4}p|[248]k|\d{1,3}fps|no[-_ ]?wm|wm)(?![a-z0-9])",
+            " ", s,
+        )
+        return re.sub(r"[^a-z0-9]+", "", s)
+
+    @staticmethod
+    def _file_sha256(path: Path) -> str:
+        import hashlib
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    def _library_dirs(self) -> list[Path]:
+        """Folders to scan for an existing copy of a work: download_dir plus
+        any user-configured library_paths (deduped, existing only)."""
+        from funpairdl.persistence.settings import Settings
+        s = Settings.load()
+        candidates = [self.download_dir] + [Path(p) for p in (s.library_paths or [])]
+        seen, out = set(), []
+        for p in candidates:
+            try:
+                rp = p.resolve()
+            except OSError:
+                rp = p
+            if rp in seen or not p.is_dir():
+                continue
+            seen.add(rp)
+            out.append(p)
+        return out
+
+    def _next_alt_slot(self, dest: Path) -> str:
+        """Next free '.alt'/'.altN' subfolder suffix inside dest."""
+        import re
+        used = []
+        for sub in dest.iterdir():
+            if sub.is_dir():
+                m = re.search(r"\.alt(\d*)$", sub.name, re.IGNORECASE)
+                if m:
+                    used.append(int(m.group(1)) if m.group(1) else 0)
+        return self._alt_slot_suffix(max(used) + 1 if used else 0)
+
+    @staticmethod
+    def _link_or_copy(src: Path, dst: Path) -> None:
+        """Hardlink src->dst; fall back to a copy across volumes."""
+        import os
+        import shutil
+        try:
+            os.link(src, dst)
+        except OSError:
+            shutil.copy2(src, dst)
+
+    def _reconcile_with_library(self, pair: Pair) -> bool:
+        """If this freshly-downloaded work already exists in the library (same
+        name AND same video), merge into the existing folder instead of leaving
+        a duplicate: new axes go into the folder; scripts whose content changed
+        go into a new .alt variant; identical files are dropped. Returns True
+        when the pair was fully absorbed (caller should skip normal organize).
+        """
+        from funpairdl.persistence.settings import Settings
+        settings = Settings.load()
+        if not getattr(settings, "reconcile_on_redownload", True):
+            return False
+
+        videos = [i for i in pair.items if i.file_type == FileType.VIDEO]
+        scripts = [i for i in pair.items if i.file_type == FileType.FUNSCRIPT]
+        if len(videos) != 1 or not scripts:
+            return False  # only the standard single-video work is reconciled
+        out_dir = Path(pair.output_dir)
+        src_video = out_dir / videos[0].filename
+        if not src_video.exists():
+            return False
+
+        vkey = self._match_key(Path(videos[0].filename).stem)
+        if len(vkey) < 4:
+            return False
+
+        # Locate an existing same-named work folder (exact normalized key),
+        # excluding this pair's own temp folder.
+        own = out_dir.resolve()
+        dest = dest_video = None
+        for lib in self._library_dirs():
+            try:
+                entries = list(lib.iterdir())
+            except OSError:
+                continue
+            for d in entries:
+                if not d.is_dir() or d.resolve() == own:
+                    continue
+                if self._match_key(d.name) != vkey:
+                    continue
+                dv = next((d / f.name for f in d.iterdir()
+                           if f.is_file() and f.suffix.lower() in self._VIDEO_EXTS), None)
+                if dv is not None:
+                    dest, dest_video = d, dv
+                    break
+            if dest:
+                break
+        if dest is None:
+            return False
+
+        # Same-media check: size first (cheap), then hash only on a size tie.
+        try:
+            if src_video.stat().st_size != dest_video.stat().st_size:
+                return False
+            if self._file_sha256(src_video) != self._file_sha256(dest_video):
+                return False
+        except OSError:
+            return False
+
+        dest_base = dest_video.stem  # files are named <base>[.axis].funscript
+
+        # Map existing Main-level axes in dest.
+        existing_axis: dict[str, Path] = {}
+        for f in dest.iterdir():
+            if f.is_file() and f.name.lower().endswith(".funscript"):
+                ax, _ = self._parse_axis(f.name)
+                existing_axis.setdefault(ax, f)
+
+        new_axis, changed = [], []
+        for s in scripts:
+            sp = out_dir / s.filename
+            if not sp.exists():
+                continue
+            ax, suffix = self._parse_axis(s.filename)
+            if ax not in existing_axis:
+                new_axis.append((sp, suffix))
+            else:
+                try:
+                    identical = self._file_sha256(sp) == self._file_sha256(existing_axis[ax])
+                except OSError:
+                    identical = False
+                if identical:
+                    sp.unlink(missing_ok=True)
+                else:
+                    changed.append((sp, suffix))
+
+        def _move(sp: Path, target: Path) -> None:
+            import shutil
+            if target.exists():
+                sp.unlink(missing_ok=True)
+                return
+            try:
+                sp.rename(target)
+            except OSError:
+                shutil.move(str(sp), str(target))
+
+        # 1) new axes -> straight into the existing folder
+        for sp, suffix in new_axis:
+            name = dest_base + (f".{suffix}" if suffix else "") + ".funscript"
+            _move(sp, dest / name)
+
+        # 2) changed scripts -> one new .alt variant (video hardlinked in)
+        if changed:
+            slot = self._next_alt_slot(dest)
+            alt_dir = dest / f"{dest_base}.{slot}"
+            alt_dir.mkdir(parents=True, exist_ok=True)
+            alt_video = alt_dir / f"{dest_base}.{slot}.mp4"
+            if not alt_video.exists():
+                self._link_or_copy(dest_video, alt_video)
+            for sp, suffix in changed:
+                name = f"{dest_base}.{slot}" + (f".{suffix}" if suffix else "") + ".funscript"
+                _move(sp, alt_dir / name)
+
+        # 3) drop the duplicate downloaded video and clean up the temp folder
+        src_video.unlink(missing_ok=True)
+        try:
+            if out_dir.is_dir() and not any(out_dir.iterdir()):
+                out_dir.rmdir()
+        except OSError:
+            pass
+
+        logger.info(
+            "Reconciled '%s' into existing folder '%s' (%d new axes, %d variant scripts)",
+            pair.name, dest.name, len(new_axis), len(changed),
+        )
+        return True
+
     def _organize_output(self, pair: Pair) -> None:
         """Rename files to share the same base name and place each Alt
         group into its own erodeck-compatible subfolder.
@@ -1587,6 +1762,20 @@ class QueueManager:
         import os
         from collections import OrderedDict
         from datetime import date
+
+        # If this work already lives in the library, merge into it (new axes
+        # into the folder, changed scripts as an .alt variant) rather than
+        # leaving a duplicate folder. Falls through to normal organize on any
+        # failure or when there's no existing copy.
+        try:
+            if self._reconcile_with_library(pair):
+                pair.organized = True
+                return
+        except Exception as e:
+            logger.warning(
+                "Reconcile failed for '%s' — falling back to normal organize: %s",
+                pair.name, e,
+            )
 
         output_dir = Path(pair.output_dir)
         base_name = sanitize_filename(self._clean_title(pair.name))

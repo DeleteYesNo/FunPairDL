@@ -103,6 +103,13 @@ class Settings:
     # Skip the grouping preview dialog when every group is high-confidence
     pixeldrain_skip_preview_when_confident: bool = False
 
+    # Library reconcile: when re-downloading a work that already exists in the
+    # library, merge new axes into its folder and route changed scripts to an
+    # .alt variant instead of creating a duplicate folder. Scans download_dir
+    # plus any extra library_paths.
+    reconcile_on_redownload: bool = True
+    library_paths: list[str] = field(default_factory=list)
+
     @classmethod
     def load(cls, path: Path = CONFIG_FILE) -> Settings:
         global _cache, _cache_path, _cache_time
