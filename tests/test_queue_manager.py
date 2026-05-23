@@ -114,6 +114,26 @@ class TestBundleFilenames:
         vids = [i for i in pair.items if i.file_type == FileType.VIDEO]
         assert vids[0].filename == "Real Name.mp4"
 
+    def test_provided_filename_cannot_escape_folder(self):
+        # A web-supplied name is used directly as the on-disk path, so a
+        # traversal attempt must be sanitized away (no separators / no `..`
+        # that resolves outside the download dir).
+        qm = QueueManager()
+        evil = r"..\..\..\Users\Public\Startup\evil.lnk"
+        pair = qm.add_pair(
+            name="X",
+            groups=[{
+                "name": "Main",
+                "video_urls": ["https://pixeldrain.com/u/abc"],
+                "filenames": {"https://pixeldrain.com/u/abc": evil},
+            }],
+        )
+        fn = pair.items[0].filename
+        assert "/" not in fn and "\\" not in fn
+        # the sanitized name must stay inside the output dir
+        resolved = (Path(pair.output_dir) / fn).resolve()
+        assert Path(pair.output_dir).resolve() in resolved.parents
+
 
 class TestAddPairAuthors:
     def test_add_pair_with_script_authors(self):

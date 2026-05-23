@@ -314,7 +314,11 @@ class QueueManager:
                         group=grp_name,
                     )
                 else:
-                    filename = grp_filenames.get(url) or self._guess_filename(url, "video")
+                    provided = grp_filenames.get(url)
+                    # Sanitize: a provided name comes from web metadata and is
+                    # used directly as the on-disk path, so an unsanitized
+                    # "..\\..\\x" would escape the download folder.
+                    filename = sanitize_filename(provided) if provided else self._guess_filename(url, "video")
                     item = PairItem(
                         url=url,
                         filename=filename,
@@ -326,7 +330,8 @@ class QueueManager:
 
             for url in grp_scripts:
                 provider = detect_provider(url)
-                filename = grp_filenames.get(url) or self._guess_filename(url, "funscript")
+                provided = grp_filenames.get(url)
+                filename = sanitize_filename(provided) if provided else self._guess_filename(url, "funscript")
                 item = PairItem(
                     url=url,
                     filename=filename,
