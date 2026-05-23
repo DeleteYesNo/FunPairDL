@@ -71,6 +71,39 @@ class TestAutoSplitBundlePair:
             assert p.name == Path(vids[0].filename).stem
 
 
+    def test_matches_across_prefix_and_resolution(self):
+        # Real bundles give scripts a "(CHARACTER)" prefix and/or a different
+        # resolution tag than the video. Matching must still pair them with the
+        # right work — the GreenTea bug orphaned the video and dumped the script
+        # onto the first pair as a .alt because it required an exact prefix.
+        items = [
+            # Decoy with the LONGEST name — unmatched scripts get dumped on the
+            # first (longest) pair, so if matching were broken the selune script
+            # would land here instead of on its real video. It must not.
+            _vi("a-very-long-unrelated-decoy-scene-title-here_2160p.mp4", FileType.VIDEO),
+            _vi("a-very-long-unrelated-decoy-scene-title-here_2160p.funscript", FileType.FUNSCRIPT),
+            _vi("blessings-of-selune-nyl2_2160p.mp4", FileType.VIDEO),
+            _vi("DraeNelf_4Some.mp4", FileType.VIDEO),
+            _vi("(SHADOWHEART)blessings-of-selune-nyl2_1080p.funscript", FileType.FUNSCRIPT),
+            _vi("(Left)DraeNelf_4Some.funscript", FileType.FUNSCRIPT),
+        ]
+        result = QueueManager()._auto_split_bundle_pair(Pair(name="Vault", items=items))
+        assert result is not None and len(result) == 3
+        by = {p.name: p for p in result}
+        # the selune script matched its video, not the longest decoy pair
+        decoy = by["a-very-long-unrelated-decoy-scene-title-here_2160p"]
+        assert all("selune" not in i.filename.lower() for i in decoy.items)
+        bless = by["blessings-of-selune-nyl2_2160p"]
+        drae = by["DraeNelf_4Some"]
+        assert any(i.file_type == FileType.FUNSCRIPT and "selune" in i.filename.lower()
+                   for i in bless.items)
+        assert any(i.file_type == FileType.FUNSCRIPT and "draenelf" in i.filename.lower()
+                   for i in drae.items)
+        for p in result:  # exactly 1V + 1S each, no orphan, no pileup
+            assert sum(1 for i in p.items if i.file_type == FileType.VIDEO) == 1
+            assert sum(1 for i in p.items if i.file_type == FileType.FUNSCRIPT) == 1
+
+
 class TestBundleFilenames:
     """A pre-expanded bundle sends file-locker URLs whose path is a random id;
     the extension supplies the real names via `filenames` so the backend names

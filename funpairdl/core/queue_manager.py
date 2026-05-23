@@ -1384,33 +1384,65 @@ class QueueManager:
         scripts = [i for i in pair.items if i.file_type == FileType.FUNSCRIPT]
         others = [i for i in pair.items if i.file_type == FileType.OTHER]
 
-        # Build video stems sorted by length (longest first for greedy matching)
-        video_stems: list[tuple[str, PairItem]] = []
-        for v in videos:
-            stem = Path(v.filename).stem
-            video_stems.append((stem, v))
-        video_stems.sort(key=lambda x: len(x[0]), reverse=True)
+        import re
 
-        # Match scripts to videos by stem prefix
-        matched: dict[str, list[PairItem]] = {stem: [] for stem, _ in video_stems}
+        def _strip_axis(name: str) -> str:
+            base = name
+            if base.lower().endswith(".funscript"):
+                base = base[: -len(".funscript")]
+            parts = base.rsplit(".", 1)
+            if len(parts) == 2 and parts[1].lower() in self._ERODECK_AXIS_MAP:
+                base = parts[0]
+            return base
+
+        # Comparison key for matching a script to its video. Drops the tokens
+        # that routinely differ between a video and its script — resolution
+        # (`1080p`/`2160p`/`4k`), fps (`60fps`), watermark flags (`no-wm`) — and
+        # collapses to alphanumerics. With strip_prefix it also removes leading
+        # bracketed tags scripts often carry but the video doesn't, e.g.
+        # "(SHADOWHEART)…", "(Left)…", "[ISOBEL]…".
+        def _key(name: str, strip_prefix: bool = False) -> str:
+            s = name.lower()
+            if strip_prefix:
+                s = re.sub(r"^(\s*[\(\[（][^\)\]）]*[\)\]）]\s*)+", "", s)
+            # Drop resolution/fps/watermark tokens. Use alnum lookarounds rather
+            # than \b so a token glued by an underscore ("nyl2_2160p") is still
+            # recognised — \b sees "_" as a word char and would miss it.
+            s = re.sub(
+                r"(?<![a-z0-9])(?:\d{3,4}p|[248]k|\d{1,3}fps|no[-_ ]?wm|wm)(?![a-z0-9])",
+                " ", s,
+            )
+            return re.sub(r"[^a-z0-9]+", "", s)
+
+        # (video, real stem for naming, match key) — longest key first so the
+        # most specific video wins a containment match.
+        video_info: list[tuple[PairItem, str, str]] = []
+        for v in videos:
+            real = Path(v.filename).stem
+            video_info.append((v, real, _key(real)))
+        video_info.sort(key=lambda x: len(x[2]), reverse=True)
+
+        def _find_video(sk: str):
+            if len(sk) < 4:
+                return None
+            for v, _, vk in video_info:        # exact match wins outright
+                if vk and vk == sk:
+                    return v
+            for v, _, vk in video_info:        # else longest containment
+                if vk and (vk in sk or sk in vk):
+                    return v
+            return None
+
+        matched: dict[int, list[PairItem]] = {id(v): [] for v, _, _ in video_info}
         unmatched_scripts: list[PairItem] = []
 
         for s in scripts:
-            script_base = s.filename
-            if script_base.lower().endswith(".funscript"):
-                script_base = script_base[: -len(".funscript")]
-            # Strip known axis suffix (e.g., ".pitch", ".roll")
-            parts = script_base.rsplit(".", 1)
-            if len(parts) == 2 and parts[1].lower() in self._ERODECK_AXIS_MAP:
-                script_base = parts[0]
-
-            best_stem = None
-            for stem, _ in video_stems:
-                if script_base == stem or script_base.startswith(stem):
-                    best_stem = stem
-                    break  # Already sorted longest-first, first match is best
-            if best_stem:
-                matched[best_stem].append(s)
+            base = _strip_axis(s.filename)
+            v = _find_video(_key(base))
+            if v is None:
+                v = _find_video(_key(base, strip_prefix=True))
+            if v is not None:
+                matched[id(v)].append(s)
             else:
                 unmatched_scripts.append(s)
 
@@ -1418,11 +1450,11 @@ class QueueManager:
         # whatever group label items carried from the bundle source is no
         # longer meaningful; reset to Main so organize treats them flatly.
         new_pairs: list[Pair] = []
-        for stem, video_item in video_stems:
-            name = sanitize_filename(self._clean_title(stem))
+        for video_item, real_stem, _ in video_info:
+            name = sanitize_filename(self._clean_title(real_stem))
             new_pair = Pair(name=name, preferred_resolution=pair.preferred_resolution)
             new_pair.output_dir = str(self.download_dir / name)
-            new_pair.items = [video_item] + matched.get(stem, [])
+            new_pair.items = [video_item] + matched[id(video_item)]
             for it in new_pair.items:
                 it.group = "Main"
             new_pairs.append(new_pair)
