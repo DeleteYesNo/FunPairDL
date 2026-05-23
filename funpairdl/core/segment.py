@@ -87,6 +87,15 @@ class SegmentDownloader:
             self.index, actual_start, self.range_end,
         )
 
+        # Initialised before the try so the except/finally flush paths can
+        # reference them even when the connection itself fails (e.g. an SSL
+        # error) before we reach the streaming loop — otherwise we'd raise an
+        # UnboundLocalError that masks the real cause.
+        buf = bytearray()
+        file_path = self.temp_file
+        mode = "ab" if self.downloaded > 0 else "wb"
+        first_flush = True
+
         try:
             expected_statuses = (200, 206) if self.use_range else (200,)
             async with session.get(
@@ -107,14 +116,9 @@ class SegmentDownloader:
                     )
 
                 self.temp_file.parent.mkdir(parents=True, exist_ok=True)
-                mode = "ab" if self.downloaded > 0 else "wb"
 
                 # Buffer writes and flush to disk in a background thread
                 # to avoid blocking the Qt/async event loop.
-                buf = bytearray()
-                file_path = self.temp_file
-                first_flush = True
-
                 def _flush(data: bytes, fpath, wmode: str):
                     with _disk_write_sem:
                         with open(fpath, wmode) as f:
