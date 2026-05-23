@@ -1,4 +1,6 @@
 """Tests for QueueManager.add_pair with script_authors."""
+from pathlib import Path
+
 from funpairdl.core.pair import FileType, Pair, PairItem
 from funpairdl.core.queue_manager import QueueManager
 
@@ -40,6 +42,77 @@ class TestAutoSplitBundlePair:
             _vi("A.pitch.funscript", FileType.FUNSCRIPT),
         ]
         assert QueueManager()._auto_split_bundle_pair(Pair(name="A", items=items)) is None
+
+    def test_real_names_pair_one_to_one(self):
+        # Regression for the RobinMock bundle bug: a list of N works, each a
+        # video + its same-named script. With real filenames every script must
+        # attach to ITS OWN video. The bug (items carried only URL-code names,
+        # so no stem matched) dumped all scripts onto the first pair as
+        # .alt/.alt1/... variants and named pairs after random file ids.
+        works = [
+            "Robin Mock - Wild demo clip one",
+            "Robin Mock - Second demo clip title",
+            "Robin Mock - Third demo clip keeps going",
+        ]
+        items = []
+        for w in works:
+            items.append(_vi(w + ".mp4", FileType.VIDEO))
+            items.append(_vi(w + ".funscript", FileType.FUNSCRIPT))
+        result = QueueManager()._auto_split_bundle_pair(Pair(name="Collection", items=items))
+        assert result is not None
+        assert len(result) == 3
+        for p in result:
+            vids = [i for i in p.items if i.file_type == FileType.VIDEO]
+            scrs = [i for i in p.items if i.file_type == FileType.FUNSCRIPT]
+            assert len(vids) == 1
+            assert len(scrs) == 1                       # no alt pile-up
+            # script paired with the matching work, pair named by the real stem
+            assert Path(vids[0].filename).stem == Path(scrs[0].filename).stem
+            assert p.name == Path(vids[0].filename).stem
+
+
+class TestBundleFilenames:
+    """A pre-expanded bundle sends file-locker URLs whose path is a random id;
+    the extension supplies the real names via `filenames` so the backend names
+    items correctly instead of guessing the id."""
+
+    def test_grouped_uses_provided_filenames(self):
+        qm = QueueManager()
+        pair = qm.add_pair(
+            name="Collection",
+            groups=[{
+                "name": "Main",
+                "video_urls": ["https://pixeldrain.com/u/MkId0101"],
+                "script_urls": ["https://pixeldrain.com/u/MkId0102"],
+                "filenames": {
+                    "https://pixeldrain.com/u/MkId0101": "Robin Mock - Wild.mp4",
+                    "https://pixeldrain.com/u/MkId0102": "Robin Mock - Wild.funscript",
+                },
+            }],
+        )
+        vids = [i for i in pair.items if i.file_type == FileType.VIDEO]
+        scrs = [i for i in pair.items if i.file_type == FileType.FUNSCRIPT]
+        assert vids[0].filename == "Robin Mock - Wild.mp4"
+        assert scrs[0].filename == "Robin Mock - Wild.funscript"
+
+    def test_falls_back_to_url_guess_without_filenames(self):
+        qm = QueueManager()
+        pair = qm.add_pair(
+            name="X",
+            groups=[{"name": "Main", "video_urls": ["https://pixeldrain.com/u/MkId0101"]}],
+        )
+        vids = [i for i in pair.items if i.file_type == FileType.VIDEO]
+        assert vids[0].filename == "MkId0101"  # _guess_filename → URL tail
+
+    def test_legacy_flat_list_uses_filenames(self):
+        qm = QueueManager()
+        pair = qm.add_pair(
+            name="X",
+            video_urls=["https://pixeldrain.com/u/abc"],
+            filenames={"https://pixeldrain.com/u/abc": "Real Name.mp4"},
+        )
+        vids = [i for i in pair.items if i.file_type == FileType.VIDEO]
+        assert vids[0].filename == "Real Name.mp4"
 
 
 class TestAddPairAuthors:

@@ -47,7 +47,14 @@ _MEGA_ERROR_NAMES = {
 
 _MEGA_MAX_RETRIES = 6
 _MEGA_RETRY_BASE_DELAY = 2.0  # seconds
-_MEGA_SEGMENT_MAX_RETRIES = 3  # retries per download segment
+_MEGA_SEGMENT_MAX_RETRIES = 5  # retries per download segment (MEGA drops conns)
+
+# MEGA throttles each connection to ~0.25 MB/s but scales linearly with
+# parallel connections to one download URL (measured: 32 conns ≈ 8.6 MB/s,
+# 0 errors; resets only appear past ~48). So allow plenty of segments per
+# file — the connection budget is bounded instead by running one MEGA file
+# at a time (see the semaphore in queue_manager).
+_MEGA_MAX_SEGMENTS = 32
 
 # ─── Crypto helpers (ported from mega.py/crypto.py) ───
 
@@ -413,41 +420,75 @@ async def _mega_api_post(session, url: str, json_payload: list, timeout: int = 3
 async def validate_mega_sid(sid: str) -> dict:
     """Validate a MEGA session ID by querying account quota.
 
+    Distinguishes a genuinely dead session (auth error → caller should drop
+    the sid) from a transient server hiccup (overload/throttle/network → the
+    sid is probably fine, keep using it). Transient codes are retried with
+    backoff before giving up.
+
     Returns:
-        {"valid": True, "type": "premium"|"free", ...} or {"valid": False, "error": ...}
+        {"valid": True, "type": ...}                       — session works
+        {"valid": False, "auth_error": True,  "error": ...} — sid is dead
+        {"valid": False, "auth_error": False, "error": ...} — transient, keep sid
     """
+    import asyncio
+
     import aiohttp
 
     if not sid:
-        return {"valid": False, "error": "No mega_sid configured"}
+        return {"valid": False, "auth_error": True, "error": "No mega_sid configured"}
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{MEGA_API}?sid={sid}",
-                json=[{"a": "uq", "xfer": 1, "strg": 1}],
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                data = await resp.json(content_type=None)
+    last_error = "unknown"
+    for attempt in range(_MEGA_MAX_RETRIES):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{MEGA_API}?sid={sid}",
+                    # "pro": 1 is required for the response to include utype;
+                    # without it utype is absent and a Pro account looks free.
+                    json=[{"a": "uq", "xfer": 1, "strg": 1, "pro": 1}],
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    data = await resp.json(content_type=None)
 
-        if isinstance(data, list):
-            data = data[0]
-        if isinstance(data, int):
-            err_name = _MEGA_ERROR_NAMES.get(data, f"unknown ({data})")
-            return {"valid": False, "error": f"MEGA API error: {err_name}"}
+            if isinstance(data, list):
+                data = data[0]
+            if isinstance(data, int):
+                err_name = _MEGA_ERROR_NAMES.get(data, f"unknown ({data})")
+                last_error = f"MEGA API error: {err_name}"
+                if data in _MEGA_AUTH_ERROR_CODES:
+                    return {"valid": False, "auth_error": True, "error": last_error}
+                if data in _MEGA_RETRY_CODES or data in _MEGA_QUOTA_CODES:
+                    delay = _MEGA_RETRY_BASE_DELAY * (2 ** attempt)
+                    logger.info(
+                        "MEGA sid validation hit %s, retrying in %.0fs (%d/%d)",
+                        err_name, delay, attempt + 1, _MEGA_MAX_RETRIES,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                # Unknown non-auth code: treat as transient, don't drop sid
+                return {"valid": False, "auth_error": False, "error": last_error}
 
-        is_premium = data.get("utype", 0) > 0
-        return {
-            "valid": True,
-            "type": "premium" if is_premium else "free",
-            "utype": data.get("utype", 0),
-            "transfer_used": data.get("tuo", 0),
-            "transfer_max": data.get("tal", 0),
-            "storage_used": data.get("cstrg", 0),
-            "storage_max": data.get("mstrg", 0),
-        }
-    except Exception as e:
-        return {"valid": False, "error": str(e)}
+            is_premium = data.get("utype", 0) > 0
+            return {
+                "valid": True,
+                "type": "premium" if is_premium else "free",
+                "utype": data.get("utype", 0),
+                "transfer_used": data.get("tuo", 0),
+                "transfer_max": data.get("tal", 0),
+                "storage_used": data.get("cstrg", 0),
+                "storage_max": data.get("mstrg", 0),
+            }
+        except Exception as e:
+            last_error = str(e)
+            delay = _MEGA_RETRY_BASE_DELAY * (2 ** attempt)
+            logger.info(
+                "MEGA sid validation network error (%s), retrying in %.0fs (%d/%d)",
+                last_error, delay, attempt + 1, _MEGA_MAX_RETRIES,
+            )
+            await asyncio.sleep(delay)
+
+    # Exhausted retries on transient errors — keep the sid, it's likely fine
+    return {"valid": False, "auth_error": False, "error": last_error}
 
 
 async def download_mega_file(
@@ -474,6 +515,14 @@ async def download_mega_file(
     info = parse_mega_url(url)
     if not info:
         raise ValueError(f"Invalid MEGA URL: {url}")
+
+    # Clamp to MEGA's tolerance — too many parallel connections get reset.
+    if max_segments > _MEGA_MAX_SEGMENTS:
+        logger.info(
+            "MEGA: capping segments %d -> %d (CDN resets too-parallel downloads)",
+            max_segments, _MEGA_MAX_SEGMENTS,
+        )
+        max_segments = _MEGA_MAX_SEGMENTS
 
     if sid:
         logger.info("MEGA download with session ID (first 8 chars): %s...", sid[:8])
@@ -618,7 +667,6 @@ async def _stream_decrypt(
     the output file at its correct offset — no buffering entire file in memory.
     """
     import asyncio as _aio
-    import threading
 
     import aiohttp
 
@@ -646,7 +694,6 @@ async def _stream_decrypt(
         segments.append((start, end))
 
     downloaded = [0]  # Shared mutable counter
-    write_lock = threading.Lock()
 
     # Pre-allocate file
     with open(output_path, "wb") as f:
@@ -654,45 +701,52 @@ async def _stream_decrypt(
         f.write(b"\0")
 
     async def _download_segment(idx: int, start: int, end: int):
-        for retry in range(_MEGA_SEGMENT_MAX_RETRIES):
-            try:
-                block_offset = start // 16
-                ctr = Counter.new(128, initial_value=base_ctr + block_offset)
-                decryptor = AES.new(key_bytes, AES.MODE_CTR, counter=ctr)
-                file_pos = start
-                seg_downloaded = 0
+        # Each segment owns its own file handle and writes its region purely
+        # sequentially. A single SHARED handle is catastrophic here: the 32
+        # segments sit tens of MB apart, so seeking the shared pointer between
+        # them flushes the buffer and turns every chunk into a scattered random
+        # write — measured ~0.1 MB/s vs ~5 MB/s with per-segment sequential
+        # writes. The OS coalesces each segment's sequential stream efficiently.
+        #
+        # resume_pos is the absolute offset to (re)start from. MEGA frequently
+        # drops a connection mid-segment; rather than discard the bytes already
+        # written, we resume from here. It stays 16-byte aligned (iter_chunked
+        # yields full chunks except the final one, after which we return), so
+        # the AES-CTR counter realigns exactly.
+        resume_pos = start
+        with open(output_path, "r+b") as seg_f:
+            for retry in range(_MEGA_SEGMENT_MAX_RETRIES):
+                try:
+                    ctr = Counter.new(128, initial_value=base_ctr + resume_pos // 16)
+                    decryptor = AES.new(key_bytes, AES.MODE_CTR, counter=ctr)
+                    seg_f.seek(resume_pos)
 
-                async with session.get(
-                    download_url,
-                    headers={"Range": f"bytes={start}-{end}"},
-                    timeout=aiohttp.ClientTimeout(total=3600, sock_read=120),
-                ) as resp:
-                    if resp.status not in (200, 206):
-                        raise RuntimeError(f"MEGA segment {idx} HTTP {resp.status}")
-                    async for chunk in resp.content.iter_chunked(chunk_size):
-                        decrypted = decryptor.decrypt(chunk)
-                        with write_lock:
-                            with open(output_path, "r+b") as f:
-                                f.seek(file_pos)
-                                f.write(decrypted)
-                        file_pos += len(decrypted)
-                        seg_downloaded += len(chunk)
-                        downloaded[0] += len(chunk)
-                        if on_progress:
-                            on_progress(downloaded[0], file_size)
-                return  # Success
-            except Exception as e:
-                # Rollback progress counter for this segment's partial download
-                downloaded[0] -= seg_downloaded
-                if retry < _MEGA_SEGMENT_MAX_RETRIES - 1:
-                    delay = 2 * (2 ** retry)
-                    logger.warning(
-                        "MEGA segment %d failed (%s), retrying in %ds (attempt %d/%d)",
-                        idx, e, delay, retry + 1, _MEGA_SEGMENT_MAX_RETRIES,
-                    )
-                    await _aio.sleep(delay)
-                else:
-                    raise
+                    async with session.get(
+                        download_url,
+                        headers={"Range": f"bytes={resume_pos}-{end}"},
+                        timeout=aiohttp.ClientTimeout(total=3600, sock_read=120),
+                    ) as resp:
+                        if resp.status not in (200, 206):
+                            raise RuntimeError(f"MEGA segment {idx} HTTP {resp.status}")
+                        async for chunk in resp.content.iter_chunked(chunk_size):
+                            seg_f.write(decryptor.decrypt(chunk))
+                            downloaded[0] += len(chunk)
+                            resume_pos += len(chunk)  # commit — survives a reset
+                            if on_progress:
+                                on_progress(downloaded[0], file_size)
+                    return  # Success
+                except Exception as e:
+                    if retry < _MEGA_SEGMENT_MAX_RETRIES - 1:
+                        delay = min(0.5 * (2 ** retry), 5)  # 0.5,1,2,4s — quick resume
+                        logger.warning(
+                            "MEGA segment %d dropped at +%d/%d bytes (%s), resuming in "
+                            "%.1fs (attempt %d/%d)",
+                            idx, resume_pos - start, end - start + 1, e, delay,
+                            retry + 1, _MEGA_SEGMENT_MAX_RETRIES,
+                        )
+                        await _aio.sleep(delay)
+                    else:
+                        raise
 
     # Download all segments in parallel
     tasks = [_download_segment(i, s, e) for i, (s, e) in enumerate(segments)]

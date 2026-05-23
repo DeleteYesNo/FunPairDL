@@ -22,7 +22,7 @@ async def query_mega_quota(sid: str) -> dict | None:
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 f"https://g.api.mega.co.nz/cs?sid={sid}",
-                json=[{"a": "uq", "xfer": 1, "strg": 1}],
+                json=[{"a": "uq", "xfer": 1, "strg": 1, "pro": 1}],
                 timeout=TIMEOUT,
             ) as resp:
                 data = await resp.json(content_type=None)

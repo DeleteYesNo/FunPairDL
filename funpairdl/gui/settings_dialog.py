@@ -52,6 +52,12 @@ class SettingsDialog(QDialog):
         self.segments_spin = QSpinBox()
         self.segments_spin.setRange(1, 32)
         self.segments_spin.setValue(self.settings.max_segments)
+        self.segments_spin.setToolTip(
+            "Parallel chunks per file. MEGA throttles each connection, so more "
+            "segments = proportionally faster (≈0.25 MB/s per segment). 32 is a "
+            "good MEGA value; MEGA files download one at a time to stay under "
+            "its connection-reset threshold."
+        )
         form.addRow("Max segments per file:", self.segments_spin)
 
         # Max concurrent pairs
