@@ -1567,7 +1567,10 @@ class QueueManager:
             r"(?<![a-z0-9])(?:\d{3,4}p|[248]k|\d{1,3}fps|no[-_ ]?wm|wm)(?![a-z0-9])",
             " ", s,
         )
-        return re.sub(r"[^a-z0-9]+", "", s)
+        # Keep alphanumerics of ANY script (CJK included) — only drop
+        # punctuation/space. Using [a-z0-9] here would erase Chinese/Japanese
+        # names entirely and make CJK works unmatchable.
+        return "".join(c for c in s if c.isalnum())
 
     @staticmethod
     def _file_sha256(path: Path) -> str:
@@ -1617,70 +1620,106 @@ class QueueManager:
         except OSError:
             shutil.copy2(src, dst)
 
+    def _work_stem(self, filename: str) -> str:
+        """Funscript filename -> work base (strip .funscript and any axis suffix)."""
+        name = filename
+        if name.lower().endswith(".funscript"):
+            name = name[: -len(".funscript")]
+        _, suffix = self._parse_axis(filename)
+        if suffix and name.lower().endswith("." + suffix.lower()):
+            name = name[: -(len(suffix) + 1)]
+        return name
+
     def _reconcile_with_library(self, pair: Pair) -> bool:
-        """If this freshly-downloaded work already exists in the library (same
-        name AND same video), merge into the existing folder instead of leaving
-        a duplicate: new axes go into the folder; scripts whose content changed
-        go into a new .alt variant; identical files are dropped. Returns True
-        when the pair was fully absorbed (caller should skip normal organize).
+        """Merge a re-downloaded work into its existing library copy instead of
+        leaving a duplicate: new axes go into the folder, changed scripts become
+        an .alt variant, identical files are dropped. Handles a video+script
+        re-download AND a script-only re-download. Returns True when absorbed.
         """
         from funpairdl.persistence.settings import Settings
         settings = Settings.load()
         if not getattr(settings, "reconcile_on_redownload", True):
             return False
 
+        out_dir = Path(pair.output_dir)
         videos = [i for i in pair.items if i.file_type == FileType.VIDEO]
         scripts = [i for i in pair.items if i.file_type == FileType.FUNSCRIPT]
-        if len(videos) != 1 or not scripts:
-            return False  # only the standard single-video work is reconciled
-        out_dir = Path(pair.output_dir)
-        src_video = out_dir / videos[0].filename
-        if not src_video.exists():
-            return False
+        if not scripts or len(videos) > 1:
+            return False  # nothing to reconcile / mirror set -> normal organize
 
-        vkey = self._match_key(Path(videos[0].filename).stem)
-        if len(vkey) < 4:
-            return False
-
-        # Locate an existing same-named work folder (exact normalized key),
-        # excluding this pair's own temp folder.
-        own = out_dir.resolve()
-        dest = dest_video = None
-        for lib in self._library_dirs():
+        # This download's own files, by resolved PATH (not name): in Case A the
+        # download lands in the existing folder, so we must exclude these when
+        # scanning for "pre-existing" files; in Case B (different folder) same
+        # names are fine because the paths differ.
+        def _rp(p: Path) -> Path:
             try:
-                entries = list(lib.iterdir())
+                return p.resolve()
             except OSError:
-                continue
-            for d in entries:
-                if not d.is_dir() or d.resolve() == own:
+                return p
+        incoming_paths = {_rp(out_dir / i.filename) for i in pair.items}
+        src_video = (out_dir / videos[0].filename) if videos else None
+        if src_video is not None and not src_video.exists():
+            src_video = None
+
+        dest = dest_video = dest_base = None
+
+        # Case A: the download landed in a folder that already holds an
+        # organized copy (files NOT part of this download) — the common case,
+        # since the post-title target folder usually IS the existing work.
+        try:
+            pre = [f for f in out_dir.iterdir()
+                   if f.is_file() and _rp(f) not in incoming_paths]
+        except OSError:
+            pre = []
+        pre_video = next((f for f in pre if f.suffix.lower() in self._VIDEO_EXTS), None)
+        pre_scripts = [f for f in pre if f.name.lower().endswith(".funscript")]
+        if pre_video or pre_scripts:
+            dest = out_dir
+            dest_video = pre_video
+            dest_base = pre_video.stem if pre_video else self._work_stem(pre_scripts[0].name)
+
+        # Case B: search other library folders by normalized name key.
+        if dest is None:
+            key_name = (Path(videos[0].filename).stem if videos
+                        else self._work_stem(scripts[0].filename))
+            wkey = self._match_key(key_name)
+            if len(wkey) < 2:
+                return False
+            own = out_dir.resolve()
+            for lib in self._library_dirs():
+                try:
+                    entries = list(lib.iterdir())
+                except OSError:
                     continue
-                if self._match_key(d.name) != vkey:
-                    continue
-                dv = next((d / f.name for f in d.iterdir()
-                           if f.is_file() and f.suffix.lower() in self._VIDEO_EXTS), None)
-                if dv is not None:
-                    dest, dest_video = d, dv
+                for d in entries:
+                    if not d.is_dir() or d.resolve() == own:
+                        continue
+                    if self._match_key(d.name) != wkey:
+                        continue
+                    dest = d
+                    dest_video = next((d / f.name for f in d.iterdir()
+                                       if f.is_file() and f.suffix.lower() in self._VIDEO_EXTS), None)
+                    dest_base = dest_video.stem if dest_video else d.name
                     break
-            if dest:
-                break
+                if dest:
+                    break
         if dest is None:
             return False
 
-        # Same-media check: size first (cheap), then hash only on a size tie.
-        try:
-            if src_video.stat().st_size != dest_video.stat().st_size:
+        # Same-media guard: only meaningful when BOTH sides have a video.
+        if src_video is not None and dest_video is not None:
+            try:
+                if (src_video.stat().st_size != dest_video.stat().st_size
+                        or self._file_sha256(src_video) != self._file_sha256(dest_video)):
+                    return False  # different video -> a different work
+            except OSError:
                 return False
-            if self._file_sha256(src_video) != self._file_sha256(dest_video):
-                return False
-        except OSError:
-            return False
 
-        dest_base = dest_video.stem  # files are named <base>[.axis].funscript
-
-        # Map existing Main-level axes in dest.
+        # Existing axes in dest (excluding this download's own incoming files).
         existing_axis: dict[str, Path] = {}
         for f in dest.iterdir():
-            if f.is_file() and f.name.lower().endswith(".funscript"):
+            if (f.is_file() and f.name.lower().endswith(".funscript")
+                    and _rp(f) not in incoming_paths):
                 ax, _ = self._parse_axis(f.name)
                 existing_axis.setdefault(ax, f)
 
@@ -1690,11 +1729,12 @@ class QueueManager:
             if not sp.exists():
                 continue
             ax, suffix = self._parse_axis(s.filename)
-            if ax not in existing_axis:
+            ex = existing_axis.get(ax)
+            if ex is None:
                 new_axis.append((sp, suffix))
             else:
                 try:
-                    identical = self._file_sha256(sp) == self._file_sha256(existing_axis[ax])
+                    identical = self._file_sha256(sp) == self._file_sha256(ex)
                 except OSError:
                     identical = False
                 if identical:
@@ -1704,6 +1744,8 @@ class QueueManager:
 
         def _move(sp: Path, target: Path) -> None:
             import shutil
+            if sp.resolve() == target.resolve():
+                return
             if target.exists():
                 sp.unlink(missing_ok=True)
                 return
@@ -1712,33 +1754,37 @@ class QueueManager:
             except OSError:
                 shutil.move(str(sp), str(target))
 
-        # 1) new axes -> straight into the existing folder
+        # 1) new axes -> into the existing folder
         for sp, suffix in new_axis:
             name = dest_base + (f".{suffix}" if suffix else "") + ".funscript"
             _move(sp, dest / name)
 
-        # 2) changed scripts -> one new .alt variant (video hardlinked in)
+        # 2) changed scripts -> one new .alt variant (video hardlinked if present)
         if changed:
             slot = self._next_alt_slot(dest)
             alt_dir = dest / f"{dest_base}.{slot}"
             alt_dir.mkdir(parents=True, exist_ok=True)
-            alt_video = alt_dir / f"{dest_base}.{slot}.mp4"
-            if not alt_video.exists():
-                self._link_or_copy(dest_video, alt_video)
+            if dest_video is not None:
+                alt_video = alt_dir / f"{dest_base}.{slot}{dest_video.suffix}"
+                if not alt_video.exists():
+                    self._link_or_copy(dest_video, alt_video)
             for sp, suffix in changed:
                 name = f"{dest_base}.{slot}" + (f".{suffix}" if suffix else "") + ".funscript"
                 _move(sp, alt_dir / name)
 
-        # 3) drop the duplicate downloaded video and clean up the temp folder
-        src_video.unlink(missing_ok=True)
-        try:
-            if out_dir.is_dir() and not any(out_dir.iterdir()):
-                out_dir.rmdir()
-        except OSError:
-            pass
+        # 3) drop a duplicate downloaded video; clean up a separate temp folder
+        if (src_video is not None and dest_video is not None
+                and src_video.resolve() != dest_video.resolve()):
+            src_video.unlink(missing_ok=True)
+        if dest.resolve() != out_dir.resolve():
+            try:
+                if out_dir.is_dir() and not any(out_dir.iterdir()):
+                    out_dir.rmdir()
+            except OSError:
+                pass
 
         logger.info(
-            "Reconciled '%s' into existing folder '%s' (%d new axes, %d variant scripts)",
+            "Reconciled '%s' into '%s' (%d new axes, %d variant scripts)",
             pair.name, dest.name, len(new_axis), len(changed),
         )
         return True
