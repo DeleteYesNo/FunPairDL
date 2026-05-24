@@ -142,6 +142,59 @@ def test_realistic_bracketed_name_multiaxis(tmp_path, monkeypatch):
     assert (alt / f"{base}.alt.mp4").exists()
 
 
+def test_script_only_into_existing_folder(tmp_path, monkeypatch):
+    # The exact failure case: re-download ONLY the scripts (no video) and they
+    # land in the already-organized folder with their source names. Identical
+    # axes must be dropped, a new axis merged — no duplicate files left.
+    _stub_settings(monkeypatch, reconcile_on_redownload=True)
+    qm = QueueManager(download_dir=tmp_path)
+    base = "[Multi-axis][VAM]示例中文角色"
+    work = tmp_path / base
+    work.mkdir()
+    (work / f"{base}.mp4").write_bytes(b"VID")
+    (work / f"{base}.funscript").write_text("MAIN")
+    (work / f"{base}.roll.funscript").write_text("ROLL")
+
+    # script-only re-download dumped into the SAME folder with source names
+    src = "VaM-示例中文角色-000101"
+    (work / f"{src}.funscript").write_text("MAIN")        # identical -> drop
+    (work / f"{src}.roll.funscript").write_text("ROLL")   # identical -> drop
+    (work / f"{src}.twist.funscript").write_text("TWIST")  # new axis -> merge
+    items = [
+        PairItem(url="u/1", filename=f"{src}.funscript", file_type=FileType.FUNSCRIPT),
+        PairItem(url="u/2", filename=f"{src}.roll.funscript", file_type=FileType.FUNSCRIPT),
+        PairItem(url="u/3", filename=f"{src}.twist.funscript", file_type=FileType.FUNSCRIPT),
+    ]
+    pair = Pair(name=base, items=items)
+    pair.output_dir = str(work)
+
+    assert qm._reconcile_with_library(pair) is True
+    names = sorted(f.name for f in work.iterdir() if f.is_file())
+    assert names == [
+        f"{base}.funscript", f"{base}.mp4",
+        f"{base}.roll.funscript", f"{base}.twist.funscript",
+    ]  # source-named dups gone, new twist axis merged under the work's base
+
+
+def test_cjk_name_matches_separate_folder(tmp_path, monkeypatch):
+    # CJK-named work in a separate library folder: _match_key must keep the
+    # Chinese characters so the script-only re-download still finds it.
+    _stub_settings(monkeypatch, reconcile_on_redownload=True)
+    qm = QueueManager(download_dir=tmp_path / "dl")
+    (tmp_path / "dl").mkdir()
+    base = "示例中文角色"
+    work = _existing_work(tmp_path / "dl", base, b"VID", {f"{base}.funscript": "MAIN"})
+    temp = tmp_path / "dl" / "redl_temp"
+    temp.mkdir()
+    (temp / f"{base}.surge.funscript").write_text("SURGE")
+    pair = Pair(name=base, items=[
+        PairItem(url="u/s", filename=f"{base}.surge.funscript", file_type=FileType.FUNSCRIPT)])
+    pair.output_dir = str(temp)
+
+    assert qm._reconcile_with_library(pair) is True
+    assert (work / f"{base}.surge.funscript").read_text() == "SURGE"
+
+
 def test_toggle_off_skips_reconcile(tmp_path, monkeypatch):
     _stub_settings(monkeypatch, reconcile_on_redownload=False)
     qm = QueueManager(download_dir=tmp_path)
