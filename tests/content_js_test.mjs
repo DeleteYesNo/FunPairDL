@@ -84,6 +84,32 @@ check("keeps CJK + fullwidth brackets",
 check("clean name passes through", ctx.cleanScriptName("clean-name.funscript", U), "clean-name.funscript");
 check("empty falls back to URL basename", ctx.cleanScriptName("", U), "abcdef.funscript");
 
+// ── _isVideoLinkHeadingText: which OP headings mark the video section ──
+check("'Video Link' heading", ctx._isVideoLinkHeadingText("Video Link"), true);
+check("'Video Link' with emoji-stripped text", ctx._isVideoLinkHeadingText(" Video Link "), true);
+check("'Video' heading", ctx._isVideoLinkHeadingText("Video"), true);
+check("'Video Download' heading", ctx._isVideoLinkHeadingText("Video Download"), true);
+check("'Script' heading is not video", ctx._isVideoLinkHeadingText("Script"), false);
+check("'Information' heading is not video", ctx._isVideoLinkHeadingText("Information"), false);
+
+// ── _isOfferableVideoHost: unknown-host links that may be offered ──
+check("artist site artist-example is offerable",
+  ctx._isOfferableVideoHost("https://artist-example.com/samplework/"), true);
+check("generic artist site is offerable",
+  ctx._isOfferableVideoHost("https://someartistsite.net/work/123"), true);
+check("patreon is not a video", ctx._isOfferableVideoHost("https://www.patreon.com/Kotarou3990"), false);
+check("discord is not a video", ctx._isOfferableVideoHost("https://discord.gg/abc"), false);
+check("ad/affiliate link is not a video",
+  ctx._isOfferableVideoHost("https://offers.feeliate.com/?lp=22&offer=1"), false);
+check("eroscripts internal is not offered",
+  ctx._isOfferableVideoHost("https://discuss.eroscripts.com/t/foo/123"), false);
+check("known host handled elsewhere, not re-offered",
+  ctx._isOfferableVideoHost("https://www.iwara.tv/video/abc/slug"), false);
+check("funscript asset is not a video",
+  ctx._isOfferableVideoHost("https://cdn.example.com/x.funscript"), false);
+check("x.com profile is not a video", ctx._isOfferableVideoHost("https://x.com/SomeArtist"), false);
+check("non-http scheme is not a video", ctx._isOfferableVideoHost("ftp://foo/bar.mp4"), false);
+
 if (failures) {
   console.error(`\n${failures} assertion(s) failed`);
   process.exit(1);

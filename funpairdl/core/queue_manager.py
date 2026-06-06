@@ -1520,9 +1520,30 @@ class QueueManager:
         # Create new pairs — each split pair becomes its own folder, so
         # whatever group label items carried from the bundle source is no
         # longer meaningful; reset to Main so organize treats them flatly.
+        #
+        # Naming: prefer a human title over the video's own stem. The stem is
+        # `_identity()`'s pick — chosen for script *matching*, so it's often a
+        # URL slug (iwara/rule34video "/video/<id>/demo-game-mock-battle-2")
+        # that makes a poor folder name. An Alt group carries the real title in
+        # `alt_group_config[group].display_name`; the lone OP (Main) video
+        # inherits the post/bundle title. Fall back to the stem only when
+        # neither is available (e.g. a plain multi-file folder, no alts).
+        main_video_count = sum(
+            1 for vi, _, _ in video_info if (vi.group or "Main") == "Main"
+        )
         new_pairs: list[Pair] = []
         for video_item, real_stem, _ in video_info:
-            name = sanitize_filename(self._clean_title(real_stem))
+            grp = video_item.group or "Main"
+            display = (pair.alt_group_config.get(grp, {}).get("display_name") or "").strip()
+            if display:
+                title_src = display
+            elif grp == "Main" and main_video_count == 1:
+                title_src = pair.name
+            else:
+                title_src = real_stem
+            name = sanitize_filename(self._clean_title(title_src))
+            if not name:  # title cleaned away to nothing — fall back to the stem
+                name = sanitize_filename(self._clean_title(real_stem))
             new_pair = Pair(name=name, preferred_resolution=pair.preferred_resolution)
             new_pair.output_dir = str(self.download_dir / name)
             new_pair.items = [video_item] + matched[id(video_item)]

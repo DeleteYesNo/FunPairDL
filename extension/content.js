@@ -82,6 +82,85 @@ function isBundleUrl(url) {
   return false;
 }
 
+// Headings like "🎥 Video Link", "Video", "Video Download" mark the section
+// that holds THE video — even when it lives on a host we don't recognize (an
+// artist's own site like artist-example.com, a niche host). The emoji renders as an
+// <img>, so only the text ("Video Link") survives in textContent.
+const VIDEO_LINK_HEADING_RE = /\bvideo\b/i;
+
+// Hosts that appear *near* a video link but are never the video itself: the
+// forum's own infra, author-support, socials, and the ad/affiliate networks
+// EroScripts injects. Used to filter unknown-host candidates so we don't offer
+// a Patreon/Discord/ad link as a video.
+const NON_VIDEO_HOSTS = [
+  "eroscripts.com", "discourse.org",
+  "patreon.com", "fantia.jp", "subscribestar", "ko-fi.com", "boosty.to",
+  "discord.gg", "discord.com", "t.me", "telegram.",
+  "linktr.ee",
+  // ad / affiliate networks seen in EroScripts posts
+  "feeliate.com", "experiencesexonline.com", "synsual.me",
+  "ayvasoftware.io", "funosr.com", "funsr.com", "yourhobbiescustomized.com",
+  "uptimerobot.com",
+];
+
+function _isVideoLinkHeadingText(text) {
+  return VIDEO_LINK_HEADING_RE.test((text || "").trim());
+}
+
+// Whether an UNKNOWN-host link may be offered as a video candidate: a real
+// off-site page (http[s]), not forum/social/ad infra, not a profile/members
+// path, and not itself a script or downloadable asset. yt-dlp's generic
+// extractor resolves it from there; the user still confirms the pick in the
+// panel, so a stray false positive is harmless.
+function _isOfferableVideoHost(href) {
+  let u;
+  try { u = new URL(href); } catch (e) { return false; }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+  const host = u.hostname.toLowerCase().replace("www.", "");
+  if (VIDEO_DOMAINS.some((d) => host.includes(d))) return false;  // known host: handled elsewhere
+  if (NON_VIDEO_HOSTS.some((d) => host.includes(d))) return false;
+  if (isNonVideoPath(href)) return false;
+  if (/\.(funscript|zip|rar|7z|png|jpe?g|gif|webp|svg|css|js|avif|mp3)$/i.test(u.pathname)) return false;
+  return true;
+}
+
+// Collect links sitting under a "Video Link"-type heading that live on a host
+// we don't recognize. They're almost always the real video — they're under an
+// explicit video heading, not in the signature/ad area — so offer them as
+// low-priority candidates (every known host outranks them).
+function _extractHeadingScopedVideos(containerEl, isOP) {
+  const out = [];
+  let headings, links;
+  try { headings = Array.from(containerEl.querySelectorAll("h1,h2,h3,h4,h5,h6")); }
+  catch (e) { return out; }
+  if (!headings.length || !headings.some((h) => _isVideoLinkHeadingText(h.textContent))) {
+    return out;
+  }
+  try { links = Array.from(containerEl.querySelectorAll("a[href]")); }
+  catch (e) { return out; }
+  for (const a of links) {
+    const href = a.getAttribute("href");
+    if (!href || !_isOfferableVideoHost(href)) continue;
+    // Owner heading = the last heading that precedes this link in the document.
+    let owner = null;
+    for (const h of headings) {
+      if (h.compareDocumentPosition(a) & Node.DOCUMENT_POSITION_FOLLOWING) owner = h;
+    }
+    if (!owner || !_isVideoLinkHeadingText(owner.textContent)) continue;
+    let label = "Link";
+    try { label = new URL(href).hostname.replace("www.", ""); } catch (e) {}
+    out.push({
+      url: href,
+      priority: isOP ? 11 : 11.5,   // below every VIDEO_PRIORITY entry
+      source: isOP ? "OP" : "comment",
+      label,
+      isBundle: isBundleUrl(href),
+      unknownHost: true,
+    });
+  }
+  return out;
+}
+
 function getVideoPriority(url, isFromComment) {
   try {
     const host = new URL(url).hostname.toLowerCase().replace("www.", "");
@@ -358,6 +437,12 @@ function extractLinksFromElement(containerEl, isOP) {
       } catch (e) {}
     }
   });
+
+  // Unknown-host videos under an explicit "Video Link" heading (artist sites
+  // etc.). Added last + low priority so known hosts always win; deduped.
+  for (const v of _extractHeadingScopedVideos(containerEl, isOP)) {
+    if (!videos.some((x) => x.url === v.url)) videos.push(v);
+  }
 
   return { videos, scripts };
 }
