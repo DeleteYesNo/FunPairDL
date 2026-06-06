@@ -28,6 +28,59 @@ class TestAutoSplitBundlePair:
             assert sum(1 for i in p.items if i.file_type == FileType.VIDEO) == 1
             assert sum(1 for i in p.items if i.file_type == FileType.FUNSCRIPT) == 1
 
+    def test_split_names_use_display_name_and_op_title(self):
+        # OP (Main) + two comment Alts, each a distinct work. The videos carry
+        # iwara URL slugs as filenames (what _identity picks for matching), but
+        # the split children must be NAMED from the post title (OP) and each
+        # Alt's display_name — not from the slug.
+        from funpairdl.utils.filename import sanitize_filename
+
+        def norm(s):
+            return sanitize_filename(QueueManager._clean_title(s))
+
+        def gi(name, ftype, group):
+            it = _vi(name, ftype)
+            it.group = group
+            return it
+
+        items = [
+            gi("demo-game-mock-battle-2.mp4", FileType.VIDEO, "Main"),
+            gi("demo-game-mock-battle-2.funscript", FileType.FUNSCRIPT, "Main"),
+            gi("sample-author-demo-knight-segs.mp4", FileType.VIDEO, "Alt 1"),
+            gi("sample-author-demo-knight-segs.funscript", FileType.FUNSCRIPT, "Alt 1"),
+            gi("x9zk.mp4", FileType.VIDEO, "Alt 3"),
+            gi("x9zk.funscript", FileType.FUNSCRIPT, "Alt 3"),
+        ]
+        pair = Pair(name="[Author] Post Title 2", items=items)
+        pair.alt_group_config = {
+            "Alt 1": {"display_name": "Sample Author - Demo Knight Segs"},
+            "Alt 3": {"display_name": "Distinct Alt Three"},
+        }
+        result = QueueManager()._auto_split_bundle_pair(pair)
+        assert result is not None and len(result) == 3
+        names = {p.name for p in result}
+        assert norm("[Author] Post Title 2") in names        # OP -> post title
+        assert norm("Sample Author - Demo Knight Segs") in names  # Alt 1 display
+        assert norm("Distinct Alt Three") in names            # Alt 3 display
+        # URL slugs must NOT have been used to name any work
+        assert norm("demo-game-mock-battle-2") not in names
+        assert norm("x9zk") not in names
+        assert norm("sample-author-demo-knight-segs") not in names
+
+    def test_plain_bundle_without_alts_still_uses_stems(self):
+        # No alt_group_config and many Main videos: nothing better than the
+        # per-video stem is available, so behavior is unchanged.
+        names = ["[Gweda] Shenhe", "[Teamboobs]Shenhe", "[simao] Shenhe"]
+        items = []
+        for n in names:
+            items.append(_vi(n + ".mp4", FileType.VIDEO))
+            items.append(_vi(n + ".funscript", FileType.FUNSCRIPT))
+        result = QueueManager()._auto_split_bundle_pair(Pair(name="Pack", items=items))
+        assert result is not None and len(result) == 3
+        # "Pack" (the bundle title) must NOT have leaked onto any child, since
+        # there are multiple Main videos (no single OP).
+        assert all(p.name != "Pack" for p in result)
+
     def test_mirror_videos_not_split(self):
         # Same work mirrored on two hosts (identical name) is one pair.
         items = [
