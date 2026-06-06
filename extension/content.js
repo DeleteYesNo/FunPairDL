@@ -183,6 +183,25 @@ function formatSize(bytes) {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
+// A Discourse funscript-attachment anchor renders as
+//   "<download-glyph>sample-rope-demo-work.funscript (27.2 KB)"
+// so the raw textContent carries a leading icon char and a trailing
+// human-readable size. Both must be stripped or they end up baked into
+// the filename (and the work title), e.g. the junk folder
+// "sample-rope-demo-work.funscript_ (27.2 KB)". Reduce to the real name.
+function cleanScriptName(raw, fullUrl) {
+  let t = (raw || "").trim();
+  // Trailing size annotation: " (27.2 KB)", "(1.3 MB)", " ( 800 B )"
+  t = t.replace(/\s*\(\s*\d+(?:\.\d+)?\s*[KMGT]?B\s*\)\s*$/i, "").trim();
+  // Leading non-filename glyphs (download icons, arrows, stray "?")
+  t = t.replace(/^[^\p{L}\p{N}\[\(（【]+/u, "");
+  // Drop any trailing junk after the script extension
+  const m = t.match(/\.(?:fun|sync)script/i);
+  if (m) t = t.slice(0, m.index + m[0].length);
+  t = t.trim();
+  return t || (fullUrl.split("/").pop() || "");
+}
+
 // ─── Link extraction (works on any container element) ───
 
 function extractLinksFromElement(containerEl, isOP) {
@@ -285,7 +304,7 @@ function extractLinksFromElement(containerEl, isOP) {
     if (href && !href.startsWith("blob:") && href.includes(".funscript")) {
       const fullUrl = href.startsWith("http") ? href : `https://discuss.eroscripts.com${href}`;
       const nameEl = link.querySelector("a") || link;
-      const fname = nameEl.textContent.trim() || fullUrl.split("/").pop();
+      const fname = cleanScriptName(nameEl.textContent, fullUrl);
       const axis = detectAxis(fname);
       const author = detectScriptAuthor(link);
       scripts.push({
@@ -303,7 +322,7 @@ function extractLinksFromElement(containerEl, isOP) {
       if (href && !href.startsWith("blob:")) {
         const fullUrl = href.startsWith("http") ? href : `https://discuss.eroscripts.com${href}`;
         if (!scripts.some((s) => s.url === fullUrl)) {
-          const fname = link.textContent.trim() || fullUrl.split("/").pop();
+          const fname = cleanScriptName(link.textContent, fullUrl);
           const axis = detectAxis(fname);
           const author = detectScriptAuthor(link);
           scripts.push({
@@ -458,7 +477,7 @@ function parseOPSections(cookedEl) {
     const sec = findSection(link);
     if (sec && !sec.scripts.some((s) => s.url === fullUrl)) {
       const nameEl = link.querySelector("a") || link;
-      const fname = nameEl.textContent.trim() || fullUrl.split("/").pop();
+      const fname = cleanScriptName(nameEl.textContent, fullUrl);
       const axis = detectAxis(fname);
       const author = detectScriptAuthor(link);
       sec.scripts.push({
@@ -972,12 +991,21 @@ async function checkServer() {
 
 // ─── Panel UI: shared rendering helpers ───
 
-function renderVideoItem(v, idx, namePrefix, checked) {
+// A drag handle is only rendered in single mode (where groups exist to drop
+// into). Collection-mode sections have no group bodies, so dragging is moot.
+function _dragHandleHTML(withHandle) {
+  return withHandle
+    ? `<span class="funpairdl-drag-handle" draggable="true" title="拖曳到群組(可先勾選多個一起拖)">⠿</span>`
+    : "";
+}
+
+function renderVideoItem(v, idx, namePrefix, checked, withHandle = false) {
   const badge = v.source === "OP" ? "OP" : "Comment";
   const badgeClass = v.source === "OP" ? "funpairdl-badge-op" : "funpairdl-badge-comment";
   const bundleTag = v.isBundle ? '<span class="funpairdl-tag-bundle">Bundle</span>' : "";
   return `
     <label class="funpairdl-item" title="${v.url}" data-key="${namePrefix}-${idx}" data-kind="video" data-index="${idx}">
+      ${_dragHandleHTML(withHandle)}
       <input type="checkbox" name="${namePrefix}" value="${idx}" ${checked ? "checked" : ""}>
       <span class="funpairdl-badge ${badgeClass}">${badge}</span>
       <span class="funpairdl-label">${v.label}</span>
@@ -987,7 +1015,7 @@ function renderVideoItem(v, idx, namePrefix, checked) {
     </label>`;
 }
 
-function renderScriptItem(s, idx, namePrefix, checked) {
+function renderScriptItem(s, idx, namePrefix, checked, withHandle = false) {
   const badge = s.source === "OP" ? "OP" : "Comment";
   const badgeClass = s.source === "OP" ? "funpairdl-badge-op" : "funpairdl-badge-comment";
   let axisTag = "";
@@ -997,6 +1025,7 @@ function renderScriptItem(s, idx, namePrefix, checked) {
   const safe = s.filename.replace(/</g, "&lt;").replace(/>/g, "&gt;");
   return `
     <label class="funpairdl-item" title="${safe}" data-key="${namePrefix}-${idx}" data-kind="script" data-index="${idx}">
+      ${_dragHandleHTML(withHandle)}
       <input type="checkbox" name="${namePrefix}" value="${idx}" ${checked ? "checked" : ""}>
       <span class="funpairdl-badge ${badgeClass}">${badge}</span>
       <span class="funpairdl-label">${safe}</span>
@@ -1132,6 +1161,10 @@ function _moveItemToGroup(panel, parsed, item, targetGroup) {
   const dropdown = _itemBundleDropdown(item);
   body.appendChild(item);
   if (dropdown) body.appendChild(dropdown);
+  // Keep the per-item dropdown in sync so a drag-move (or any other caller)
+  // leaves the row's selector showing the group it now lives in.
+  const sel = item.querySelector(".funpairdl-item-group-select");
+  if (sel && sel.value !== targetGroup) sel.value = targetGroup;
 }
 
 /** Re-render all group blocks (called on add/remove group). */
@@ -1366,7 +1399,7 @@ function populateSingleItems(panel, parsed) {
 
   parsed.videos.forEach((v, i) => {
     const key = `video-${i}`;
-    const node = _injectItem(renderVideoItem(v, i, "video", true), key);
+    const node = _injectItem(renderVideoItem(v, i, "video", true, true), key);
     const target = parsed.groupState.itemGroup[key] || "Main";
     const body = root.querySelector(`.funpairdl-group-body[data-group="${target}"]`);
     if (body) body.appendChild(node);
@@ -1374,7 +1407,7 @@ function populateSingleItems(panel, parsed) {
 
   parsed.scripts.forEach((s, i) => {
     const key = `script-${i}`;
-    const node = _injectItem(renderScriptItem(s, i, "script", true), key);
+    const node = _injectItem(renderScriptItem(s, i, "script", true, true), key);
     const target = parsed.groupState.itemGroup[key] || "Main";
     const body = root.querySelector(`.funpairdl-group-body[data-group="${target}"]`);
     if (body) body.appendChild(node);
@@ -2119,7 +2152,8 @@ function _enableDragSelect(panel) {
     suppressClick = false;
     if (e.button !== 0) return;
     if (e.target.closest && e.target.closest(
-        "select, button, .funpairdl-section-toggle, .funpairdl-tag-bundle, .funpairdl-item-group-select")) return;
+        "select, button, .funpairdl-section-toggle, .funpairdl-tag-bundle, " +
+        ".funpairdl-item-group-select, .funpairdl-drag-handle")) return;
     const cb = _dragTargetCheckbox(e.target);
     if (!cb) return;
     dragging = true;
@@ -2145,6 +2179,87 @@ function _enableDragSelect(panel) {
   }, true);
 
   document.addEventListener("mouseup", () => { dragging = false; });
+}
+
+// Drag an item by its grip handle and drop it onto any group block to move it
+// there. If the grabbed item is checked and other items are too, the whole
+// checked selection moves together — so the fast workflow is: drag-select a
+// range of checkboxes, then drag one handle to relocate them all at once.
+// Uses event delegation on the panel, so it survives group re-renders (which
+// detach/re-attach item nodes) and only needs wiring once. Single mode only.
+function _enableDragToGroup(panel, parsed) {
+  let draggedKeys = [];
+
+  function _itemsToMove(item) {
+    const cb = item.querySelector('input[type="checkbox"]');
+    if (cb && cb.checked) {
+      const checked = [...panel.querySelectorAll(".funpairdl-item[data-key]")].filter((it) => {
+        const c = it.querySelector('input[type="checkbox"]');
+        return c && c.checked;
+      });
+      if (checked.length > 1) return checked;
+    }
+    return [item];
+  }
+
+  function _clearHighlights() {
+    panel.querySelectorAll(".funpairdl-group-block.funpairdl-drag-over")
+      .forEach((b) => b.classList.remove("funpairdl-drag-over"));
+  }
+
+  panel.addEventListener("dragstart", (e) => {
+    const handle = e.target.closest && e.target.closest(".funpairdl-drag-handle");
+    if (!handle) return;
+    const item = handle.closest(".funpairdl-item[data-key]");
+    if (!item) return;
+    const moving = _itemsToMove(item);
+    draggedKeys = moving.map((it) => it.dataset.key);
+    moving.forEach((it) => it.classList.add("funpairdl-dragging"));
+    e.dataTransfer.effectAllowed = "move";
+    // Setting data is required for the drop event to fire in some engines.
+    try { e.dataTransfer.setData("text/plain", draggedKeys.join(",")); } catch (_) {}
+  });
+
+  panel.addEventListener("dragover", (e) => {
+    if (draggedKeys.length === 0) return;
+    const block = e.target.closest && e.target.closest(".funpairdl-group-block");
+    if (!block) return;
+    e.preventDefault();            // mark this a valid drop target
+    e.dataTransfer.dropEffect = "move";
+    if (!block.classList.contains("funpairdl-drag-over")) {
+      _clearHighlights();
+      block.classList.add("funpairdl-drag-over");
+    }
+  });
+
+  panel.addEventListener("drop", (e) => {
+    if (draggedKeys.length === 0) return;
+    const block = e.target.closest && e.target.closest(".funpairdl-group-block");
+    if (!block) return;
+    e.preventDefault();
+    const target = block.dataset.group;
+    for (const key of draggedKeys) {
+      const item = panel.querySelector(`.funpairdl-item[data-key="${key}"]`);
+      if (item) _moveItemToGroup(panel, parsed, item, target);
+    }
+    _updateInheritancePreviews(panel, parsed);
+  });
+
+  panel.addEventListener("dragend", () => {
+    panel.querySelectorAll(".funpairdl-dragging").forEach((it) => it.classList.remove("funpairdl-dragging"));
+    _clearHighlights();
+    draggedKeys = [];
+  });
+
+  // A bare click on the grip would otherwise toggle the row's checkbox (it
+  // lives inside the <label>). Swallow it in the capture phase so grabbing
+  // the handle never flips the selection.
+  panel.addEventListener("click", (e) => {
+    if (e.target.closest && e.target.closest(".funpairdl-drag-handle")) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  }, true);
 }
 
 // Single-mode master checkbox: toggles every item/bundle checkbox and reflects
@@ -2243,6 +2358,8 @@ function injectButton() {
       setupCollectionEvents(panel, freshParsed);
     } else {
       _setupSingleSelectAll(panel);
+      // Grip-handle drag to move items (and checked selections) between groups.
+      _enableDragToGroup(panel, freshParsed);
     }
 
     // Drag across checkboxes to (un)check a range at once (both modes).

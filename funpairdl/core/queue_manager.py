@@ -439,31 +439,34 @@ class QueueManager:
         pair = self._find_pair(pair_id)
         if not pair:
             return
-        if pair.state == PairState.PAUSED:
-            item_ids = self._get_item_ids(pair_id)
 
-            def _do_resume():
-                for dt in self._download_tasks:
-                    if dt.item.id in item_ids:
-                        dt.resume()
+        # Resume works by re-queuing, not by waking a paused coroutine:
+        # pause_pair() *cancels* the in-flight download tasks (so segment
+        # downloads can be retried from disk), which means there is never a
+        # live, event-paused coroutine left to resume. The reliable path is
+        # to reset the stalled items to PENDING, mark the pair QUEUED, and let
+        # the pump restart it. Partial .part files already on disk are picked
+        # up by the segment downloader, so a paused item resumes rather than
+        # re-downloading from scratch.
+        #
+        # Restarting both PAUSED and FAILED items here also recovers a pair
+        # that an earlier (buggy) resume left stuck in DOWNLOADING with its
+        # items still PAUSED and no task running.
+        items_to_restart = [
+            i for i in pair.items
+            if i.state in (ItemState.PAUSED, ItemState.FAILED)
+        ]
+        if pair.state not in (PairState.PAUSED, PairState.FAILED) and not items_to_restart:
+            return
 
-            if self._dl_loop and self._dl_loop.is_running():
-                self._dl_loop.call_soon_threadsafe(_do_resume)
-            else:
-                _do_resume()
+        for item in items_to_restart:
+            item.state = ItemState.PENDING
+            item.error_message = ""
 
-            pair.state = PairState.DOWNLOADING
-            if self.on_pair_updated:
-                self.on_pair_updated(pair)
-        elif pair.state == PairState.FAILED:
-            # Re-queue failed pair
-            pair.state = PairState.QUEUED
-            for item in pair.items:
-                if item.state == ItemState.FAILED:
-                    item.state = ItemState.PENDING
-            if self.on_pair_updated:
-                self.on_pair_updated(pair)
-            self._wake_pump()
+        pair.state = PairState.QUEUED
+        if self.on_pair_updated:
+            self.on_pair_updated(pair)
+        self._wake_pump()
 
     def organize_pair(self, pair_id: str) -> bool:
         """Manually trigger file organize (rename) for a completed pair."""
@@ -1398,11 +1401,26 @@ class QueueManager:
         # optionally a leading bracketed prefix. Shared with library reconcile.
         _key = self._match_key
 
-        # (video, real stem for naming, match key) — longest key first so the
-        # most specific video wins a containment match.
+        # Pick the most reliable identity for a video. The display filename is
+        # often poisoned for matching: content.js may set it from a nearby
+        # header ("Alpha:"), the topic title ("3 small scripts - Alpha | Beta
+        # | Zeta" — which contains *every* work's name and falsely matches every
+        # script), or "Untitled". A descriptive URL slug (rule34video's
+        # /video/<id>/beta-samplekit/) is stable and is exactly what script
+        # authors name their files after, so prefer it. Opaque slugs (a
+        # pixeldrain /d/<id> file token) aren't descriptive — fall back to the
+        # filename, which for those hosts is the real resolved name.
+        def _identity(v: PairItem) -> str:
+            slug = Path(self._guess_filename(v.url, "video")).stem
+            descriptive = (("-" in slug or " " in slug)
+                           and slug.lower() not in ("video", "index"))
+            return slug if descriptive else Path(v.filename).stem
+
+        # (video, identity stem for naming, match key) — longest key first so
+        # the most specific video wins a containment match.
         video_info: list[tuple[PairItem, str, str]] = []
         for v in videos:
-            real = Path(v.filename).stem
+            real = _identity(v)
             video_info.append((v, real, _key(real)))
         video_info.sort(key=lambda x: len(x[2]), reverse=True)
 
@@ -1417,6 +1435,45 @@ class QueueManager:
                     return v
             return None
 
+        # Token-overlap fallback. Containment fails when a video and its script
+        # name the same work with reordered/extra tokens — e.g. video
+        # "authx-gamma-eng-sub" vs script "Gamma [AuthX]": neither
+        # alphanumeric blob contains the other. Matching on shared *tokens*
+        # recovers these. Each shared token is weighted by 1/("how many videos
+        # carry it"), so a token unique to one video (e.g. "gamma") is a
+        # strong signal while a token spread across many videos (author/series
+        # words like "authx", "eng") barely counts — which keeps generic
+        # tokens from yanking an orphan script onto the wrong video.
+        import re as _re
+
+        def _tokens(name: str) -> set[str]:
+            s = name.lower()
+            s = _re.sub(
+                r"(?<![a-z0-9])(?:\d{3,4}p|[248]k|\d{1,3}fps|no[-_ ]?wm|wm)(?![a-z0-9])",
+                " ", s,
+            )
+            return {t for t in _re.split(r"[^a-z0-9]+", s) if len(t) >= 3}
+
+        video_tokens = [(v, _tokens(real)) for v, real, _ in video_info]
+        _df: dict[str, int] = {}
+        for _, toks in video_tokens:
+            for t in toks:
+                _df[t] = _df.get(t, 0) + 1
+
+        def _find_video_by_tokens(name: str):
+            stoks = _tokens(name)
+            best, best_score = None, 0.0
+            for v, vtoks in video_tokens:
+                shared = stoks & vtoks
+                if not shared:
+                    continue
+                score = sum(1.0 / _df[t] for t in shared)
+                if score > best_score:
+                    best_score, best = score, v
+            # Require at least one reasonably distinctive shared token
+            # (df<=2 → score>=0.5). A lone generic token won't clear this.
+            return best if best_score >= 0.5 else None
+
         matched: dict[int, list[PairItem]] = {id(v): [] for v, _, _ in video_info}
         unmatched_scripts: list[PairItem] = []
 
@@ -1425,10 +1482,40 @@ class QueueManager:
             v = _find_video(_key(base))
             if v is None:
                 v = _find_video(_key(base, strip_prefix=True))
+            if v is None:
+                v = _find_video_by_tokens(base)
             if v is not None:
                 matched[id(v)].append(s)
             else:
                 unmatched_scripts.append(s)
+
+        # Document-order rescue for orphan scripts. EroScripts authors usually
+        # lay a bundle out as "video, then its script, next video, its
+        # script, …", so a script's partner is the video at the same position.
+        # Name matching can't recover a pairing the names don't share — e.g. a
+        # work whose video is a rule34.xxx post (URL slug just "index.php")
+        # while the script is "Delta [AuthX]". Fall back to position: attach
+        # each leftover script to the nearest *script-less* video by rank
+        # (videos and scripts each keep their document order in pair.items,
+        # even though all videos precede all scripts). Name matches are never
+        # disturbed — this only places true orphans, and only onto videos that
+        # found no script of their own.
+        if unmatched_scripts:
+            vrank = {id(v): r for r, v in enumerate(videos)}
+            srank = {id(s): r for r, s in enumerate(scripts)}
+            still_unmatched: list[PairItem] = []
+            for s in unmatched_scripts:
+                rs = srank.get(id(s), 0)
+                cand = [v for v, _, _ in video_info if not matched[id(v)]]
+                if not cand:
+                    still_unmatched.append(s)
+                    continue
+                cand.sort(key=lambda v: (
+                    abs(vrank.get(id(v), 0) - rs),
+                    0 if vrank.get(id(v), 0) <= rs else 1,
+                ))
+                matched[id(cand[0])].append(s)
+            unmatched_scripts = still_unmatched
 
         # Create new pairs — each split pair becomes its own folder, so
         # whatever group label items carried from the bundle source is no
@@ -1580,6 +1667,19 @@ class QueueManager:
             for chunk in iter(lambda: f.read(1 << 20), b""):
                 h.update(chunk)
         return h.hexdigest()
+
+    @classmethod
+    def _same_file(cls, a: Path, b: Path) -> bool:
+        """True only when both paths hold byte-identical content. Size is
+        checked first as a cheap reject; sha256 confirms. Any visual
+        difference (different character, recolor, re-encode) changes the
+        bitstream, so this never reports a variant render as a duplicate."""
+        try:
+            if a.stat().st_size != b.stat().st_size:
+                return False
+            return cls._file_sha256(a) == cls._file_sha256(b)
+        except OSError:
+            return False
 
     def _library_dirs(self) -> list[Path]:
         """Folders to scan for an existing copy of a work: download_dir plus
@@ -1874,8 +1974,27 @@ class QueueManager:
                 new_path = output_dir / new_name
                 if old_path != new_path:
                     if new_path.exists():
-                        logger.warning("Target file already exists, skipping rename: %s", new_path)
-                        main_video_path = new_path  # treat the existing one as primary
+                        # Target name is taken by a pre-existing copy (e.g. a
+                        # re-download into an already-organized work, where
+                        # reconcile bailed because this pair had no script).
+                        # If the download is byte-identical it's pure
+                        # redundancy — drop it instead of leaving a duplicate.
+                        # Only when the content differs (a real variant render
+                        # or a name collision) do we keep both.
+                        if self._same_file(old_path, new_path):
+                            old_path.unlink(missing_ok=True)
+                            item.filename = new_name
+                            main_video_path = new_path
+                            logger.info(
+                                "Dropped duplicate re-download (identical to existing %s): %s",
+                                new_name, old_path.name,
+                            )
+                        else:
+                            logger.warning(
+                                "Target file already exists and differs, keeping both: %s",
+                                new_path,
+                            )
+                            main_video_path = new_path  # treat the existing one as primary
                         continue
                     try:
                         old_path.rename(new_path)
@@ -2257,14 +2376,30 @@ class QueueManager:
     def _guess_filename(url: str, file_type: str) -> str:
         from urllib.parse import urlparse, unquote
 
-        path = urlparse(url).path
-        name = unquote(path.split("/")[-1]) if path else ""
+        parsed = urlparse(url)
+        path = parsed.path
+        # Use the last NON-EMPTY path segment. Many sites (rule34video etc.)
+        # end the URL with a trailing slash, so split("/")[-1] is "" and we'd
+        # fall back to the generic "video"/"script" name. That generic name
+        # then poisons bundle auto-split — every video becomes "video", so the
+        # pairs collide on one folder and scripts can't be matched to a video.
+        # The real slug (e.g. "authx-gamma-eng-sub") lives one segment back.
+        segments = [seg for seg in path.split("/") if seg]
+        name = unquote(segments[-1]) if segments else ""
 
-        if not name or name == "/":
-            if file_type == "funscript":
-                name = "script.funscript"
-            else:
-                name = "video.mp4"
+        # Imageboards (rule34.xxx etc.) route everything through "index.php" and
+        # carry the real subject in ?tags= — without this the name is a useless
+        # "index.php", which both names the folder badly and gives auto-split
+        # nothing to match a script against (e.g. an "Delta" script whose video
+        # is a rule34.xxx post).
+        if name in ("", "index.php", "index") and parsed.query:
+            from urllib.parse import parse_qs
+            tags = parse_qs(parsed.query).get("tags", [""])[0].strip()
+            if tags:
+                name = unquote(tags).replace("+", " ").strip()
+
+        if not name:
+            name = "script.funscript" if file_type == "funscript" else "video.mp4"
 
         return sanitize_filename(name)
 

@@ -1,7 +1,9 @@
 """Tests for QueueManager.add_pair with script_authors."""
 from pathlib import Path
 
-from funpairdl.core.pair import FileType, Pair, PairItem
+from funpairdl.core.pair import (
+    FileType, ItemState, Pair, PairItem, PairState,
+)
 from funpairdl.core.queue_manager import QueueManager
 
 
@@ -230,6 +232,57 @@ class TestAddPairAuthors:
         assert authors == ["Alpha", "Beta", "Gamma"]
 
 
+class TestResumePair:
+    """Resuming must re-queue the pair so the pump restarts it. Pausing
+    cancels the live download coroutine, so resume can't rely on waking a
+    paused coroutine — it has to reset items to PENDING + mark QUEUED."""
+
+    def _qm_with_pair(self, pair_state, item_states):
+        qm = QueueManager()
+        items = [_vi(f"f{i}.mp4", FileType.VIDEO) for i in range(len(item_states))]
+        for it, st in zip(items, item_states):
+            it.state = st
+        pair = Pair(name="P", items=items)
+        pair.state = pair_state
+        qm.pairs.append(pair)
+        return qm, pair
+
+    def test_paused_pair_requeues(self):
+        qm, pair = self._qm_with_pair(
+            PairState.PAUSED, [ItemState.PAUSED, ItemState.PAUSED]
+        )
+        qm.resume_pair(pair.id)
+        assert pair.state == PairState.QUEUED
+        assert all(i.state == ItemState.PENDING for i in pair.items)
+
+    def test_stuck_downloading_with_paused_items_recovers(self):
+        # An earlier buggy resume could leave the pair DOWNLOADING while its
+        # items stayed PAUSED with no task running. Resume must rescue it.
+        qm, pair = self._qm_with_pair(
+            PairState.DOWNLOADING, [ItemState.PAUSED, ItemState.COMPLETED]
+        )
+        qm.resume_pair(pair.id)
+        assert pair.state == PairState.QUEUED
+        assert pair.items[0].state == ItemState.PENDING
+        assert pair.items[1].state == ItemState.COMPLETED  # untouched
+
+    def test_failed_pair_requeues(self):
+        qm, pair = self._qm_with_pair(
+            PairState.FAILED, [ItemState.FAILED, ItemState.COMPLETED]
+        )
+        qm.resume_pair(pair.id)
+        assert pair.state == PairState.QUEUED
+        assert pair.items[0].state == ItemState.PENDING
+        assert pair.items[1].state == ItemState.COMPLETED
+
+    def test_completed_pair_is_noop(self):
+        qm, pair = self._qm_with_pair(
+            PairState.COMPLETED, [ItemState.COMPLETED]
+        )
+        qm.resume_pair(pair.id)
+        assert pair.state == PairState.COMPLETED
+
+
 class TestCleanTitle:
     def test_bundle_url_detection(self):
         assert QueueManager._is_bundle_url("https://pixeldrain.com/l/abc123")
@@ -243,3 +296,52 @@ class TestCleanTitle:
         assert not QueueManager._is_bundle_url(
             "https://mega.nz/folder/abc#key/file/FILEHANDLE"
         )
+
+
+class TestOrganizeDedupOnRedownload:
+    """A video-only pair makes reconcile bail (no script), so it falls to
+    _organize_output. When the organized target name already holds a
+    pre-existing copy, the rename is skipped — historically that left the
+    fresh download as a duplicate. It must now be dropped iff byte-identical."""
+
+    def _video_pair(self, out_dir, name, download_name):
+        item = PairItem(url="u/" + download_name, filename=download_name,
+                        file_type=FileType.VIDEO)
+        item.state = ItemState.COMPLETED
+        return Pair(name=name, items=[item], output_dir=str(out_dir))
+
+    def _base(self, name):
+        from funpairdl.utils.filename import sanitize_filename
+        return sanitize_filename(QueueManager._clean_title(name))
+
+    def test_drops_byte_identical_redownload(self, tmp_path):
+        name = "AkoTest"
+        base = self._base(name)
+        existing = tmp_path / f"{base}.mp4"
+        existing.write_bytes(b"VIDEO-BYTES" * 1000)
+        dl = tmp_path / "ako-bunny_1080p.mp4"
+        dl.write_bytes(existing.read_bytes())  # identical re-download
+        pair = self._video_pair(tmp_path, name, "ako-bunny_1080p.mp4")
+
+        QueueManager()._organize_output(pair)
+
+        assert existing.exists()
+        assert not dl.exists()                      # duplicate removed
+        assert pair.items[0].filename == f"{base}.mp4"   # manifest -> survivor
+        mp4s = list(tmp_path.glob("*.mp4"))
+        assert len(mp4s) == 1
+
+    def test_keeps_both_when_content_differs(self, tmp_path):
+        name = "AkoTest"
+        base = self._base(name)
+        existing = tmp_path / f"{base}.mp4"
+        existing.write_bytes(b"ORIGINAL-RENDER" * 1000)
+        dl = tmp_path / "ako-bunny_1080p.mp4"
+        dl.write_bytes(b"DIFFERENT-CHARACTER-VARIANT" * 1000)  # different bytes
+        pair = self._video_pair(tmp_path, name, "ako-bunny_1080p.mp4")
+
+        QueueManager()._organize_output(pair)
+
+        assert existing.exists()
+        assert dl.exists()                          # variant kept, not deleted
+        assert len(list(tmp_path.glob("*.mp4"))) == 2

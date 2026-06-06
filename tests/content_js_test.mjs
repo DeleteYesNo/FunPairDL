@@ -71,6 +71,19 @@ check("real work name is NOT generic",
   ctx._isGenericSectionName("Aisha Bunny - Wild asian babe lets me cum"), false);
 check("decorated real name is NOT generic", ctx._isGenericSectionName("༺༻ Gura Meal ༺༻"), false);
 
+// ── cleanScriptName: strip Discourse size annotation + leading glyphs ──
+const U = "https://eroscripts-discourse.eroscripts.com/original/4X/d/d/c/abcdef.funscript";
+check("strips trailing size + leading glyph",
+  ctx.cleanScriptName("sample-rope-demo-work.funscript? (27.2 KB)", U), "sample-rope-demo-work.funscript");
+check("keeps axis suffix, drops size",
+  ctx.cleanScriptName("name.twist.funscript (1.3 MB)", U), "name.twist.funscript");
+check("keeps author brackets",
+  ctx.cleanScriptName("[Author] Title.funscript (800 B)", U), "[Author] Title.funscript");
+check("keeps CJK + fullwidth brackets",
+  ctx.cleanScriptName("【multi】示例.funscript (12.0 KB)", U), "【multi】示例.funscript");
+check("clean name passes through", ctx.cleanScriptName("clean-name.funscript", U), "clean-name.funscript");
+check("empty falls back to URL basename", ctx.cleanScriptName("", U), "abcdef.funscript");
+
 if (failures) {
   console.error(`\n${failures} assertion(s) failed`);
   process.exit(1);
