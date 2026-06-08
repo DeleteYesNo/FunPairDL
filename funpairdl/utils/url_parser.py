@@ -28,6 +28,10 @@ def detect_provider(url: str) -> str:
     ytdlp_domains = [
         "rule34video.com", "rule34.xxx", "hanime1.me",
         "bilibili.com", "b23.tv",
+        # VK serves video as HLS/DASH; yt-dlp resolves it to a manifest the
+        # HLS downloader (ffmpeg) handles. Routing it to "direct" instead made
+        # the segment downloader hit VK's okcdn CDN raw and get HTTP 400.
+        "vk.com", "vkvideo.ru",
         "pornhub.com", "xvideos.com", "xnxx.com", "xhamster.com",
         "spankbang.com", "eporner.com", "redtube.com", "youporn.com",
         "tube8.com", "tnaflix.com",
