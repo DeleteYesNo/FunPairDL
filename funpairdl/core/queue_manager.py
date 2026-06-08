@@ -270,7 +270,13 @@ class QueueManager:
         )
         if existing:
             if existing.state == PairState.FAILED:
-                # Re-queue the failed pair instead of creating a duplicate
+                # Re-queue the failed pair instead of creating a duplicate.
+                # Apply this submission's prefs — a user who re-adds with a
+                # different preferred_resolution (e.g. "best" after a "format
+                # not available" failure) expects the new value to take effect,
+                # not silently keep the old one.
+                existing.preferred_resolution = preferred_resolution
+                existing.auto_rename = auto_rename
                 existing.state = PairState.QUEUED
                 for item in existing.items:
                     if item.state == ItemState.FAILED:

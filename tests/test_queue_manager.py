@@ -223,6 +223,33 @@ class TestBundleFilenames:
         assert Path(pair.output_dir).resolve() in resolved.parents
 
 
+class TestRequeueFailedPair:
+    def test_requeue_failed_applies_new_resolution(self):
+        # Re-adding a failed work must adopt the new submission's
+        # preferred_resolution — e.g. switching to "best" after a bilibili
+        # "format not available" failure — not silently keep the old value.
+        qm = QueueManager()
+        p1 = qm.add_pair(
+            name="VKWork",
+            video_urls=["https://m.vk.com/video-1_2"],
+            preferred_resolution="1080",
+        )
+        p1.state = PairState.FAILED
+        for i in p1.items:
+            i.state = ItemState.FAILED
+            i.error_message = "boom"
+
+        p2 = qm.add_pair(
+            name="VKWork",
+            video_urls=["https://m.vk.com/video-1_2"],
+            preferred_resolution="best",
+        )
+        assert p2 is p1                            # reused, not duplicated
+        assert p1.preferred_resolution == "best"   # new pref applied
+        assert p1.state == PairState.QUEUED
+        assert all(i.state == ItemState.PENDING for i in p1.items)
+
+
 class TestAddPairAuthors:
     def test_add_pair_with_script_authors(self):
         qm = QueueManager()
