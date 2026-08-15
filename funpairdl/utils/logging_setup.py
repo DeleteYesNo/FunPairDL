@@ -29,4 +29,16 @@ def setup_logging(level: int = logging.INFO) -> logging.Logger:
         ch.setFormatter(fmt)
         logger.addHandler(ch)
 
+    # Under pythonw.exe stderr is None, so an uncaught exception (including
+    # one raised inside a Qt slot — PySide6 reports those via PyErr_Print,
+    # which calls sys.excepthook) vanishes without a trace and the UI just
+    # silently "does nothing". Route them into the log file instead.
+    def _log_excepthook(exc_type, exc, tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc, tb)
+            return
+        logger.error("Uncaught exception", exc_info=(exc_type, exc, tb))
+
+    sys.excepthook = _log_excepthook
+
     return logger
