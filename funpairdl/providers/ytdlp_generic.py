@@ -96,11 +96,26 @@ class YtdlpGenericProvider(BaseProvider):
         # Get direct video URL
         video_url = info.get("url", "")
         selected_format = None
+        formats = info.get("formats") or []
         if not video_url:
-            formats = info.get("formats", [])
             if formats:
                 selected_format = _select_format(formats, preferred_resolution)
                 video_url = selected_format.get("url", "")
+        elif formats:
+            # Some extractors (BunnyCdn among them) pre-select their own best
+            # format into info["url"], which silently overrode the requested
+            # resolution — a 480p request still downloaded 1080p. Divert only
+            # when the request can actually be honoured, so the "best" path
+            # stays exactly the format yt-dlp chose.
+            try:
+                target = int(preferred_resolution)
+            except (ValueError, TypeError):
+                target = 0
+            if target:
+                picked = _select_format(formats, preferred_resolution)
+                if picked.get("url") and _get_height(picked) == target:
+                    selected_format = picked
+                    video_url = picked["url"]
 
         if not video_url:
             raise ValueError(f"No video URL found for: {url}")
