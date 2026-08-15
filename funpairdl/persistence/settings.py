@@ -83,6 +83,11 @@ class Settings:
     browser_active_tab: int = 0  # Index of the active tab
     browser_scroll_positions: list[float] = field(default_factory=list)  # Scroll Y per tab
 
+    # Batch overlay auto-close: topic_id → {"url", "pair_ids": [...]}. The
+    # topic's tab(s) close once every listed pair finishes downloading;
+    # persisted so a restart mid-download doesn't lose the request.
+    batch_autoclose: dict = field(default_factory=dict)
+
     # Clipboard Watcher
     clipboard_watch_enabled: bool = True
     clipboard_watch_domains: list[str] = field(
