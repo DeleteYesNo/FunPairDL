@@ -179,24 +179,32 @@ class PixeldrainProvider(BaseProvider):
             fs_path = "/" + "/".join(decoded)
             return await self._resolve_filesystem(fs_path)
 
+        # /api/file/{id} — the URL explicitly names the legacy single-file
+        # API (this is the form the extension panel emits for script
+        # attachments). Resolving it through the filesystem endpoint 404s
+        # for most uploads, so go straight to the legacy API.
+        if path_parts[0] == "api" and len(path_parts) >= 3 and path_parts[1] == "file":
+            return await self._resolve_legacy_file(path_parts[2])
+
         # /l/{list_id} — legacy list, only first file
         if path_parts[0] == "l" and len(path_parts) >= 2:
             return await self._resolve_list(path_parts[1])
 
-        # /d/{id} or /u/{id} — single id.
-        #   /d/  = filesystem bucket (always works via /api/filesystem/)
-        #   /u/  = legacy single-file id (works via /api/file/ and
-        #          USUALLY but not always via /api/filesystem/). Try the
+        # /d/{id} or /u/{id} (or a bare id) — single id.
+        #   /d/  = filesystem bucket (always works via /api/filesystem/;
+        #          a 404 there means the bucket is really gone)
+        #   /u/ and bare ids = legacy single-file id (works via /api/file/
+        #          and USUALLY but not always via /api/filesystem/). Try the
         #          modern endpoint first, fall back to legacy on 404.
         file_id = extract_pixeldrain_id(url)
         if not file_id:
             raise ValueError(f"Cannot extract Pixeldrain id from: {url}")
-        is_legacy_u = path_parts[0] == "u"
+        is_fs_bucket = path_parts[0] == "d"
         try:
             return await self._resolve_filesystem(f"/{file_id}")
         except aiohttp.ClientResponseError as e:
-            if e.status == 404 and is_legacy_u:
-                logger.info("Filesystem 404 for /u/%s; falling back to legacy /api/file/", file_id)
+            if e.status == 404 and not is_fs_bucket:
+                logger.info("Filesystem 404 for %s; falling back to legacy /api/file/", file_id)
                 return await self._resolve_legacy_file(file_id)
             raise
 
@@ -237,13 +245,22 @@ class PixeldrainProvider(BaseProvider):
         and /api/file/{id} for download."""
         headers = self._auth_headers()
         info_url = f"{PIXELDRAIN_FILE_API}/{file_id}/info"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                info_url, headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
+        data = await self._get_json(info_url, headers)
+
+        # The info payload announces per-file download blocks up front (e.g.
+        # "file_rate_limited_captcha_required" — the hotlink limit that only a
+        # PAID account or a browser captcha lifts; a valid free-account key
+        # still 403s). Downloading would fail with an opaque HTTP 403, so
+        # surface the actionable reason at resolve time instead.
+        availability = data.get("availability") or ""
+        if availability:
+            detail = data.get("availability_message") or availability
+            raise RuntimeError(
+                f"Pixeldrain refuses downloads of this file ({availability}): "
+                f"{detail} Retry later, use a paid Pixeldrain account API key, "
+                f"or download manually at https://pixeldrain.com/u/{file_id}"
+            )
+
         filename = sanitize_filename(data.get("name", file_id))
         return ResolvedFile(
             direct_url=f"{PIXELDRAIN_FILE_API}/{file_id}",

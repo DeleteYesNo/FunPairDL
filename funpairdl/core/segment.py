@@ -26,6 +26,32 @@ _FLUSH_SIZE = 4 * 1024 * 1024  # 4 MB
 _disk_write_sem = threading.Semaphore(4)
 
 
+async def _read_error_detail(resp) -> str:
+    """Extract a human-readable reason from a small JSON error body.
+
+    Hosts like pixeldrain answer 4xx with {"value": ..., "message": ...}
+    explaining WHY (rate limit, captcha, virus flag); without it the user
+    only sees an opaque status code. Anything unreadable is ignored.
+    """
+    import json
+
+    try:
+        stream = resp.content
+        raw = b""
+        while len(raw) < 512:
+            chunk = await stream.read(512 - len(raw))
+            if not chunk:  # EOF
+                break
+            raw += chunk
+        body = json.loads(raw.decode("utf-8", "replace"))
+    except Exception:
+        return ""
+    if isinstance(body, dict):
+        parts = [str(body[key]) for key in ("value", "message") if body.get(key)]
+        return " — ".join(parts)
+    return ""
+
+
 class SegmentDownloader:
     """Downloads a single byte-range segment of a file."""
 
@@ -153,8 +179,10 @@ class SegmentDownloader:
                     if resp.status not in expected_statuses:
                         # 4xx (except 429) are permanent — don't retry
                         if 400 <= resp.status < 500 and resp.status != 429:
+                            detail = await _read_error_detail(resp)
                             raise RuntimeError(
                                 f"HTTP {resp.status} (permanent) for segment {self.index}"
+                                + (f": {detail}" if detail else "")
                             )
                         raise aiohttp.ClientResponseError(
                             resp.request_info,
