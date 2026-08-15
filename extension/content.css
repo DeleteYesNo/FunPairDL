@@ -555,12 +555,42 @@
 }
 
 .funpairdl-group-body:empty::before {
-  content: "(空)";
+  content: "拖曳項目到這裡";
   display: block;
   font-size: 11px;
   color: #555;
   font-style: italic;
-  padding: 4px 8px;
+  padding: 10px 8px;
+  text-align: center;
+  border: 1px dashed #333;
+  border-radius: 6px;
+  margin: 2px 0;
+}
+
+/* ── Drag-to-group ── */
+.funpairdl-drag-handle {
+  flex-shrink: 0;
+  cursor: grab;
+  color: #667;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  user-select: none;
+}
+
+.funpairdl-drag-handle:hover { color: #4a90d9; }
+.funpairdl-drag-handle:active { cursor: grabbing; }
+
+.funpairdl-item.funpairdl-dragging {
+  opacity: 0.45;
+}
+
+/* Highlight the group block the cursor is hovering during a drag. */
+.funpairdl-group-block.funpairdl-drag-over {
+  outline: 2px solid #4a90d9;
+  outline-offset: -2px;
+  background: rgba(74, 144, 217, 0.08);
+  border-radius: 6px;
 }
 
 .funpairdl-inherit-preview {
