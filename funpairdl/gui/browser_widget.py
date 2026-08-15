@@ -1101,12 +1101,18 @@ class BrowserWidget(QWidget):
         # Suppress intermediate repaints while adding tab
         self._tabs.setUpdatesEnabled(False)
         idx = self._tabs.addTab(view, "New Tab")
-        self._tabs.setCurrentIndex(idx)
+        if select:
+            self._tabs.setCurrentIndex(idx)
         self._tabs.setUpdatesEnabled(True)
 
         # Connect signals
         view.titleChanged.connect(lambda title, v=view: self._on_title_changed(v, title))
         view.urlChanged.connect(lambda u, v=view: self._on_url_changed(v, u))
+        # Load-visibility boost: background/hidden pages get their JS timers
+        # throttled by Chromium (~1 wake/s), which slows a Discourse boot to a
+        # crawl — see _boost_view.
+        page.loadStarted.connect(lambda v=view: self._on_page_load_started(v))
+        page.loadFinished.connect(lambda ok, v=view: self._on_page_load_finished(v, ok))
         page._create_tab_func = self._create_tab_for_window
 
         if url:
@@ -1193,35 +1199,107 @@ class BrowserWidget(QWidget):
     # ─── Signal handlers ───
 
     def _on_tab_changed(self, index: int):
-        """Update URL bar when switching tabs.
+        """Update URL bar when switching tabs; kick deferred tab loads.
 
-        Also re-show background tab QWebEngineViews that QTabWidget hid.
-        When a QWebEngineView is hidden, Qt tells Chromium to stop compositing.
-        Chromium then evicts rendering resources (textures, compositor layers).
-        On re-show, it must re-rasterize the entire page — very slow for
-        long-scrolled Discourse pages.
-
-        By keeping all views 'visible' (stacked behind the active one),
-        Chromium keeps their renderer warm and switching back is instant.
+        Background tabs stay hidden so Chromium can throttle and idle them
+        (audit [5] — the old force-show "keep alive" is deliberately gone;
+        we accept a brief re-rasterize on switch instead of N tabs
+        compositing at full speed forever).
         """
         view = self._current_view()
         if view:
             self.url_bar.setText(view.url().toString())
-
-        # Re-show any hidden tab views so Chromium keeps rendering them.
-        # They're behind the active tab (same position in stacked layout),
-        # so they don't affect visuals or receive input.
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(0, self._keep_background_tabs_alive)
-
-    def _keep_background_tabs_alive(self):
-        """Re-show background QWebEngineViews that QTabWidget hid."""
-        current = self._tabs.currentIndex()
+            # Lazily-restored tab activated for the first time → load now
+            self._load_pending(view)
+        # Switching away hides the old widget, and Qt then marks its page
+        # invisible — which would kill an active load boost mid-load.
+        # Re-assert the boost for any still-loading (or settling) tab.
         for i in range(self._tabs.count()):
-            w = self._tabs.widget(i)
-            if w and isinstance(w, QWebEngineView) and not w.isVisible():
-                w.show()
-                w.lower()  # behind the active tab
+            v = self._tabs.widget(i)
+            if (isinstance(v, QWebEngineView) and v is not view
+                    and self._view_boost_active(v)):
+                self._boost_view(v)
+
+    # --- Load-visibility boost -------------------------------------------
+    #
+    # Chromium throttles hidden pages' JS timers to ~1 wake/s. With the old
+    # global anti-throttling flags removed (audit [5]), a page loading in a
+    # background tab — or while the Downloads tab is focused, or while the
+    # window is occluded — boots at a crawl (Discourse is timer-heavy). The
+    # bounded fix: tell Chromium the page is visible ONLY while it loads
+    # (plus a short settle window for post-onload SPA boot), then hand
+    # visibility back to the widget state so idle tabs throttle as intended.
+
+    _LOAD_BOOST_SETTLE_MS = 10_000
+
+    def _on_page_load_started(self, view: QWebEngineView):
+        view._load_started_at = time.monotonic()
+        self._boost_view(view)
+
+    def _on_page_load_finished(self, view: QWebEngineView, ok: bool):
+        started = getattr(view, "_load_started_at", None)
+        view._load_started_at = None
+        # Never SHRINK an externally extended boost window (batch send-all
+        # keeps background tabs unthrottled for its whole run).
+        view._boost_until = max(
+            getattr(view, "_boost_until", 0.0),
+            time.monotonic() + self._LOAD_BOOST_SETTLE_MS / 1000,
+        )
+        # Generation counter: only the timer scheduled by the LATEST finish
+        # may end the boost (a re-load within the settle window supersedes).
+        gen = getattr(view, "_boost_gen", 0) + 1
+        view._boost_gen = gen
+        if started is not None:
+            where = "foreground" if view is self._current_view() else "background"
+            logger.info(
+                "Page loaded in %.1fs (%s, ok=%s): %s",
+                time.monotonic() - started, where, ok,
+                view.url().toString()[:100],
+            )
+        QTimer.singleShot(
+            self._LOAD_BOOST_SETTLE_MS, lambda v=view, g=gen: self._end_boost(v, g)
+        )
+
+    def _view_boost_active(self, view: QWebEngineView) -> bool:
+        if getattr(view, "_load_started_at", None) is not None:
+            return True
+        return time.monotonic() < getattr(view, "_boost_until", 0.0)
+
+    def _boost_view(self, view: QWebEngineView):
+        try:
+            page = view.page()
+            if page is not None and not page.isVisible():
+                page.setVisible(True)
+        except RuntimeError:
+            pass  # view/page mid-destruction
+
+    def _end_boost(self, view: QWebEngineView, gen: int):
+        """Settle timer fired — drop the Chromium-visible override unless the
+        tab is current, still loading, or a newer load superseded this timer."""
+        try:
+            if self._tabs.indexOf(view) < 0:
+                return  # tab closed
+            if gen != getattr(view, "_boost_gen", 0):
+                return  # superseded by a newer loadFinished
+            if view is self._current_view():
+                return
+            if getattr(view, "_load_started_at", None) is not None:
+                return  # a fresh load is in flight
+            # An externally extended boost window (batch send-all) is still
+            # active — check back when it lapses instead of dropping
+            # visibility mid-run.
+            remaining = getattr(view, "_boost_until", 0.0) - time.monotonic()
+            if remaining > 0:
+                QTimer.singleShot(
+                    int(remaining * 1000) + 200,
+                    lambda v=view, g=gen: self._end_boost(v, g),
+                )
+                return
+            page = view.page()
+            if page is not None and page.isVisible():
+                page.setVisible(False)
+        except RuntimeError:
+            pass
 
     def _on_url_changed(self, view: QWebEngineView, url: QUrl):
         """Update URL bar if this is the active tab."""
