@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -25,6 +27,15 @@ _cache: Settings | None = None
 _cache_path: Path | None = None
 _cache_time: float = 0
 _CACHE_TTL: float = 5.0  # seconds
+
+# Serializes save() across threads (GUI, api-worker cookie sync, dl-thread) —
+# two concurrent writers on the same file would interleave and tear it.
+_save_lock = threading.Lock()
+
+# Serializes read-modify-write cycles (Settings.update). save()'s _save_lock
+# only protects the write itself — two threads doing load→mutate→save would
+# still lose one side's change without this.
+_update_lock = threading.RLock()
 
 
 def _cache_key(path: Path) -> Path:
@@ -131,16 +142,62 @@ class Settings:
                 return instance
             except Exception as e:
                 logger.warning("Failed to load settings: %s", e)
+                # Preserve the damaged file — config.json carries the browser
+                # tabs and cookie jar; returning defaults and letting the next
+                # save() overwrite it would silently destroy them.
+                try:
+                    stamp = time.strftime("%Y%m%d-%H%M%S")
+                    os.replace(path, path.with_name(f"{path.name}.corrupt-{stamp}"))
+                    logger.error("Sidelined unreadable settings file as %s.corrupt-%s",
+                                 path.name, stamp)
+                except OSError:
+                    pass
         return cls()
+
+    @classmethod
+    def update(cls, mutator, path: Path = CONFIG_FILE) -> Settings:
+        """Atomic read-modify-write: locked fresh load → mutator(settings) →
+        save. Use this instead of load()+mutate+save() whenever another
+        thread might be updating a DIFFERENT field concurrently (cookie sync
+        on the worker loop vs. browser-tab snapshot on the GUI thread) —
+        unlocked cycles silently revert each other's fields."""
+        with _update_lock:
+            # Bypass the TTL cache: a stale instance would resurrect old
+            # values for every field the mutator doesn't touch.
+            global _cache_time
+            _cache_time = 0
+            settings = cls.load(path)
+            mutator(settings)
+            settings.save(path)
+            return settings
 
     def save(self, path: Path = CONFIG_FILE) -> None:
         global _cache, _cache_path, _cache_time
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(asdict(self), f, indent=2, ensure_ascii=False)
-        # Update cache immediately after save — keyed to this path so a
-        # later load() of a *different* path won't return this instance.
-        _cache = self
-        _cache_path = _cache_key(path)
-        _cache_time = time.monotonic()
-        logger.debug("Settings saved to %s", path)
+        with _save_lock:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # Atomic: temp file + os.replace, so a kill mid-write can never
+            # truncate config.json (it holds the browser tabs + cookie jar).
+            tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(asdict(self), f, indent=2, ensure_ascii=False)
+                # Retry: on Windows a concurrent reader (dl-thread pump,
+                # API handler) holds a share lock that makes ReplaceFile
+                # fail transiently.
+                for attempt in range(5):
+                    try:
+                        os.replace(tmp, path)
+                        break
+                    except PermissionError:
+                        if attempt == 4:
+                            raise
+                        time.sleep(0.05 * (attempt + 1))
+            except Exception:
+                tmp.unlink(missing_ok=True)
+                raise
+            # Update cache immediately after save — keyed to this path so a
+            # later load() of a *different* path won't return this instance.
+            _cache = self
+            _cache_path = _cache_key(path)
+            _cache_time = time.monotonic()
+            logger.debug("Settings saved to %s", path)
