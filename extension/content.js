@@ -2,6 +2,33 @@
 // Parses posts to extract video + funscript links
 // Supports: single-video posts AND multi-video collection posts
 
+// ─── Host gate (audit [2]) ───
+// content.js is injected profile-wide in the embedded browser, so it executes
+// in every tab (pixeldrain, gofile, mega.nz, the hidden MEGA login page, ...).
+// All active behaviour — observers, timers, the relogin poll — must only run
+// on EroScripts itself. Pure helper functions stay defined unconditionally so
+// tests (tests/content_js_test.mjs) can exercise them; the bootstrap at the
+// bottom of the file checks this gate before registering anything. An empty /
+// missing hostname (test-harness stubs) is allowed through.
+function _funpairdlHostAllowed() {
+  try {
+    const host = (typeof location !== "undefined" && location.hostname)
+      ? String(location.hostname).toLowerCase() : "";
+    if (!host) return true;
+    return host === "eroscripts.com" || host.endsWith(".eroscripts.com");
+  } catch (e) { return true; }
+}
+
+// Escape a value for interpolation into an HTML attribute (double quotes
+// included — a quote in a filename/URL must not truncate the attribute, or
+// dataset reads would send wrong filename/URL mappings to the backend;
+// audit [2e]). Safe for text content too.
+function escapeAttr(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 // Video source priority (lower = higher priority)
 const VIDEO_PRIORITY = {
   // File hosters
@@ -142,10 +169,15 @@ function _extractHeadingScopedVideos(containerEl, isOP) {
   for (const a of links) {
     const href = a.getAttribute("href");
     if (!href || !_isOfferableVideoHost(href)) continue;
-    // Owner heading = the last heading that precedes this link in the document.
+    // Owner heading = the last heading that precedes this link in the
+    // document. Scan in reverse and stop at the first hit (audit [2a] —
+    // the forward scan paid O(headings) compareDocumentPosition per link).
     let owner = null;
-    for (const h of headings) {
-      if (h.compareDocumentPosition(a) & Node.DOCUMENT_POSITION_FOLLOWING) owner = h;
+    for (let i = headings.length - 1; i >= 0; i--) {
+      if (headings[i].compareDocumentPosition(a) & Node.DOCUMENT_POSITION_FOLLOWING) {
+        owner = headings[i];
+        break;
+      }
     }
     if (!owner || !_isVideoLinkHeadingText(owner.textContent)) continue;
     let label = "Link";
@@ -717,28 +749,36 @@ function _buildElementIndex(root) {
 }
 
 /**
- * Find the ordinal position of the DOM element representing `url`
- * inside `cookedEl`. Returns Infinity if not found.
- *
- * Looks at both `<a href>` and `<code>` text content because some posters
- * paste raw URLs as code blocks.
+ * Build a lookup of URL → document-order ordinal for every `<a href>` and
+ * raw-URL `<code>` under `cookedEl`. Built ONCE per post and passed to
+ * `_urlOrdinal` — the old per-URL querySelectorAll pass was O(items × links)
+ * (audit [2a]). Links are indexed before codes and first occurrence wins,
+ * matching the old lookup precedence.
  */
-function _urlOrdinal(cookedEl, elIndex, url) {
-  const links = cookedEl.querySelectorAll("a[href]");
-  for (const link of links) {
-    if (link.getAttribute("href") === url) {
-      const ord = elIndex.get(link);
-      if (ord !== undefined) return ord;
-    }
-  }
-  const codes = cookedEl.querySelectorAll("code");
-  for (const code of codes) {
-    if (code.textContent.trim() === url) {
-      const ord = elIndex.get(code);
-      if (ord !== undefined) return ord;
-    }
-  }
-  return Infinity;
+function _buildUrlOrdinalMap(cookedEl, elIndex) {
+  const map = new Map();
+  cookedEl.querySelectorAll("a[href]").forEach((link) => {
+    const href = link.getAttribute("href");
+    if (!href || map.has(href)) return;
+    const ord = elIndex.get(link);
+    if (ord !== undefined) map.set(href, ord);
+  });
+  cookedEl.querySelectorAll("code").forEach((code) => {
+    const text = code.textContent.trim();
+    if (!text || map.has(text)) return;
+    const ord = elIndex.get(code);
+    if (ord !== undefined) map.set(text, ord);
+  });
+  return map;
+}
+
+/**
+ * Ordinal position of the element representing `url`, from the prebuilt
+ * per-post map (see _buildUrlOrdinalMap). Returns Infinity if not found.
+ */
+function _urlOrdinal(ordMap, url) {
+  const ord = ordMap.get(url);
+  return ord === undefined ? Infinity : ord;
 }
 
 /**
@@ -758,11 +798,12 @@ function _pairWithinPost(cookedEl, videos, scripts) {
   }
 
   const elIndex = _buildElementIndex(cookedEl);
-  const videoOrds = videos.map((v) => _urlOrdinal(cookedEl, elIndex, v.url));
+  const ordMap = _buildUrlOrdinalMap(cookedEl, elIndex);
+  const videoOrds = videos.map((v) => _urlOrdinal(ordMap, v.url));
   const buckets = videos.map(() => []);
 
   for (const s of scripts) {
-    const sOrd = _urlOrdinal(cookedEl, elIndex, s.url);
+    const sOrd = _urlOrdinal(ordMap, s.url);
     let best = 0;
     let bestDist = Math.abs(sOrd - videoOrds[0]);
     for (let i = 1; i < videoOrds.length; i++) {
@@ -776,18 +817,59 @@ function _pairWithinPost(cookedEl, videos, scripts) {
 
 // ─── Main parser ───
 
-function parseAllPosts() {
-  const posts = document.querySelectorAll(".topic-post");
+// Cloaked (lazy-loaded) posts aren't in the DOM; recovering one costs a full
+// innerHTML parse + link extraction. The content is static for a given topic,
+// so cache the parse per post id — parseAllPosts runs on page load AND again
+// on every panel click (audit [2a]). The cache is invalidated when the topic
+// changes or when the link-filename map upgrades from the SSR fallback to the
+// fetched topic JSON (the map changes script-vs-video classification).
+let _cloakedCacheTopicId = null;
+let _cloakedCacheMapSource = null; // "fetched" | "ssr"
+const _cloakedParseCache = new Map(); // postNumber → { videos, scripts, subGroups }
+
+function _parseCloakedPost(pp) {
+  const tid = _currentTopicId();
+  const mapSource = (_METADATA_TOPIC_ID === tid && LINK_FILENAME_MAP) ? "fetched" : "ssr";
+  if (tid !== _cloakedCacheTopicId || mapSource !== _cloakedCacheMapSource) {
+    _cloakedParseCache.clear();
+    _cloakedCacheTopicId = tid;
+    _cloakedCacheMapSource = mapSource;
+  }
+  const hit = _cloakedParseCache.get(pp.postNumber);
+  if (hit) return hit;
+  const tempEl = document.createElement("div");
+  tempEl.innerHTML = pp.cooked;
+  const { videos, scripts } = extractLinksFromElement(tempEl, false);
+  const entry = {
+    videos, scripts,
+    subGroups: (videos.length > 0 || scripts.length > 0)
+      ? _pairWithinPost(tempEl, videos, scripts) : [],
+  };
+  _cloakedParseCache.set(pp.postNumber, entry);
+  return entry;
+}
+
+function parseAllPosts(rootOverride, titleOverride, metaMapOverride) {
+  // rootOverride/titleOverride/metaMapOverride: remote parsing — a detached
+  // DOM rebuilt from another topic's JSON (see _parseTopicRemote). All
+  // existing callers pass nothing and parse the live page as before.
+  const root = rootOverride || document;
+  const posts = root.querySelectorAll(".topic-post");
   if (posts.length === 0) return null;
 
-  // Prefer the metadata ensureLinkMetadata() fetched for THIS topic. Only fall
-  // back to the SSR blob when we don't have a fetched map for the current
-  // topic (e.g. parsed before the fetch resolved, or a direct full-page load).
-  if (_METADATA_TOPIC_ID !== _currentTopicId()) {
+  if (metaMapOverride) {
+    // Foreign topic: use the map built from ITS json, and drop the cached
+    // topic id so the live page's next parse rebuilds its own map.
+    LINK_FILENAME_MAP = metaMapOverride;
+    _METADATA_TOPIC_ID = null;
+  } else if (_METADATA_TOPIC_ID !== _currentTopicId()) {
+    // Prefer the metadata ensureLinkMetadata() fetched for THIS topic. Only
+    // fall back to the SSR blob when we don't have a fetched map for the
+    // current topic (e.g. parsed before the fetch resolved).
     LINK_FILENAME_MAP = _buildLinkFilenameMap();
   }
 
-  const title = getTopicTitle();
+  const title = titleOverride || getTopicTitle();
   const opCooked = posts[0]?.querySelector(".cooked");
 
   // Try section-based parsing on OP
@@ -833,15 +915,13 @@ function parseAllPosts() {
 
   // Scan cloaked (lazy-loaded) comments that Discourse hasn't rendered yet.
   // Their content is available in the preloaded JSON data embedded in the page.
-  const cloakedPosts = document.querySelectorAll(".post-stream--cloaked");
+  const cloakedPosts = root.querySelectorAll(".post-stream--cloaked");
   if (cloakedPosts.length > 0) {
     const preloadedPosts = _getPreloadedPosts();
     for (const pp of preloadedPosts) {
       if (pp.postNumber <= 1) continue; // Skip OP
       if (scannedPostNumbers.has(pp.postNumber)) continue;
-      const tempEl = document.createElement("div");
-      tempEl.innerHTML = pp.cooked;
-      const { videos, scripts } = extractLinksFromElement(tempEl, false);
+      const { videos, scripts, subGroups } = _parseCloakedPost(pp);
       commentVideos.push(...videos);
       commentScripts.push(...scripts);
       if (videos.length === 0 && scripts.length === 0) continue;
@@ -849,7 +929,7 @@ function parseAllPosts() {
         postNumber: pp.postNumber,
         isOP: false,
         username: pp.username || "",
-        subGroups: _pairWithinPost(tempEl, videos, scripts),
+        subGroups,
       });
     }
   }
@@ -1025,14 +1105,111 @@ async function resolveAllUrls(urls) {
   return Promise.all(urls.map(resolveShortUrl));
 }
 
-async function probeUrl(url) {
-  // All probing goes through the backend /probe endpoint,
-  // which dynamically handles GoFile wt tokens, MEGA crypto, etc.
+// ─── Probe throttle + cache (audit [7], client side) ───
+// setupProbing used to fire one probe per link all at once (30+ concurrent
+// bridge→backend round trips per panel open) and nothing was reused across
+// panel opens. Cap concurrency at 4 and cache successful results module-wide
+// keyed by URL, so re-opening the panel (or the same link in another section)
+// reuses the earlier answer instead of re-probing.
+const _PROBE_MAX_CONCURRENT = 4;
+const _PROBE_CACHE_MAX = 500;
+// Tabs live for days, so a lifetime cache would serve stale metadata (a file
+// re-uploaded to a new size/name). Entries older than this count as misses; the
+// backend's own 600 s cache absorbs the re-probe cost.
+const _PROBE_CACHE_TTL_MS = 30 * 60 * 1000;
+const _probeCache = new Map();     // url → { ts, value } successful probe response
+const _probeInflight = new Map();  // url → pending Promise (dedup concurrent)
+const _probeSizeByUrl = new Map(); // url → { ts, value } probed byte size (send-pair "sizes")
+let _probeActive = 0;
+const _probeWaiters = [];
+
+function _probeAcquire() {
+  if (_probeActive < _PROBE_MAX_CONCURRENT) {
+    _probeActive += 1;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => _probeWaiters.push(resolve));
+}
+
+function _probeRelease() {
+  const next = _probeWaiters.shift();
+  if (next) next(); // hand the slot straight to the next waiter
+  else _probeActive -= 1;
+}
+
+// Remember every byte size a probe reveals (the link itself and any bundle
+// member files) so send-time can pass them to the backend as `sizes`.
+function _recordProbeSizes(url, info) {
+  if (!info) return;
+  const now = Date.now();
+  if (typeof info.size === "number" && info.size > 0) {
+    _probeSizeByUrl.set(url, { ts: now, value: Math.floor(info.size) });
+  }
+  for (const f of (info.files || [])) {
+    if (f && f.url && typeof f.size === "number" && f.size > 0) {
+      _probeSizeByUrl.set(f.url, { ts: now, value: Math.floor(f.size) });
+    }
+  }
+  while (_probeSizeByUrl.size > 2000) {
+    _probeSizeByUrl.delete(_probeSizeByUrl.keys().next().value);
+  }
+}
+
+// Probed byte size for a single URL, honouring the TTL (stale → drop + 0).
+function _probeSizeEntry(url) {
+  const e = _probeSizeByUrl.get(url);
+  if (!e) return 0;
+  if (Date.now() - e.ts >= _PROBE_CACHE_TTL_MS) { _probeSizeByUrl.delete(url); return 0; }
+  return e.value > 0 ? e.value : 0;
+}
+
+// Probed byte size known for a link, keyed by either the original or the
+// resolved URL. Returns 0 when unknown.
+function _probedSizeFor(originalUrl, resolvedUrl) {
+  return _probeSizeEntry(originalUrl) || _probeSizeEntry(resolvedUrl) || 0;
+}
+
+async function _probeOnce(url) {
+  await _probeAcquire();
   try {
     const response = await _sendMsg("probe-url", { url });
     if (!response || !response.success) return null;
+    _recordProbeSizes(url, response);
+    // Only cache results that carried something useful — failures may be
+    // transient and should be retried on the next panel open.
+    if (response.size || response.filename ||
+        (response.files && response.files.length) ||
+        (response.formats && response.formats.length)) {
+      _probeCache.set(url, { ts: Date.now(), value: response });
+      while (_probeCache.size > _PROBE_CACHE_MAX) {
+        _probeCache.delete(_probeCache.keys().next().value);
+      }
+    }
     return response;
-  } catch (e) { return null; }
+  } catch (e) {
+    return null;
+  } finally {
+    _probeRelease();
+  }
+}
+
+async function probeUrl(url) {
+  // All probing goes through the backend /probe endpoint,
+  // which dynamically handles GoFile wt tokens, MEGA crypto, etc.
+  const cached = _probeCache.get(url);
+  if (cached) {
+    if (Date.now() - cached.ts < _PROBE_CACHE_TTL_MS) return cached.value;
+    _probeCache.delete(url); // stale → re-probe
+  }
+  const inflight = _probeInflight.get(url);
+  if (inflight) return inflight;
+  const p = _probeOnce(url);
+  _probeInflight.set(url, p);
+  try {
+    return await p;
+  } finally {
+    _probeInflight.delete(url);
+  }
 }
 
 async function sendPairToServer(data) {
@@ -1091,11 +1268,11 @@ function renderVideoItem(v, idx, namePrefix, checked, withHandle = false) {
   const badgeClass = v.source === "OP" ? "funpairdl-badge-op" : "funpairdl-badge-comment";
   const bundleTag = v.isBundle ? '<span class="funpairdl-tag-bundle">Bundle</span>' : "";
   return `
-    <label class="funpairdl-item" title="${v.url}" data-key="${namePrefix}-${idx}" data-kind="video" data-index="${idx}">
+    <label class="funpairdl-item" title="${escapeAttr(v.url)}" data-key="${namePrefix}-${idx}" data-kind="video" data-index="${idx}">
       ${_dragHandleHTML(withHandle)}
       <input type="checkbox" name="${namePrefix}" value="${idx}" ${checked ? "checked" : ""}>
       <span class="funpairdl-badge ${badgeClass}">${badge}</span>
-      <span class="funpairdl-label">${v.label}</span>
+      <span class="funpairdl-label">${escapeAttr(v.label)}</span>
       ${bundleTag}
       <span class="funpairdl-size" data-probe="${namePrefix}-${idx}"></span>
       <span class="funpairdl-priority">P${Math.floor(v.priority)}</span>
@@ -1109,7 +1286,7 @@ function renderScriptItem(s, idx, namePrefix, checked, withHandle = false) {
   if (s.axis && s.axis !== "main") axisTag = `<span class="funpairdl-tag-axis">${s.axis}</span>`;
   else if (s.axis === "main") axisTag = `<span class="funpairdl-tag-main">main</span>`;
   const externalTag = s.isExternal ? '<span class="funpairdl-tag-external">External</span>' : "";
-  const safe = s.filename.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const safe = escapeAttr(s.filename);
   return `
     <label class="funpairdl-item" title="${safe}" data-key="${namePrefix}-${idx}" data-kind="script" data-index="${idx}">
       ${_dragHandleHTML(withHandle)}
@@ -1286,8 +1463,9 @@ function _rerenderGroupBlocks(panel, parsed) {
   _updateInheritancePreviews(panel, parsed);
 }
 
+// Kept as an alias for the shared attribute escaper defined at the top.
 function _escAttr(s) {
-  return String(s || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return escapeAttr(s);
 }
 
 /**
@@ -1526,7 +1704,7 @@ function buildCollectionPanelHTML(parsed) {
       <div class="funpairdl-section-header">
         <input type="checkbox" class="funpairdl-section-cb" data-section="${si}" checked>
         <span class="funpairdl-section-toggle" data-section="${si}">▸</span>
-        <span class="funpairdl-section-name">${section.name.replace(/</g, "&lt;")}</span>
+        <span class="funpairdl-section-name">${escapeAttr(section.name)}</span>
         <span class="funpairdl-section-count">${summary}</span>
       </div>
       <div class="funpairdl-section-body" style="display:none">`;
@@ -1553,7 +1731,7 @@ function buildCollectionPanelHTML(parsed) {
         let isFirstAuthor = true;
         for (const [author, items] of authorGroups) {
           const authorDisplay = author || "Unknown";
-          const escapedAuthor = authorDisplay.replace(/</g, "&lt;");
+          const escapedAuthor = escapeAttr(authorDisplay);
           html += `<div class="funpairdl-author-group">
             <div class="funpairdl-author-header">
               <span class="funpairdl-author-name">${escapedAuthor}</span>
@@ -1710,9 +1888,9 @@ function setupProbing(panel, parsed) {
         dropdown.style.display = "none";
         let listHtml = "";
         for (const f of info.files) {
-          const fname = f.name.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+          const fname = escapeAttr(f.name);
           const fsize = f.size ? formatSize(f.size) : "";
-          const furl = (f.url || "").replace(/"/g, "&quot;");
+          const furl = escapeAttr(f.url || "");
           listHtml += `<label class="funpairdl-bundle-file funpairdl-bundle-selectable" title="${fname}">
             <input type="checkbox" class="funpairdl-bundle-cb"
                    data-probe-key="${probeKey}"
@@ -2467,56 +2645,138 @@ function injectButton() {
 
 // ─── Lifecycle ───
 
-function waitForContent() {
-  const observer = new MutationObserver((mutations, obs) => {
-    if (document.querySelector(".topic-post .cooked")) {
-      obs.disconnect();
-      setTimeout(injectButton, 800);
-    }
-  });
-  observer.observe(document.body, { childList: true, subtree: true });
-  if (document.querySelector(".topic-post .cooked")) setTimeout(injectButton, 800);
+// waitForContent() is re-entered on every SPA navigation. Keep a single live
+// observer (disconnect the previous one first) with a 30 s timeout so
+// listing/search pages that never grow a ".topic-post .cooked" don't keep a
+// whole-body subtree observer running forever (audit [2]). On TOPIC pages the
+// timeout re-arms itself a bounded number of rounds instead of giving up:
+// Chromium throttles a background tab's JS timers to ~1 wake/s, so with many
+// tabs loading at once the Discourse boot routinely outlasts a single 30 s
+// window — the old one-shot timeout was the "button missing until I refresh"
+// bug.
+let _contentObserver = null;
+let _contentObserverTimeout = null;
+let _contentObserverRounds = 0;
+const _CONTENT_OBSERVER_MAX_ROUNDS = 6; // ≥3 min foreground, longer throttled
+
+function _stopContentObserver() {
+  if (_contentObserver) {
+    try { _contentObserver.disconnect(); } catch (e) {}
+    _contentObserver = null;
+  }
+  if (_contentObserverTimeout) {
+    clearTimeout(_contentObserverTimeout);
+    _contentObserverTimeout = null;
+  }
 }
 
-waitForContent();
+// Bounded retry ladder for the actual injection: ".topic-post .cooked" can
+// appear before the post's links hydrate (heavy multi-tab load bursts), and
+// the old single 800 ms shot then parsed an empty post and missed forever.
+function _scheduleInject(attempt = 0) {
+  const delays = [800, 2000, 5000, 10_000];
+  if (attempt >= delays.length) return;
+  setTimeout(() => {
+    injectButton();
+    if (!document.getElementById("funpairdl-send-btn")) _scheduleInject(attempt + 1);
+  }, delays[attempt]);
+}
+
+function waitForContent() {
+  _contentObserverRounds = 0;
+  _armContentObserver();
+}
+
+function _armContentObserver() {
+  _stopContentObserver();
+  // Always arm the observer, even when content is already present: an SPA
+  // navigation can briefly show stale posts that get torn down and rebuilt,
+  // so an early-return-without-observer would lose the button permanently
+  // (audit [2]). injectButton is idempotent (it no-ops when the button already
+  // exists), so the observer and the immediate schedule below can't double-add.
+  _contentObserver = new MutationObserver(() => {
+    if (document.querySelector(".topic-post .cooked")) {
+      _stopContentObserver();
+      _scheduleInject();
+    }
+  });
+  _contentObserver.observe(document.body, { childList: true, subtree: true });
+  _contentObserverTimeout = setTimeout(() => {
+    _stopContentObserver();
+    _contentObserverRounds += 1;
+    // Topic URL, still no button → the page just hasn't finished booting
+    // (throttled background tab / heavy load) — keep watching, bounded.
+    // Listing/search pages (no topic id) stop for good, as before.
+    if (_currentTopicId() &&
+        !document.getElementById("funpairdl-send-btn") &&
+        _contentObserverRounds < _CONTENT_OBSERVER_MAX_ROUNDS) {
+      _armContentObserver();
+    }
+  }, 30_000);
+  // Content already on the page → also schedule the immediate injection.
+  if (document.querySelector(".topic-post .cooked")) {
+    _scheduleInject();
+  }
+}
+
+// Host gate (audit [2]): only bootstrap on EroScripts — everything below
+// registers observers/timers that must not run on pixeldrain/gofile/mega/...
+if (_funpairdlHostAllowed()) {
+  waitForContent();
+  // Backstop for tabs whose observer rounds ran out while Chromium throttled
+  // their boot in the background: the moment the user actually looks at the
+  // tab (or the app's load-boost marks it visible), re-arm injection if the
+  // button still isn't there. waitForContent() is idempotent and cheap.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    if (document.getElementById("funpairdl-send-btn")) return;
+    waitForContent();
+  });
+}
 
 // ─── Scroll position restoration for Discourse SPA navigation ───
 
-const _scrollPositions = {};
+// Singleton URL watcher: registered exactly once at load (host-gated); SPA
+// navigations re-enter waitForContent(), which manages its own observer.
+function _setupSpaWatcher() {
+  const _scrollPositions = {};
 
-let lastUrl = location.href;
-new MutationObserver(() => {
-  if (location.href !== lastUrl) {
-    // Save scroll position before navigating away
-    _scrollPositions[lastUrl] = window.scrollY;
+  let lastUrl = location.href;
+  new MutationObserver(() => {
+    if (location.href !== lastUrl) {
+      // Save scroll position before navigating away
+      _scrollPositions[lastUrl] = window.scrollY;
 
-    const prevUrl = lastUrl;
-    lastUrl = location.href;
+      const prevUrl = lastUrl;
+      lastUrl = location.href;
 
-    const oldBtn = document.getElementById("funpairdl-send-btn");
-    if (oldBtn) oldBtn.remove();
-    // Don't remove the sidebar panel on SPA navigation — it causes
-    // the "sudden close" problem. The user can close it manually.
-    waitForContent();
+      const oldBtn = document.getElementById("funpairdl-send-btn");
+      if (oldBtn) oldBtn.remove();
+      // Don't remove the sidebar panel on SPA navigation — it causes
+      // the "sudden close" problem. The user can close it manually.
+      waitForContent();
 
-    // Restore scroll position if returning to a previously visited page
-    if (_scrollPositions[lastUrl] !== undefined) {
-      const savedY = _scrollPositions[lastUrl];
-      // Discourse renders content async, wait for DOM to settle
-      const tryRestore = (attempts) => {
-        if (attempts <= 0) return;
-        requestAnimationFrame(() => {
-          if (document.body.scrollHeight > savedY) {
-            window.scrollTo(0, savedY);
-          } else {
-            setTimeout(() => tryRestore(attempts - 1), 100);
-          }
-        });
-      };
-      setTimeout(() => tryRestore(15), 200);
+      // Restore scroll position if returning to a previously visited page
+      if (_scrollPositions[lastUrl] !== undefined) {
+        const savedY = _scrollPositions[lastUrl];
+        // Discourse renders content async, wait for DOM to settle
+        const tryRestore = (attempts) => {
+          if (attempts <= 0) return;
+          requestAnimationFrame(() => {
+            if (document.body.scrollHeight > savedY) {
+              window.scrollTo(0, savedY);
+            } else {
+              setTimeout(() => tryRestore(attempts - 1), 100);
+            }
+          });
+        };
+        setTimeout(() => tryRestore(15), 200);
+      }
     }
-  }
-}).observe(document, { subtree: true, childList: true });
+  }).observe(document, { subtree: true, childList: true });
+}
+
+if (_funpairdlHostAllowed()) _setupSpaWatcher();
 
 // ─── Auto re-login when Discourse detects session expiry ───
 // Discourse shows a modal dialog when the server invalidates the session
@@ -2525,7 +2785,9 @@ new MutationObserver(() => {
 
 (function setupAutoRelogin() {
   // Only run on EroScripts in the embedded browser
-  if (!location.hostname.includes("eroscripts.com")) return;
+  if (!_funpairdlHostAllowed()) return;
+  if (typeof location === "undefined" || !location.hostname ||
+      !(location.hostname === "eroscripts.com" || location.hostname.endsWith(".eroscripts.com"))) return;
   if (!window.funpairdlBridge && typeof qt === "undefined") return;
 
   const SCROLL_KEY_PREFIX = "funpairdl_scroll_";
@@ -2551,16 +2813,134 @@ new MutationObserver(() => {
     }, 1500);
   }, { passive: true });
 
+  // Stage the last-known-good scroll position into RESTORE_KEY so that whichever
+  // path triggers the reload — the leader after logging in, OR a follower after
+  // it sees the leader's done-marker — restores the user's place. Uses the
+  // position saved while content was visible, not the current one (which may be
+  // 0 on an error/login page).
+  function _stageScrollRestore() {
+    try {
+      let scrollY = 0;
+      const lastGood = sessionStorage.getItem(SCROLL_KEY_PREFIX + location.pathname);
+      if (lastGood) {
+        const parsed = JSON.parse(lastGood);
+        scrollY = parsed.scrollY || 0;
+      }
+      sessionStorage.setItem(RESTORE_KEY, JSON.stringify({
+        url: location.href,
+        scrollY,
+      }));
+    } catch (_) {}
+  }
+
   let _reloginInProgress = false;
+
+  // ── Cross-tab relogin coordination (audit [2d]) ──
+  // Every tab polls session state, so on expiry N tabs would each race their
+  // own CSRF + POST /session (token-rotation lockout risk) and then reload
+  // simultaneously — an N-tab full-Discourse-load storm. A localStorage
+  // leader lock elects ONE tab to do the login; the others wait for the
+  // done-marker and reload after a randomized 2–8 s stagger.
+  const RELOGIN_LOCK_KEY = "fpdl_relogin_lock";
+  const RELOGIN_DONE_KEY = "fpdl_relogin_done";
+  const RELOGIN_LOCK_STALE_MS = 90_000; // lock older than this is up for grabs
+  const RELOGIN_DONE_FRESH_MS = 30_000; // done-marker newer than this → just reload
+
+  // True when another tab re-logged in within the last RELOGIN_DONE_FRESH_MS —
+  // in that case this tab should reload, not POST /session again.
+  function _reloginDoneFresh() {
+    try {
+      const doneTs = parseInt(localStorage.getItem(RELOGIN_DONE_KEY) || "0", 10) || 0;
+      return !!doneTs && (Date.now() - doneTs) < RELOGIN_DONE_FRESH_MS;
+    } catch (e) { return false; }
+  }
+
+  // localStorage.setItem propagates to other tabs asynchronously, so a bare
+  // read-then-write lets two tabs racing inside that window both "acquire" and
+  // each POST /session (token-rotation lockout). Instead write a UNIQUE token,
+  // let the write settle, then read back: we are the leader only if the stored
+  // value is still our token (a racing tab that wrote last would have replaced
+  // it, and its own read-back would then see ours — exactly one wins).
+  async function _tryAcquireReloginLock() {
+    try {
+      const now = Date.now();
+      const ts = parseInt(localStorage.getItem(RELOGIN_LOCK_KEY) || "0", 10) || 0;
+      if (ts && now - ts < RELOGIN_LOCK_STALE_MS) return false; // live leader exists
+      const token = `${now}:${Math.random().toString(36).slice(2)}`;
+      localStorage.setItem(RELOGIN_LOCK_KEY, token);
+      await new Promise((r) => setTimeout(r, 250));
+      let stored = null;
+      try { stored = localStorage.getItem(RELOGIN_LOCK_KEY); } catch (e) { return true; }
+      return stored === token;
+    } catch (e) { return true; } // localStorage unavailable → act alone
+  }
+
+  function _releaseReloginLock() {
+    try { localStorage.removeItem(RELOGIN_LOCK_KEY); } catch (e) {}
+  }
+
+  // Follower path: wait for the leader tab to write the done-marker, then
+  // reload after a random 2–8 s delay. If the leader dies (lock goes stale
+  // with no done-marker), re-arm so the periodic check can elect a new one.
+  function _waitForLeaderRelogin() {
+    const started = Date.now();
+    let poll = null;
+    let onStorage = null;
+    function cleanup() {
+      if (poll) clearInterval(poll);
+      if (onStorage) window.removeEventListener("storage", onStorage);
+      poll = null;
+      onStorage = null;
+    }
+    function checkDone() {
+      let doneTs = 0;
+      try { doneTs = parseInt(localStorage.getItem(RELOGIN_DONE_KEY) || "0", 10) || 0; } catch (e) {}
+      if (doneTs >= started - 5_000) {
+        cleanup();
+        // Preserve this tab's scroll position across its own reload, just like
+        // the leader path does — otherwise follower tabs jump to the top.
+        _stageScrollRestore();
+        const delay = 2_000 + Math.random() * 6_000;
+        console.log(`FunPairDL: Leader tab re-logged in — reloading in ${Math.round(delay / 1000)}s`);
+        setTimeout(() => location.reload(), delay);
+        return;
+      }
+      if (Date.now() - started > RELOGIN_LOCK_STALE_MS) {
+        cleanup();
+        _reloginInProgress = false; // leader died — allow a fresh attempt
+      }
+    }
+    onStorage = (e) => { if (e.key === RELOGIN_DONE_KEY) checkDone(); };
+    window.addEventListener("storage", onStorage);
+    poll = setInterval(checkDone, 5_000);
+    checkDone();
+  }
 
   async function _attemptRelogin() {
     if (_reloginInProgress) return;
     _reloginInProgress = true;
 
+    // Another tab already re-logged in moments ago — don't POST /session again
+    // (a stale /session/current.json can still read 404 right after). Just
+    // restore scroll and reload to pick up the freshly-restored session.
+    if (_reloginDoneFresh()) {
+      _stageScrollRestore();
+      const delay = 2_000 + Math.random() * 6_000;
+      setTimeout(() => location.reload(), delay);
+      return;
+    }
+
+    // Leader election: only one tab app-wide performs the actual login.
+    if (!(await _tryAcquireReloginLock())) {
+      _waitForLeaderRelogin();
+      return;
+    }
+
     try {
       const creds = await _sendMsg("get-ero-credentials", {});
       if (!creds || !creds.username || !creds.password) {
         console.log("FunPairDL: No EroScripts credentials configured, skip auto-login");
+        _releaseReloginLock();
         _reloginInProgress = false;
         return;
       }
@@ -2587,30 +2967,25 @@ new MutationObserver(() => {
       const loginData = await loginResp.json();
       if (loginData.error) {
         console.error("FunPairDL: Auto-login failed:", loginData.error);
+        _releaseReloginLock();
         _reloginInProgress = false;
         return;
       }
 
       console.log("FunPairDL: Auto re-login successful, reloading...");
 
-      // Use the LAST KNOWN GOOD scroll position (saved while content was
-      // visible), not the current one (which may be 0 on an error page).
-      let scrollY = 0;
-      try {
-        const lastGood = sessionStorage.getItem(SCROLL_KEY_PREFIX + location.pathname);
-        if (lastGood) {
-          const parsed = JSON.parse(lastGood);
-          scrollY = parsed.scrollY || 0;
-        }
-      } catch (_) {}
+      // Tell the follower tabs the session is fixed (they reload staggered),
+      // then give up leadership before our own reload.
+      try { localStorage.setItem(RELOGIN_DONE_KEY, String(Date.now())); } catch (e) {}
+      _releaseReloginLock();
 
-      sessionStorage.setItem(RESTORE_KEY, JSON.stringify({
-        url: location.href,
-        scrollY,
-      }));
+      // Stage the last-known-good scroll position (shared with the follower
+      // path) so the reload lands the user back where they were.
+      _stageScrollRestore();
       location.reload();
     } catch (e) {
       console.error("FunPairDL: Auto re-login error:", e);
+      _releaseReloginLock();
       _reloginInProgress = false;
     }
   }
@@ -2663,14 +3038,17 @@ new MutationObserver(() => {
     for (const m of mutations) {
       for (const node of m.addedNodes) {
         if (!(node instanceof HTMLElement)) continue;
+        // Cheap structural check FIRST — node.textContent serializes the
+        // whole inserted subtree, and Discourse inserts entire posts on every
+        // scroll cloak/uncloak burst (audit [2]).
+        const isDialog =
+          node.classList.contains("dialog-body") ||
+          node.classList.contains("bootbox") ||
+          node.classList.contains("modal-body") ||
+          !!node.querySelector?.(".dialog-body, .bootbox-body, .modal-body");
+        if (!isDialog) continue;
         const text = node.textContent || "";
-        if (
-          (node.classList.contains("dialog-body") ||
-           node.classList.contains("bootbox") ||
-           node.classList.contains("modal-body") ||
-           node.querySelector?.(".dialog-body, .bootbox-body, .modal-body")) &&
-          (/logged?\s*out|log\s*in.*again|session.*expired/i.test(text))
-        ) {
+        if (/logged?\s*out|log\s*in.*again|session.*expired/i.test(text)) {
           console.log("FunPairDL: Detected logout dialog");
           _attemptRelogin();
           return;
