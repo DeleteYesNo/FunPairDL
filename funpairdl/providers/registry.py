@@ -10,6 +10,7 @@ from funpairdl.providers.gofile import GoFileProvider
 from funpairdl.providers.ytdlp_generic import YtdlpGenericProvider
 from funpairdl.providers.eroscripts import EroScriptsProvider
 from funpairdl.providers.hmvmania import HmvManiaProvider
+from funpairdl.providers.socigames import SociGamesProvider
 from funpairdl.providers.direct_http import DirectHTTPProvider
 
 logger = logging.getLogger("funpairdl.providers.registry")
@@ -33,6 +34,7 @@ class ProviderRegistry:
             IwaraProvider(),
             EroScriptsProvider(),
             HmvManiaProvider(),
+            SociGamesProvider(),
             YtdlpGenericProvider(),
             DirectHTTPProvider(),  # fallback
         ]

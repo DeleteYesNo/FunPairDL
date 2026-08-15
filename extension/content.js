@@ -18,6 +18,7 @@ const VIDEO_PRIORITY = {
   "b23.tv": 7,
   // HMV-specific sites
   "hmvmania.com": 7,
+  "socigames.com": 7,
   // Adult video sites (yt-dlp supported)
   "pornhub.com": 8,
   "xvideos.com": 8,
@@ -182,6 +183,7 @@ function getVideoLabel(url) {
     if (host.includes("iwara")) return "Iwara";
     if (host.includes("hanime")) return "Hanime1";
     if (host.includes("hmvmania")) return "HMV Mania";
+    if (host.includes("socigames")) return "SociGames";
     if (host.includes("pornhub")) return "PornHub";
     if (host.includes("xvideos")) return "XVideos";
     if (host.includes("xnxx")) return "XNXX";

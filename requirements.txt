@@ -1,6 +1,10 @@
 PySide6>=6.6
 aiohttp>=3.9
 yt-dlp>=2024.1
+# Browser TLS impersonation. yt-dlp uses it for Cloudflare-protected sites and
+# socigames.py requires it outright — that host answers plain clients with a
+# managed challenge.
+curl-cffi>=0.7
 mega.py>=1.0.8
 fastapi>=0.110
 uvicorn[standard]>=0.28

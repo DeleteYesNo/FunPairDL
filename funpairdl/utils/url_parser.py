@@ -18,6 +18,7 @@ def detect_provider(url: str) -> str:
         "iwara.tv": "iwara",
         "discuss.eroscripts.com": "eroscripts",
         "hmvmania.com": "hmvmania",
+        "socigames.com": "socigames",
     }
 
     for domain, provider in provider_map.items():
