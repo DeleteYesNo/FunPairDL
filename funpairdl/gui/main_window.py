@@ -828,6 +828,16 @@ class MainWindow(QMainWindow):
         self.quota_label.setToolTip(text.replace("  |  ", "\n") if text else "No premium accounts configured")
 
     def closeEvent(self, event):
+        # Snapshot the browser session on every close, whether we hide to tray
+        # or actually quit. The async _shutdown path is unreliable (the qasync
+        # loop stops right after aboutToQuit), so saving synchronously here
+        # guarantees a restart restores the latest tabs/scroll.
+        try:
+            if hasattr(self, "browser"):
+                self.browser.save_session()
+        except Exception as e:
+            logger.warning("Failed to save browser session on close: %s", e)
+
         if self.settings.minimize_to_tray:
             event.ignore()
             self.hide()
