@@ -63,7 +63,7 @@ from funpairdl.core.queue_manager import QueueManager
 from funpairdl.gui.main_window import MainWindow
 from funpairdl.persistence.queue_store import QueueStore
 from funpairdl.persistence.settings import Settings
-from funpairdl.utils.async_bridge import install_qasync_loop
+from funpairdl.utils.async_bridge import install_qasync_loop, start_worker_loop
 from funpairdl.utils.logging_setup import setup_logging
 
 logger = logging.getLogger("funpairdl.app")
@@ -99,8 +99,11 @@ def _run_app():
     app.setApplicationName("FunPairDL")
     app.setQuitOnLastWindowClosed(False)
 
-    # Install qasync event loop
+    # Install qasync event loop (GUI thread). Heavy async work does NOT run
+    # here: downloads live on the dl-thread, the API server and browser
+    # bridge on the worker loop, queue saves on the store's writer thread.
     loop = install_qasync_loop(app)
+    worker_loop = start_worker_loop()
 
     # Create queue manager
     from pathlib import Path
@@ -109,10 +112,18 @@ def _run_app():
         num_segments=settings.max_segments,
     )
 
-    # Load saved queue
+    # Load saved queue. Saving is debounced onto the store's writer thread —
+    # snapshot_dicts() takes the queue lock, so callers on any thread are safe.
     store = QueueStore()
+    store.start_writer()
     qm.pairs = store.load()
-    qm.on_save_needed = lambda: store.save(qm.pairs)
+    qm.on_save_needed = lambda: store.request_save(qm.snapshot_dicts)
+    qm.archive_sink = store.append_archive
+    # Move surplus completed pairs out of the live queue (window not created
+    # yet — callbacks are still None, so this is just a cheap list split).
+    archived = qm.archive_completed()
+    if archived:
+        logger.info("Archived %d completed pairs at startup", archived)
 
     # Create and show main window
     window = MainWindow(qm, settings)
@@ -132,27 +143,46 @@ def _run_app():
                 await asyncio.sleep(0.5)
         except Exception as e:
             logger.warning("Failed to save browser session on shutdown: %s", e)
-        store.save(qm.pairs)
+        store.save_now(qm.snapshot_dicts)
         await qm.stop()
+        store.stop_writer()
         logger.info("Queue manager stopped, queue saved")
 
-    async def _run_api_server():
+    async def _run_auto_save():
+        while True:
+            await asyncio.sleep(30)
+            # Each step gets its own try so one failure can never kill the
+            # loop (the old single try/except silently ended persistence
+            # for the rest of the run on first error).
+            try:
+                store.request_save(qm.snapshot_dicts)
+            except Exception as e:
+                logger.error("Auto-save request failed: %s", e, exc_info=True)
+            # Also persist the live browser session so a restart restores
+            # the latest tabs/scroll — not whatever was last saved at quit.
+            # The shutdown coroutine is unreliable (the qasync loop stops
+            # right after aboutToQuit), so we snapshot periodically instead.
+            # save_session dirty-checks, so unchanged sessions cost nothing.
+            try:
+                if hasattr(window, "browser"):
+                    window.browser.save_session()
+            except Exception as e:
+                logger.debug("Periodic browser session save failed: %s", e)
+
+    loop.create_task(_startup())
+    loop.create_task(_run_auto_save())
+
+    # API server runs on the worker loop — never on the GUI thread.
+    def _api_done(fut):
         try:
-            await start_api_server(qm, settings.api_host, settings.api_port)
+            fut.result()
         except Exception as e:
             logger.error("API server failed: %s", e, exc_info=True)
 
-    async def _run_auto_save():
-        try:
-            while True:
-                await asyncio.sleep(30)
-                store.save(qm.pairs)
-        except Exception as e:
-            logger.error("Auto-save failed: %s", e, exc_info=True)
-
-    loop.create_task(_startup())
-    loop.create_task(_run_api_server())
-    loop.create_task(_run_auto_save())
+    api_future = asyncio.run_coroutine_threadsafe(
+        start_api_server(qm, settings.api_host, settings.api_port), worker_loop
+    )
+    api_future.add_done_callback(_api_done)
 
     # Handle app quit
     app.aboutToQuit.connect(lambda: loop.create_task(_shutdown()))

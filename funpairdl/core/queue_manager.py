@@ -8,7 +8,13 @@ from typing import Callable
 
 import aiohttp
 
-from funpairdl.constants import CHUNK_SIZE, DEFAULT_DOWNLOAD_DIR, DEFAULT_SEGMENTS
+from funpairdl.constants import (
+    CHUNK_SIZE,
+    COMPLETED_KEEP_LIVE,
+    DEFAULT_DOWNLOAD_DIR,
+    DEFAULT_SEGMENTS,
+    RESOLVE_TIMEOUT_SECONDS,
+)
 from funpairdl.core.download_task import DownloadTask
 from funpairdl.core.pair import (
     FileType,
@@ -37,6 +43,12 @@ class QueueManager:
         self.download_dir = download_dir
         self.num_segments = num_segments
         self.pairs: list[Pair] = []
+        # Guards structural changes to self.pairs (append/remove/move/clear),
+        # whole-list reassignment of pair.items, and full-queue snapshots.
+        # Multiple threads touch the queue (GUI, api-worker, dl-thread,
+        # queue-save writer) — RLock so nested calls on one thread are safe.
+        # NEVER hold this lock across an await.
+        self._pairs_lock = threading.RLock()
         self._current_tasks: list[asyncio.Task] = []      # All active asyncio tasks (across all pairs)
         self._download_tasks: list[DownloadTask] = []      # All active DownloadTask objects (across all pairs)
         self._pair_tasks: dict[str, list[asyncio.Task]] = {}  # pair_id → its asyncio tasks (for pause/cancel)
@@ -44,6 +56,22 @@ class QueueManager:
         self._pump_task: asyncio.Task | None = None
         self._session: aiohttp.ClientSession | None = None
         self._registry: ProviderRegistry | None = None
+
+        # Pair ids currently being organized/undone — busy-guard so the GUI
+        # can't double-fire a rename while one is already running in a thread.
+        self._organizing: set[str] = set()
+
+        # Per-item progress throttle timestamps {item_id: monotonic}.
+        # Only touched on the dl-thread (DownloadTask progress callbacks).
+        self._item_progress_times: dict[str, float] = {}
+
+        # Created in _dl_init (must be born on the dl loop):
+        # _probe_sem caps concurrent off-slot metadata probes;
+        # _mega_sem caps MEGA downloads to one file GLOBALLY (across pairs) —
+        # MEGA throttles per connection, so one file using all segments gets
+        # full bandwidth while staying under the connection-reset threshold.
+        self._probe_sem: asyncio.Semaphore | None = None
+        self._mega_sem: asyncio.Semaphore | None = None
 
         self._pump_heartbeat: float = 0  # monotonic timestamp of last pump activity
         self._pump_wake = asyncio.Event()  # signal pump to check for new work
@@ -59,6 +87,9 @@ class QueueManager:
         self.on_item_updated: Callable[[PairItem], None] | None = None
         self.on_queue_changed: Callable[[], None] | None = None
         self.on_save_needed: Callable[[], None] | None = None
+        # Receives [pair_dict, ...] for pairs leaving the live queue
+        # (app.py wires this to QueueStore.append_archive).
+        self.archive_sink: Callable[[list[dict]], None] | None = None
 
     async def start(self) -> None:
         if self._running:
@@ -93,6 +124,9 @@ class QueueManager:
         )
         # Recreate Event in the download thread's loop context
         self._pump_wake = asyncio.Event()
+        # Loop-bound primitives must be created here, on the dl loop.
+        self._probe_sem = asyncio.Semaphore(3)
+        self._mega_sem = asyncio.Semaphore(1)
         self._pump_task = asyncio.create_task(self._pump_with_watchdog())
         logger.info("Download thread initialized")
 
@@ -392,7 +426,8 @@ class QueueManager:
         return False
 
     def remove_pair(self, pair_id: str) -> None:
-        self.pairs = [p for p in self.pairs if p.id != pair_id]
+        with self._pairs_lock:
+            self.pairs = [p for p in self.pairs if p.id != pair_id]
         if self.on_queue_changed:
             self.on_queue_changed()
         if self.on_save_needed:
@@ -400,16 +435,100 @@ class QueueManager:
 
     def move_pair(self, pair_id: str, direction: int) -> None:
         """Move pair up (-1) or down (+1) in queue."""
-        for i, pair in enumerate(self.pairs):
-            if pair.id == pair_id:
-                new_idx = i + direction
-                if 0 <= new_idx < len(self.pairs):
-                    self.pairs[i], self.pairs[new_idx] = self.pairs[new_idx], self.pairs[i]
-                break
+        with self._pairs_lock:
+            for i, pair in enumerate(self.pairs):
+                if pair.id == pair_id:
+                    new_idx = i + direction
+                    if 0 <= new_idx < len(self.pairs):
+                        self.pairs[i], self.pairs[new_idx] = self.pairs[new_idx], self.pairs[i]
+                    break
         if self.on_queue_changed:
             self.on_queue_changed()
         if self.on_save_needed:
             self.on_save_needed()
+
+    def snapshot_dicts(self) -> list[dict]:
+        """Consistent full-queue snapshot for persistence. Called on the
+        queue-save writer thread — the lock keeps it from seeing a pair
+        mid-mutation (bundle replacement, auto-split)."""
+        with self._pairs_lock:
+            return [p.to_dict() for p in self.pairs]
+
+    @staticmethod
+    def _archive_dict(pair: Pair) -> dict:
+        """Pair dict for the archive — segments stripped (dead weight)."""
+        d = pair.to_dict()
+        for it in d.get("items", []):
+            it["segments"] = []
+        return d
+
+    def archive_completed(self, keep: int = COMPLETED_KEEP_LIVE) -> int:
+        """Move surplus COMPLETED pairs out of the live queue into the
+        archive sink, keeping the `keep` newest (list order — new pairs are
+        appended, so the tail is newest). Returns the number archived.
+
+        This is the retention policy that keeps every save/rebuild/status
+        pass cheap: without it the queue grows forever (audit [0])."""
+        with self._pairs_lock:
+            # Pairs with organize/undo in flight are skipped — their files
+            # and metadata are being rewritten by a worker thread right now;
+            # they get archived on the next completion instead.
+            completed = [
+                p for p in self.pairs
+                if p.state == PairState.COMPLETED and p.id not in self._organizing
+            ]
+            surplus = len(completed) - max(0, keep)
+            if surplus <= 0:
+                return 0
+            to_archive = completed[:surplus]
+            archived_dicts = [self._archive_dict(p) for p in to_archive]
+            if self.archive_sink:
+                try:
+                    self.archive_sink(archived_dicts)
+                except Exception as e:
+                    # Don't drop pairs we failed to archive — keep them live
+                    # and retry on the next completion.
+                    logger.error(
+                        "Archive sink failed — keeping %d completed pairs live: %s",
+                        len(to_archive), e,
+                    )
+                    return 0
+            drop_ids = {p.id for p in to_archive}
+            self.pairs = [p for p in self.pairs if p.id not in drop_ids]
+        logger.info("Archived %d completed pairs (keep=%d)", len(to_archive), keep)
+        if self.on_queue_changed:
+            self.on_queue_changed()
+        if self.on_save_needed:
+            self.on_save_needed()
+        return len(to_archive)
+
+    def clear_completed(self) -> int:
+        """Remove ALL completed pairs in one batch (one queue-changed, one
+        save) — replaces the GUI's old per-pair remove loop that rebuilt the
+        tree and saved the queue once per removed pair. Removed pairs go to
+        the archive sink first (best-effort). Returns the number removed."""
+        with self._pairs_lock:
+            completed = [
+                p for p in self.pairs
+                if p.state == PairState.COMPLETED and p.id not in self._organizing
+            ]
+            if not completed:
+                return 0
+            if self.archive_sink:
+                try:
+                    self.archive_sink([self._archive_dict(p) for p in completed])
+                except Exception as e:
+                    # User explicitly asked to clear — proceed even if the
+                    # archive write failed, but say so.
+                    logger.error("Archive sink failed during clear_completed: %s", e)
+            drop_ids = {p.id for p in completed}
+            self.pairs = [p for p in self.pairs if p.id not in drop_ids]
+        logger.info("Cleared %d completed pairs", len(completed))
+        if self.on_queue_changed:
+            self.on_queue_changed()
+        if self.on_save_needed:
+            self.on_save_needed()
+        return len(completed)
 
     def pause_pair(self, pair_id: str) -> None:
         pair = self._find_pair(pair_id)
@@ -474,28 +593,77 @@ class QueueManager:
             self.on_pair_updated(pair)
         self._wake_pump()
 
-    def organize_pair(self, pair_id: str) -> bool:
-        """Manually trigger file organize (rename) for a completed pair."""
+    def _begin_organize(self, pair_id: str) -> bool:
+        """Busy-guard: claim a pair for organize/undo. False if already busy."""
+        with self._pairs_lock:
+            if pair_id in self._organizing:
+                return False
+            self._organizing.add(pair_id)
+            return True
+
+    def _end_organize(self, pair_id: str) -> None:
+        with self._pairs_lock:
+            self._organizing.discard(pair_id)
+
+    async def organize_pair_async(self, pair_id: str) -> bool:
+        """Trigger file organize (rename) for a completed pair.
+
+        Runs the file work (library reconcile can SHA-256 multi-GB videos)
+        in a thread so the calling loop — GUI or api-worker — never blocks.
+        Returns False when the pair is missing, not completed, already
+        organized, or currently busy."""
         pair = self._find_pair(pair_id)
         if not pair or pair.state != PairState.COMPLETED:
             return False
         if pair.organized:
             return False
-        self._organize_output(pair)
+        if not self._begin_organize(pair_id):
+            return False
+        try:
+            await asyncio.to_thread(self._organize_output, pair)
+        finally:
+            self._end_organize(pair_id)
         if self.on_pair_updated:
             self.on_pair_updated(pair)
         if self.on_save_needed:
             self.on_save_needed()
         return True
 
-    def undo_organize_pair(self, pair_id: str) -> bool:
-        """Undo file organize for a completed pair, restoring original filenames."""
+    async def undo_organize_pair_async(self, pair_id: str) -> bool:
+        """Undo file organize for a completed pair, restoring original
+        filenames. Threaded like organize_pair_async; False when the pair is
+        missing, not completed, not organized, or currently busy."""
         pair = self._find_pair(pair_id)
         if not pair or pair.state != PairState.COMPLETED:
             return False
         if not pair.organized:
             return False
-        self._undo_organize(pair)
+        if not self._begin_organize(pair_id):
+            return False
+        try:
+            await asyncio.to_thread(self._undo_organize, pair)
+        finally:
+            self._end_organize(pair_id)
+        if self.on_pair_updated:
+            self.on_pair_updated(pair)
+        if self.on_save_needed:
+            self.on_save_needed()
+        return True
+
+    async def reorganize_pair_async(self, pair_id: str) -> bool:
+        """Undo (if organized) then re-run organize, under one busy-guard so
+        no other organize can interleave between the two phases."""
+        pair = self._find_pair(pair_id)
+        if not pair or pair.state != PairState.COMPLETED:
+            return False
+        if not self._begin_organize(pair_id):
+            return False
+        try:
+            if pair.organized:
+                await asyncio.to_thread(self._undo_organize, pair)
+            await asyncio.to_thread(self._organize_output, pair)
+        finally:
+            self._end_organize(pair_id)
         if self.on_pair_updated:
             self.on_pair_updated(pair)
         if self.on_save_needed:
@@ -709,7 +877,8 @@ class QueueManager:
         # Replace bundle items with resolved items
         expanded = False
         if new_items:
-            pair.items = [i for i in pair.items if not i.is_bundle] + new_items
+            with self._pairs_lock:
+                pair.items = [i for i in pair.items if not i.is_bundle] + new_items
             expanded = True
 
         if self.on_pair_updated:
@@ -1042,13 +1211,14 @@ class QueueManager:
         # mirror-only pairs, so this is safe to attempt unconditionally.
         new_pairs = self._auto_split_bundle_pair(pair)
         if new_pairs:
+            with self._pairs_lock:
+                self.pairs.extend(new_pairs)
+                pair.state = PairState.COMPLETED
+                pair.items.clear()
             for np in new_pairs:
-                self.pairs.append(np)
                 logger.info("Auto-split: created pair '%s' (%d items)", np.name, len(np.items))
                 if self.on_pair_added:
                     self.on_pair_added(np)
-            pair.state = PairState.COMPLETED
-            pair.items.clear()
             logger.info("Auto-split: original pair '%s' split into %d pairs", pair.name, len(new_pairs))
             if self.on_pair_updated:
                 self.on_pair_updated(pair)
@@ -1106,12 +1276,15 @@ class QueueManager:
         # If items fail, re-resolve (CDN URLs may expire) and retry up to
         # MAX_ITEM_RETRIES times before giving up.
         MAX_ITEM_RETRIES = 2
-        # One MEGA file at a time. MEGA throttles per-connection, so total
-        # speed is bounded by total connections regardless of how they're
-        # split across files; a single file using all ~32 segments gets full
-        # bandwidth (~8 MB/s) without crossing the ~48-connection reset
-        # threshold that "files × segments" would hit if run in parallel.
-        mega_sem = asyncio.Semaphore(1)
+        # One MEGA file at a time — GLOBALLY, not per pair. MEGA throttles
+        # per-connection, so total speed is bounded by total connections
+        # regardless of how they're split across files; a single file using
+        # all ~32 segments gets full bandwidth (~8 MB/s) without crossing the
+        # ~48-connection reset threshold that "files × segments" would hit if
+        # two pairs each ran a MEGA file in parallel.
+        if self._mega_sem is None:  # dl loop started outside _dl_init (tests)
+            self._mega_sem = asyncio.Semaphore(1)
+        mega_sem = self._mega_sem
 
         async def _mega_with_limit(item, out_dir):
             async with mega_sem:
@@ -1222,9 +1395,15 @@ class QueueManager:
 
         # Force-sync bytes for completed items: ensure downloaded_bytes ==
         # total_bytes so progress never shows a stale mid-download percentage.
+        # Also defensively drop their segment records — dead weight that once
+        # accounted for ~75% of queue.json (audit [0]); DownloadTask clears
+        # them on COMPLETED, this catches every other completion path.
         for item in pair.items:
-            if item.state == ItemState.COMPLETED and item.total_bytes > 0:
-                item.downloaded_bytes = item.total_bytes
+            if item.state == ItemState.COMPLETED:
+                if item.total_bytes > 0:
+                    item.downloaded_bytes = item.total_bytes
+                if item.segments:
+                    item.segments.clear()
 
         # Catch items stuck in transient states after retry loop exits.
         # This should not happen, but guard against it so the pair state
@@ -1270,10 +1449,18 @@ class QueueManager:
         if self.on_pair_updated:
             self.on_pair_updated(pair)
 
-        # Persist queue immediately when a pair finishes
+        # Persist queue when a pair finishes (save is debounced — cheap)
         if pair.state in (PairState.COMPLETED, PairState.FAILED):
             if self.on_save_needed:
                 self.on_save_needed()
+
+        # Retention: push surplus completed pairs out to the archive so the
+        # live queue never grows unboundedly again.
+        if pair.state == PairState.COMPLETED:
+            try:
+                self.archive_completed()
+            except Exception as e:
+                logger.error("archive_completed failed after pair finish: %s", e)
 
         # Remove this pair's tasks from shared lists
         for dt in pair_download_tasks:
@@ -2360,11 +2547,20 @@ class QueueManager:
         now = time.monotonic()
         self._pump_heartbeat = now  # keep watchdog happy during active downloads
 
-        # Throttle all GUI signal emissions to avoid flooding Qt event loop
-        last = getattr(self, "_last_pair_progress_time", 0.0)
+        # Throttle GUI signal emissions PER ITEM (0.5s each). A single shared
+        # timestamp let whichever item ticked first starve every concurrent
+        # pair's rows (audit [8c]). Only the dl-thread touches this dict.
+        last = self._item_progress_times.get(item.id, 0.0)
         if now - last < 0.5:
             return
-        self._last_pair_progress_time = now
+        self._item_progress_times[item.id] = now
+        if len(self._item_progress_times) > 2000:
+            # Prune entries that haven't ticked recently — those items are
+            # no longer actively downloading.
+            cutoff = now - 10.0
+            self._item_progress_times = {
+                k: v for k, v in self._item_progress_times.items() if v >= cutoff
+            }
 
         if self.on_item_updated:
             self.on_item_updated(item)
@@ -2431,4 +2627,13 @@ class QueueManager:
         return sanitize_filename(name)
 
     def get_queue_status(self) -> list[dict]:
-        return [p.to_dict() for p in self.pairs]
+        """Full queue as dicts for the API. Segments are stripped — API
+        consumers never need them and they can dwarf the payload."""
+        with self._pairs_lock:
+            out = []
+            for p in self.pairs:
+                d = p.to_dict()
+                for it in d.get("items", []):
+                    it["segments"] = []
+                out.append(d)
+            return out

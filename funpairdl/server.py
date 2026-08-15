@@ -37,8 +37,11 @@ def run():
     )
 
     store = QueueStore()
+    store.start_writer()
     qm.pairs = store.load()
-    qm.on_save_needed = lambda: store.save(qm.pairs)
+    qm.on_save_needed = lambda: store.request_save(qm.snapshot_dicts)
+    qm.archive_sink = store.append_archive
+    qm.archive_completed()
 
     async def _main():
         await qm.start()
@@ -49,11 +52,14 @@ def run():
             settings.api_port,
         )
 
-        # Auto-save task
+        # Auto-save task — per-iteration try so one failure never kills it
         async def _auto_save():
             while True:
                 await asyncio.sleep(30)
-                store.save(qm.pairs)
+                try:
+                    store.request_save(qm.snapshot_dicts)
+                except Exception as e:
+                    logger.error("Auto-save request failed: %s", e)
 
         save_task = asyncio.create_task(_auto_save())
 
@@ -87,8 +93,9 @@ def run():
             logger.info("Shutting down...")
             save_task.cancel()
             server_task.cancel()
-            store.save(qm.pairs)
+            store.save_now(qm.snapshot_dicts)
             await qm.stop()
+            store.stop_writer()
             logger.info("Queue saved. Goodbye.")
 
     try:
