@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from urllib.parse import quote, unquote, urlparse
 
@@ -106,6 +107,62 @@ class PixeldrainProvider(BaseProvider):
             return {"Authorization": f"Basic {token}"}
         return {}
 
+    @staticmethod
+    async def _get_json(url: str, headers: dict[str, str]) -> dict:
+        """GET + parse JSON, retrying once without TLS verification.
+
+        Pixeldrain has been seen serving an expired/misconfigured certificate
+        that the browser tolerates but Python rejects. The segment downloader
+        already falls back to ssl=False per-host; mirror that here so a bad
+        cert doesn't fail the resolve (and thus the whole item) outright.
+        Only SSL errors trigger the fallback — a 4xx still raises.
+        """
+        import ssl as _ssl
+
+        async with aiohttp.ClientSession() as session:
+            for verify in (True, False):
+                try:
+                    async with session.get(
+                        url, headers=headers, ssl=verify,
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as resp:
+                        resp.raise_for_status()
+                        return await resp.json()
+                except (aiohttp.ClientSSLError, _ssl.SSLError) as e:
+                    if not verify:
+                        raise
+                    logger.warning(
+                        "Pixeldrain TLS certificate rejected (%s) — "
+                        "retrying without verification", e,
+                    )
+        raise RuntimeError("unreachable")  # loop always returns or raises
+
+    @staticmethod
+    @asynccontextmanager
+    async def _session_get(session: aiohttp.ClientSession, url: str):
+        """GET via an existing (picker) session, reissuing once with TLS
+        verification off if the certificate is rejected.
+
+        The batch picker reuses one session across many requests, so unlike
+        _get_json it can't spin up a fresh one. Yields the aiohttp response so
+        callers keep their own status handling (raise_for_status / graceful
+        404) unchanged — only a rejected cert triggers the ssl=False retry;
+        every other error (including 4xx) propagates untouched.
+        """
+        import ssl as _ssl
+
+        try:
+            async with session.get(url) as r:
+                yield r
+                return
+        except (aiohttp.ClientSSLError, _ssl.SSLError) as e:
+            logger.warning(
+                "Pixeldrain TLS certificate rejected (%s) — "
+                "retrying without verification", e,
+            )
+        async with session.get(url, ssl=False) as r:
+            yield r
+
     # ── resolve() — used by the download pipeline ────────────────────
     async def resolve(self, url: str, **kwargs) -> ResolvedFile:
         parsed = urlparse(url)
@@ -153,13 +210,7 @@ class PixeldrainProvider(BaseProvider):
         # returns the file's bytes directly.
         info_url = f"{PIXELDRAIN_FS_API}/{encoded}?stat"
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                info_url, headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
+        data = await self._get_json(info_url, headers)
 
         path_chain = data.get("path", [])
         if not path_chain:
@@ -205,13 +256,7 @@ class PixeldrainProvider(BaseProvider):
     async def _resolve_list(self, list_id: str) -> ResolvedFile:
         headers = self._auth_headers()
         list_url = f"{PIXELDRAIN_LIST_API}/{list_id}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                list_url, headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
+        data = await self._get_json(list_url, headers)
         files = data.get("files", [])
         if not files:
             raise ValueError(f"Pixeldrain list {list_id} is empty")
@@ -290,7 +335,7 @@ class PixeldrainProvider(BaseProvider):
         # ?stat: return JSON metadata. Without it, this URL streams file bytes
         # for leaf paths, which crashes JSON decoding.
         api = f"{PIXELDRAIN_FS_API}/{encoded}?stat"
-        async with session.get(api) as r:
+        async with self._session_get(session, api) as r:
             r.raise_for_status()
             data = await r.json()
 
@@ -314,7 +359,7 @@ class PixeldrainProvider(BaseProvider):
         self, list_id: str, session: aiohttp.ClientSession, source_url: str,
     ) -> tuple[FsNode, list[FsNode], str]:
         api = f"{PIXELDRAIN_LIST_API}/{list_id}"
-        async with session.get(api) as r:
+        async with self._session_get(session, api) as r:
             r.raise_for_status()
             data = await r.json()
         files = data.get("files", []) or []
@@ -339,7 +384,7 @@ class PixeldrainProvider(BaseProvider):
         self, file_id: str, session: aiohttp.ClientSession, source_url: str,
     ) -> tuple[FsNode, list[FsNode], str]:
         api = f"{PIXELDRAIN_FILE_API}/{file_id}/info"
-        async with session.get(api) as r:
+        async with self._session_get(session, api) as r:
             if r.status == 404:
                 root = FsNode(path=f"file:{file_id}", name=file_id, type="file",
                               error="File not found (404)")
