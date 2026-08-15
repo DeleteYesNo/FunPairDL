@@ -10,11 +10,15 @@ import json
 import logging
 import re
 import struct
+import threading
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
 from Crypto.Cipher import AES
 from Crypto.Util import Counter
+
+from funpairdl.utils.filename import sanitize_filename
 
 logger = logging.getLogger("funpairdl.utils.mega_api")
 
@@ -55,6 +59,61 @@ _MEGA_SEGMENT_MAX_RETRIES = 5  # retries per download segment (MEGA drops conns)
 # file — the connection budget is bounded instead by running one MEGA file
 # at a time (see the semaphore in queue_manager).
 _MEGA_MAX_SEGMENTS = 32
+
+# Probes should fail fast (a UI is usually waiting on them); downloads keep
+# the full retry budget.
+_MEGA_PROBE_RETRIES = 3
+
+# sid-validation backoff: 2+4+8+16 s ≈ 30 s total, with no useless sleep
+# after the final attempt (audit [1c] — was ~126 s while the MEGA download
+# semaphore was held).
+_MEGA_SID_VALIDATE_RETRIES = 5
+
+# TTL caches (module-level, lock-protected): sid-validation results and
+# shared-folder listings. Entries are plain dicts, so the browser widget
+# (worker loop) and the download loop can share them safely.
+_MEGA_CACHE_TTL = 600.0  # 10 min
+_SID_CACHE_MAX = 8
+_FOLDER_CACHE_MAX = 32
+_sid_cache: dict[str, tuple[float, dict]] = {}
+_sid_cache_lock = threading.Lock()
+_folder_cache: dict[str, tuple[float, dict]] = {}
+_folder_cache_lock = threading.Lock()
+
+# Buffer decrypt+write into ~1 MB batches flushed via asyncio.to_thread —
+# the same pattern as segment.py's _flush — so the ~130 chunk/s stream never
+# blocks the download loop with synchronous AES + disk writes (audit [1a]).
+# 32 segments × 1 MB = 32 MB worst case in flight. The semaphore bounds
+# concurrent disk writes like segment.py's _disk_write_sem.
+_MEGA_FLUSH_SIZE = 1024 * 1024
+_mega_disk_write_sem = threading.Semaphore(4)
+
+
+def _cache_get(cache: dict, lock: threading.Lock, key: str):
+    """Return a cached value if present and fresh, else None."""
+    now = time.monotonic()
+    with lock:
+        hit = cache.get(key)
+        if hit is None:
+            return None
+        ts, value = hit
+        if now - ts >= _MEGA_CACHE_TTL:
+            del cache[key]
+            return None
+        return value
+
+
+def _cache_put(cache: dict, lock: threading.Lock, key: str, value, max_entries: int) -> None:
+    """Insert into a TTL cache, evicting expired entries first, then oldest."""
+    now = time.monotonic()
+    with lock:
+        expired = [k for k, (ts, _) in cache.items() if now - ts >= _MEGA_CACHE_TTL]
+        for k in expired:
+            del cache[k]
+        while len(cache) >= max_entries:
+            oldest = min(cache, key=lambda k: cache[k][0])
+            del cache[oldest]
+        cache[key] = (now, value)
 
 # ─── Crypto helpers (ported from mega.py/crypto.py) ───
 
@@ -182,6 +241,114 @@ def _file_key(full_key: tuple) -> tuple:
     )
 
 
+def _folder_file_key_iv(node: dict, folder_key: tuple, share_root: str) -> tuple[tuple, tuple]:
+    """Derive ``(aes_key, iv)`` for a file node inside a shared MEGA folder.
+
+    The node's ``k`` field holds ``handle:enckey`` pairs; the folder master
+    key decrypts the share-root pair into the 8-int full file key, from which
+    aes_key = XOR of the halves and iv = ints 4-5. This is the only correct
+    derivation for folder files — treating the 4-int folder master key itself
+    as a file key raises IndexError in _file_key (audit [1f]).
+
+    Raises RuntimeError when the node carries no usable 8-int file key.
+    """
+    k, iv, _attrs = _folder_file_key_iv_attrs(node, folder_key, share_root)
+    return k, iv
+
+
+def _folder_file_key_iv_attrs(
+    node: dict, folder_key: tuple, share_root: str,
+) -> tuple[tuple, tuple, dict | None]:
+    """Derive ``(aes_key, iv, attrs)`` for a file node, validating the key
+    choice against the attribute magic.
+
+    Tries the share-root ``handle:enckey`` pair first, then the node's other
+    pairs. A candidate is accepted when the node's attribute blob decrypts to
+    the ``MEGA{`` magic under its key — a correct decrypt is
+    self-authenticating, so this can never pick a wrong key, and the SAME
+    validated key drives both the filename and the content stream (a wrong
+    pick would not just mislabel the file, it would decrypt the download into
+    garbage bytes).
+
+    Returns ``attrs=None`` only for nodes without an attribute blob (the
+    share-root pair is used unvalidated, matching the old behavior). Raises
+    RuntimeError when no usable 8-int key exists, or when the node HAS an
+    attribute but no key pair decrypts it — downloading would produce
+    corrupt output, so failing loudly is strictly better.
+    """
+    handle = node.get("h", "?")
+    pairs = [p for p in node.get("k", "").split("/") if ":" in p]
+    if not pairs:
+        raise RuntimeError(f"Missing encrypted key for MEGA node {handle}")
+    # Share-root pair first; the rest stay as self-authenticated fallbacks.
+    pairs.sort(key=lambda p: p.partition(":")[0] != share_root)
+
+    has_attr = bool(node.get("a"))
+    attr_bytes = b""
+    if has_attr:
+        try:
+            attr_bytes = _base64_url_decode(node["a"])
+        except ValueError:
+            attr_bytes = b""  # malformed blob — no candidate can validate
+    short_key_error: RuntimeError | None = None
+    unvalidated: tuple[tuple, tuple] | None = None
+    for pair in pairs:
+        enc_key_b64 = pair.partition(":")[2]
+        try:
+            dec_key = _decrypt_key(_base64_to_a32(enc_key_b64), folder_key)
+        except Exception:
+            continue  # malformed/non-block-aligned candidate
+        if len(dec_key) < 8:
+            short_key_error = RuntimeError(
+                f"MEGA node {handle} key has {len(dec_key)} ints, expected 8 "
+                "(folder nodes have 4-int keys and are not downloadable files)"
+            )
+            continue
+        k, iv = _file_key(dec_key), (dec_key[4], dec_key[5])
+        if not has_attr:
+            return k, iv, None
+        attrs = None
+        if attr_bytes:
+            try:
+                attrs = _decrypt_attr(attr_bytes, k)
+            except ValueError:
+                attrs = None  # e.g. blob not block-aligned
+        if attrs is not None:
+            return k, iv, attrs
+        if unvalidated is None:
+            unvalidated = (k, iv)
+
+    if unvalidated is not None:
+        raise RuntimeError(
+            f"MEGA node {handle}: attribute does not decrypt with any of its "
+            f"{len(pairs)} key pairs — wrong folder key? Refusing to download "
+            "undecryptable content."
+        )
+    if short_key_error is not None:
+        raise short_key_error
+    raise RuntimeError(f"Missing encrypted key for MEGA node {handle}")
+
+
+def _share_root_handle(nodes: list) -> str:
+    """Handle of the folder the share link was created for.
+
+    The export root is the listing's own root node — the one whose parent
+    handle is absent from the listing (MEGA returns it first, but don't rely
+    on ordering). Only the ``handle:enckey`` pair bearing this handle is
+    wrapped with the URL fragment's folder key. Frequency of ``k`` prefixes
+    is NOT a valid signal: a folder nested inside other shares of the same
+    owner carries every ancestor share's pair on every node, the counts tie
+    exactly, and the tie breaks toward the outermost ancestor — whose key
+    the folder key cannot decrypt, silently yielding garbage names and
+    garbage content.
+    """
+    handles = {n.get("h") for n in nodes}
+    for node in nodes:
+        if node.get("p") not in handles:
+            return node.get("h", "")
+    return nodes[0].get("h", "") if nodes else ""
+
+
 # ─── URL parsing ───
 
 
@@ -224,6 +391,9 @@ def parse_mega_url(url: str) -> dict | None:
         parts = fragment.split("!")
         if fragment.startswith("F!") and len(parts) >= 3:
             return {"type": "folder", "handle": parts[1], "key": parts[2]}
+        # "!HANDLE!KEY" splits to ["", "HANDLE", "KEY"] — skip the empty part
+        if fragment.startswith("!") and len(parts) >= 3:
+            return {"type": "file", "handle": parts[1], "key": parts[2]}
         if len(parts) >= 2:
             return {"type": "file", "handle": parts[0], "key": parts[1]}
 
@@ -231,6 +401,28 @@ def parse_mega_url(url: str) -> dict | None:
 
 
 # ─── API calls ───
+
+
+async def _fetch_folder_nodes(
+    session, folder_handle: str, timeout: int = 30,
+    max_retries: int = _MEGA_MAX_RETRIES,
+) -> dict:
+    """Fetch the recursive listing of a shared folder, TTL-cached by handle.
+
+    The full listing ({"a":"f","c":1,"r":1}) can be MBs of JSON; probes and
+    downloads of every file in a folder previously re-fetched it each time
+    (audit [1d]). One fetch per folder per 10 minutes now serves them all.
+    """
+    cached = _cache_get(_folder_cache, _folder_cache_lock, folder_handle)
+    if cached is not None:
+        return cached
+    data = await _mega_api_post(
+        session, f"{MEGA_API}?n={folder_handle}",
+        [{"a": "f", "c": 1, "r": 1}],
+        timeout=timeout, max_retries=max_retries,
+    )
+    _cache_put(_folder_cache, _folder_cache_lock, folder_handle, data, _FOLDER_CACHE_MAX)
+    return data
 
 
 async def probe_mega_file(url: str) -> dict:
@@ -241,50 +433,80 @@ async def probe_mega_file(url: str) -> dict:
     if not info or info["type"] not in ("file", "folder_file"):
         return {"success": False, "error": "Invalid MEGA file URL"}
 
-    # For folder_file URLs, probe the specific file within the folder
-    handle = info.get("file_handle") or info.get("handle")
-    key = info.get("folder_key") or info.get("key")
-
     try:
-        api_url = MEGA_API
-        if info["type"] == "folder_file":
-            api_url = f"{MEGA_API}?n={info['folder_handle']}"
         async with aiohttp.ClientSession() as session:
-            async with session.post(
-                api_url,
-                json=[{"a": "g", "p": handle, "ssm": 1}],
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp:
-                data = await resp.json()
-
-        if isinstance(data, list):
-            data = data[0]
-        if isinstance(data, int):
-            return {"success": False, "error": f"MEGA API error: {data}"}
-
-        size = data.get("s", 0)
-        filename = ""
-
-        # Try to decrypt filename
-        if "at" in data and key:
-            try:
-                full_key = _base64_to_a32(key)
-                k = _file_key(full_key)
-                attrs = _decrypt_attr(_base64_url_decode(data["at"]), k)
-                if attrs and "n" in attrs:
-                    filename = attrs["n"]
-            except Exception as e:
-                logger.debug("Failed to decrypt MEGA filename: %s", e)
-
-        return {
-            "success": True,
-            "provider": "mega",
-            "size": size,
-            "filename": filename or "MEGA file",
-        }
+            if info["type"] == "folder_file":
+                return await _probe_folder_file(session, info)
+            return await _probe_standalone_file(session, info)
     except Exception as e:
-        logger.error("MEGA probe failed: %s", e)
+        logger.error("MEGA probe failed for %s: %s", url[:80], e)
         return {"success": False, "error": str(e)}
+
+
+async def _probe_standalone_file(session, info: dict) -> dict:
+    """Probe mega.nz/file/HANDLE#KEY — one 'g' command (with EAGAIN retry)."""
+    data = await _mega_api_post(
+        session, MEGA_API,
+        [{"a": "g", "p": info["handle"], "ssm": 1}],
+        timeout=15, max_retries=_MEGA_PROBE_RETRIES,
+    )
+    size = data.get("s", 0)
+    filename = ""
+    if "at" in data and info.get("key"):
+        try:
+            k = _file_key(_base64_to_a32(info["key"]))
+            attrs = _decrypt_attr(_base64_url_decode(data["at"]), k)
+            if attrs and "n" in attrs:
+                filename = attrs["n"]
+        except Exception as e:
+            logger.warning(
+                "Failed to decrypt MEGA filename for %s: %s", info["handle"], e
+            )
+    return {
+        "success": True,
+        "provider": "mega",
+        "size": size,
+        "filename": filename or "MEGA file",
+    }
+
+
+async def _probe_folder_file(session, info: dict) -> dict:
+    """Probe a file inside a shared folder via the (cached) folder listing.
+
+    The listing is required anyway for the file's encrypted key: the folder
+    master key from the URL cannot decrypt attributes directly (audit [1f]) —
+    it first decrypts the node key selected from the listing, and only that
+    node key opens the attributes. Key-derivation failures propagate to
+    probe_mega_file's error return instead of being swallowed.
+    """
+    data = await _fetch_folder_nodes(
+        session, info["folder_handle"], timeout=15, max_retries=_MEGA_PROBE_RETRIES,
+    )
+    nodes = data.get("f", [])
+    target = next((n for n in nodes if n.get("h") == info["file_handle"]), None)
+    if target is None:
+        return {
+            "success": False,
+            "error": (
+                f"File {info['file_handle']} not found in "
+                f"MEGA folder {info['folder_handle']}"
+            ),
+        }
+
+    folder_key = _base64_to_a32(info["folder_key"])
+    share_root = _share_root_handle(nodes)
+    _k, _iv, attrs = _folder_file_key_iv_attrs(target, folder_key, share_root)
+
+    filename = ""
+    if attrs and "n" in attrs:
+        filename = attrs["n"]
+
+    return {
+        "success": True,
+        "provider": "mega",
+        "size": target.get("s", 0),
+        "filename": filename or "MEGA file",
+    }
 
 
 async def probe_mega_folder(url: str) -> dict:
@@ -299,21 +521,15 @@ async def probe_mega_folder(url: str) -> dict:
         folder_key = _base64_to_a32(info["key"])
 
         async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{MEGA_API}?n={info['handle']}",
-                json=[{"a": "f", "c": 1, "r": 1}],
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp:
-                data = await resp.json()
-
-        if isinstance(data, list):
-            data = data[0]
-        if isinstance(data, int):
-            return {"success": False, "error": f"MEGA API error: {data}"}
+            data = await _fetch_folder_nodes(
+                session, info["handle"], timeout=15, max_retries=_MEGA_PROBE_RETRIES,
+            )
 
         nodes = data.get("f", [])
+        share_root = _share_root_handle(nodes)
         files = []
         total_size = 0
+        decrypted = 0
 
         for node in nodes:
             if node.get("t") != 0:  # 0 = file, 1 = folder
@@ -323,21 +539,15 @@ async def probe_mega_folder(url: str) -> dict:
             total_size += size
             filename = ""
 
-            # Decrypt filename: node["k"] = "HANDLE:ENCRYPTED_KEY"
-            k_str = node.get("k", "")
-            if ":" in k_str:
-                try:
-                    enc_key_b64 = k_str.split(":")[1]
-                    enc_key = _base64_to_a32(enc_key_b64)
-                    dec_key = _decrypt_key(enc_key, folder_key)
-                    fk = _file_key(dec_key)
-
-                    if "a" in node:
-                        attrs = _decrypt_attr(_base64_url_decode(node["a"]), fk)
-                        if attrs and "n" in attrs:
-                            filename = attrs["n"]
-                except Exception as e:
-                    logger.debug("Failed to decrypt MEGA folder file: %s", e)
+            # Decrypt filename via the shared node-key derivation. One bad
+            # node shouldn't kill the whole listing, so swallow per-node.
+            try:
+                _fk, _iv, attrs = _folder_file_key_iv_attrs(node, folder_key, share_root)
+                if attrs and "n" in attrs:
+                    filename = attrs["n"]
+                    decrypted += 1
+            except Exception as e:
+                logger.debug("Failed to decrypt MEGA folder file: %s", e)
 
             file_handle = node.get("h", "")
             # Build per-file URL using folder link + file handle
@@ -348,6 +558,20 @@ async def probe_mega_folder(url: str) -> dict:
                 "size": size,
                 "url": file_url,
             })
+
+        if files and decrypted == 0:
+            # Not one filename decrypted — the folder key doesn't match any
+            # node key pair. A listing of file_<handle> placeholders would
+            # cascade into mis-typed, mis-paired queue items (and the content
+            # would decrypt to garbage with the same wrong key), so fail the
+            # probe loudly instead.
+            return {
+                "success": False,
+                "error": (
+                    "MEGA folder key decrypts none of the "
+                    f"{len(files)} file names — key/share mismatch"
+                ),
+            }
 
         return {
             "success": True,
@@ -365,11 +589,12 @@ async def probe_mega_folder(url: str) -> dict:
         return {"success": False, "error": str(e)}
 
 
-async def _mega_api_post(session, url: str, json_payload: list, timeout: int = 30):
+async def _mega_api_post(session, url: str, json_payload: list, timeout: int = 30,
+                         max_retries: int = _MEGA_MAX_RETRIES):
     """POST to MEGA API with retry on temporary / quota errors."""
     import asyncio, aiohttp
 
-    for attempt in range(_MEGA_MAX_RETRIES):
+    for attempt in range(max_retries):
         async with session.post(
             url, json=json_payload,
             timeout=aiohttp.ClientTimeout(total=timeout),
@@ -391,21 +616,21 @@ async def _mega_api_post(session, url: str, json_payload: list, timeout: int = 3
                 )
 
             # Quota exceeded — retry with much longer delay
-            if data in _MEGA_QUOTA_CODES and attempt < _MEGA_MAX_RETRIES - 1:
+            if data in _MEGA_QUOTA_CODES and attempt < max_retries - 1:
                 delay = 30 * (2 ** attempt)  # 30s, 60s, 120s, ...
                 logger.warning(
                     "MEGA quota exceeded (%s), waiting %.0fs before retry (attempt %d/%d)",
-                    err_name, delay, attempt + 1, _MEGA_MAX_RETRIES,
+                    err_name, delay, attempt + 1, max_retries,
                 )
                 await asyncio.sleep(delay)
                 continue
 
             # Temporary errors — retry with standard backoff
-            if data in _MEGA_RETRY_CODES and attempt < _MEGA_MAX_RETRIES - 1:
+            if data in _MEGA_RETRY_CODES and attempt < max_retries - 1:
                 delay = _MEGA_RETRY_BASE_DELAY * (2 ** attempt)
                 logger.warning(
                     "MEGA API error %s, retrying in %.0fs (attempt %d/%d)",
-                    err_name, delay, attempt + 1, _MEGA_MAX_RETRIES,
+                    err_name, delay, attempt + 1, max_retries,
                 )
                 await asyncio.sleep(delay)
                 continue
@@ -425,6 +650,11 @@ async def validate_mega_sid(sid: str) -> dict:
     sid is probably fine, keep using it). Transient codes are retried with
     backoff before giving up.
 
+    Definitive results (valid session, or dead sid) are TTL-cached for
+    10 minutes module-wide, so the per-download check and the browser-side
+    check don't each pay a round trip (audit [1c]); transient failures are
+    never cached.
+
     Returns:
         {"valid": True, "type": ...}                       — session works
         {"valid": False, "auth_error": True,  "error": ...} — sid is dead
@@ -437,8 +667,13 @@ async def validate_mega_sid(sid: str) -> dict:
     if not sid:
         return {"valid": False, "auth_error": True, "error": "No mega_sid configured"}
 
+    cached = _cache_get(_sid_cache, _sid_cache_lock, sid)
+    if cached is not None:
+        return cached
+
+    result: dict | None = None
     last_error = "unknown"
-    for attempt in range(_MEGA_MAX_RETRIES):
+    for attempt in range(_MEGA_SID_VALIDATE_RETRIES):
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -456,20 +691,23 @@ async def validate_mega_sid(sid: str) -> dict:
                 err_name = _MEGA_ERROR_NAMES.get(data, f"unknown ({data})")
                 last_error = f"MEGA API error: {err_name}"
                 if data in _MEGA_AUTH_ERROR_CODES:
-                    return {"valid": False, "auth_error": True, "error": last_error}
-                if data in _MEGA_RETRY_CODES or data in _MEGA_QUOTA_CODES:
+                    result = {"valid": False, "auth_error": True, "error": last_error}
+                    break
+                if (data in _MEGA_RETRY_CODES or data in _MEGA_QUOTA_CODES) \
+                        and attempt < _MEGA_SID_VALIDATE_RETRIES - 1:
                     delay = _MEGA_RETRY_BASE_DELAY * (2 ** attempt)
                     logger.info(
                         "MEGA sid validation hit %s, retrying in %.0fs (%d/%d)",
-                        err_name, delay, attempt + 1, _MEGA_MAX_RETRIES,
+                        err_name, delay, attempt + 1, _MEGA_SID_VALIDATE_RETRIES,
                     )
                     await asyncio.sleep(delay)
                     continue
-                # Unknown non-auth code: treat as transient, don't drop sid
+                # Unknown non-auth code (or retries exhausted): treat as
+                # transient, don't drop the sid
                 return {"valid": False, "auth_error": False, "error": last_error}
 
             is_premium = data.get("utype", 0) > 0
-            return {
+            result = {
                 "valid": True,
                 "type": "premium" if is_premium else "free",
                 "utype": data.get("utype", 0),
@@ -478,17 +716,24 @@ async def validate_mega_sid(sid: str) -> dict:
                 "storage_used": data.get("cstrg", 0),
                 "storage_max": data.get("mstrg", 0),
             }
+            break
         except Exception as e:
             last_error = str(e)
-            delay = _MEGA_RETRY_BASE_DELAY * (2 ** attempt)
-            logger.info(
-                "MEGA sid validation network error (%s), retrying in %.0fs (%d/%d)",
-                last_error, delay, attempt + 1, _MEGA_MAX_RETRIES,
-            )
-            await asyncio.sleep(delay)
+            if attempt < _MEGA_SID_VALIDATE_RETRIES - 1:
+                delay = _MEGA_RETRY_BASE_DELAY * (2 ** attempt)
+                logger.info(
+                    "MEGA sid validation network error (%s), retrying in %.0fs (%d/%d)",
+                    last_error, delay, attempt + 1, _MEGA_SID_VALIDATE_RETRIES,
+                )
+                await asyncio.sleep(delay)
 
-    # Exhausted retries on transient errors — keep the sid, it's likely fine
-    return {"valid": False, "auth_error": False, "error": last_error}
+    if result is None:
+        # Exhausted retries on transient errors — keep the sid, it's likely
+        # fine; never cache an inconclusive result.
+        return {"valid": False, "auth_error": False, "error": last_error}
+
+    _cache_put(_sid_cache, _sid_cache_lock, sid, result, _SID_CACHE_MAX)
+    return result
 
 
 async def download_mega_file(
@@ -595,14 +840,13 @@ async def _download_folder_file(
     file_handle = info["file_handle"]
 
     async with aiohttp.ClientSession() as session:
-        # Step 1: List folder contents to find the file's encrypted key
-        data = await _mega_api_post(
-            session, f"{MEGA_API}?n={folder_handle}",
-            [{"a": "f", "c": 1, "r": 1}],
-        )
+        # Step 1: List folder contents to find the file's encrypted key.
+        # TTL-cached — probes and sibling-file downloads reuse one listing.
+        data = await _fetch_folder_nodes(session, folder_handle)
 
         # Find the target file node
         nodes = data.get("f", [])
+        share_root = _share_root_handle(nodes)
         target = None
         for node in nodes:
             if node.get("h") == file_handle:
@@ -611,24 +855,15 @@ async def _download_folder_file(
         if not target:
             raise RuntimeError(f"File {file_handle} not found in MEGA folder {folder_handle}")
 
-        # Step 2: Decrypt file key using folder master key
-        k_str = target.get("k", "")
-        if ":" not in k_str:
-            raise RuntimeError(f"Missing encrypted key for file {file_handle}")
-        enc_key = _base64_to_a32(k_str.split(":")[1])
-        dec_key = _decrypt_key(enc_key, folder_key)
-        k = _file_key(dec_key)
-        iv = (dec_key[4], dec_key[5])
+        # Step 2: Decrypt the per-file key with the folder master key (see
+        # _folder_file_key_iv_attrs for the multi-share "HANDLE:KEY"
+        # selection). Raises when no key pair decrypts the attribute —
+        # streaming with an unvalidated key would write garbage to disk.
+        k, iv, attrs = _folder_file_key_iv_attrs(target, folder_key, share_root)
 
-        # Decrypt filename
         filename = ""
-        if "a" in target:
-            try:
-                attrs = _decrypt_attr(_base64_url_decode(target["a"]), k)
-                if attrs and "n" in attrs:
-                    filename = attrs["n"]
-            except Exception:
-                pass
+        if attrs and "n" in attrs:
+            filename = attrs["n"]
         if not filename:
             filename = f"mega_{file_handle}"
 
@@ -671,6 +906,9 @@ async def _stream_decrypt(
     import aiohttp
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    # Sanitize — MEGA attrs are user-controlled; this also keeps the on-disk
+    # name consistent with what MegaProvider.resolve stored on the item.
+    filename = sanitize_filename(filename)
     output_path = output_dir / filename
     key_bytes = _a32_to_bytes(k)
     iv_bytes = _a32_to_bytes(iv)
@@ -695,10 +933,16 @@ async def _stream_decrypt(
 
     downloaded = [0]  # Shared mutable counter
 
-    # Pre-allocate file
-    with open(output_path, "wb") as f:
-        f.seek(file_size - 1)
-        f.write(b"\0")
+    # Pre-allocate in a worker thread — extending the file forces NTFS to
+    # synchronously zero-fill everything before the written byte, which can
+    # block for tens of seconds on multi-GB files if done on the loop
+    # (audit [1b]).
+    def _preallocate():
+        with open(output_path, "wb") as f:
+            f.seek(file_size - 1)
+            f.write(b"\0")
+
+    await _aio.to_thread(_preallocate)
 
     async def _download_segment(idx: int, start: int, end: int):
         # Each segment owns its own file handle and writes its region purely
@@ -710,15 +954,38 @@ async def _stream_decrypt(
         #
         # resume_pos is the absolute offset to (re)start from. MEGA frequently
         # drops a connection mid-segment; rather than discard the bytes already
-        # written, we resume from here. It stays 16-byte aligned (iter_chunked
-        # yields full chunks except the final one, after which we return), so
-        # the AES-CTR counter realigns exactly.
+        # written, we resume from here. Only 16-byte-aligned prefixes are ever
+        # committed mid-stream, so the AES-CTR counter realigns exactly.
         resume_pos = start
         with open(output_path, "r+b") as seg_f:
             for retry in range(_MEGA_SEGMENT_MAX_RETRIES):
+                ctr = Counter.new(128, initial_value=base_ctr + resume_pos // 16)
+                decryptor = AES.new(key_bytes, AES.MODE_CTR, counter=ctr)
+                buf = bytearray()
+                pending = 0  # bytes counted in downloaded[0] but not committed
+
+                # Decrypt + write in a worker thread so neither the AES work
+                # nor a blocking disk write stalls the download loop
+                # (audit [1a], mirroring segment.py's _flush). Flushes are
+                # awaited sequentially per segment, so the CTR stream and the
+                # file position stay in order.
+                # flush_ok turns False if a flush itself fails mid-write:
+                # the decryptor has then advanced past the file position, so
+                # the error handler below must NOT attempt its best-effort
+                # flush (it would write wrong bytes at a wrong offset) — the
+                # retry re-downloads from the last committed resume_pos.
+                flush_ok = [True]
+
+                def _flush(data: bytes, dec=decryptor, f=seg_f, ok=flush_ok):
+                    try:
+                        plain = dec.decrypt(data)
+                        with _mega_disk_write_sem:
+                            f.write(plain)
+                    except BaseException:
+                        ok[0] = False
+                        raise
+
                 try:
-                    ctr = Counter.new(128, initial_value=base_ctr + resume_pos // 16)
-                    decryptor = AES.new(key_bytes, AES.MODE_CTR, counter=ctr)
                     seg_f.seek(resume_pos)
 
                     async with session.get(
@@ -729,13 +996,46 @@ async def _stream_decrypt(
                         if resp.status not in (200, 206):
                             raise RuntimeError(f"MEGA segment {idx} HTTP {resp.status}")
                         async for chunk in resp.content.iter_chunked(chunk_size):
-                            seg_f.write(decryptor.decrypt(chunk))
+                            buf.extend(chunk)
                             downloaded[0] += len(chunk)
-                            resume_pos += len(chunk)  # commit — survives a reset
+                            pending += len(chunk)
+                            if len(buf) >= _MEGA_FLUSH_SIZE:
+                                # Flush only the 16-byte-aligned prefix so a
+                                # retry can realign the CTR at resume_pos.
+                                cut = len(buf) & ~15
+                                data = bytes(buf[:cut])
+                                del buf[:cut]
+                                await _aio.to_thread(_flush, data)
+                                resume_pos += cut  # commit — survives a reset
+                                pending -= cut
                             if on_progress:
                                 on_progress(downloaded[0], file_size)
+
+                    if buf:  # Final (possibly unaligned) tail
+                        data = bytes(buf)
+                        buf.clear()
+                        await _aio.to_thread(_flush, data)
+                        resume_pos += len(data)
+                        pending -= len(data)
+                    if on_progress:
+                        on_progress(downloaded[0], file_size)
                     return  # Success
                 except Exception as e:
+                    # Best-effort: commit the aligned prefix of the buffer so
+                    # the retry resumes past it; un-count whatever is dropped
+                    # so progress stays exact. Skipped when the flush itself
+                    # failed — decryptor/file positions may have diverged.
+                    cut = len(buf) & ~15
+                    if cut and flush_ok[0]:
+                        try:
+                            await _aio.to_thread(_flush, bytes(buf[:cut]))
+                            resume_pos += cut
+                            pending -= cut
+                        except Exception:
+                            pass
+                    downloaded[0] -= pending
+                    buf.clear()
+
                     if retry < _MEGA_SEGMENT_MAX_RETRIES - 1:
                         delay = min(0.5 * (2 ** retry), 5)  # 0.5,1,2,4s — quick resume
                         logger.warning(
@@ -748,14 +1048,26 @@ async def _stream_decrypt(
                     else:
                         raise
 
-    # Download all segments in parallel
-    tasks = [_download_segment(i, s, e) for i, (s, e) in enumerate(segments)]
-    await _aio.gather(*tasks)
+    # Download all segments in parallel. On the first failure, cancel the
+    # siblings and await them all, so no orphan task keeps retrying against
+    # a closing session or leaks an unretrieved exception (audit [1h]).
+    tasks = [_aio.ensure_future(_download_segment(i, s, e)) for i, (s, e) in enumerate(segments)]
+    try:
+        await _aio.gather(*tasks)
+    except BaseException:
+        for t in tasks:
+            t.cancel()
+        await _aio.gather(*tasks, return_exceptions=True)
+        raise
 
-    # Truncate to actual file size (MEGA pads to AES block boundary)
-    if file_size > 0 and output_path.stat().st_size > file_size:
-        with open(output_path, "r+b") as f:
-            f.truncate(file_size)
+    # Truncate to actual file size (MEGA pads to AES block boundary);
+    # stat+truncate off-loop like every other disk touch.
+    def _finalize():
+        if file_size > 0 and output_path.stat().st_size > file_size:
+            with open(output_path, "r+b") as f:
+                f.truncate(file_size)
+
+    await _aio.to_thread(_finalize)
 
     logger.info("MEGA download complete: %s (%d bytes, %d segments)", filename, file_size, n_seg)
     return output_path
@@ -766,7 +1078,9 @@ async def _single_stream_decrypt(
     file_size: int, key_bytes: bytes, base_ctr: int,
     on_progress, chunk_size: int,
 ) -> Path:
-    """Fallback: single-stream download + decrypt for tiny files."""
+    """Fallback: single-stream download + decrypt for tiny/unknown-size files."""
+    import asyncio as _aio
+
     import aiohttp
 
     ctr = Counter.new(128, initial_value=base_ctr)
@@ -780,15 +1094,32 @@ async def _single_stream_decrypt(
         if resp.status != 200:
             raise RuntimeError(f"MEGA download HTTP {resp.status}")
         with open(output_path, "wb") as f:
+            # Same off-loop decrypt+write batching as the segmented path
+            # (audit [1a]) — unknown-size files land here and can be large.
+            def _flush(data: bytes):
+                plain = decryptor.decrypt(data)
+                with _mega_disk_write_sem:
+                    f.write(plain)
+
+            buf = bytearray()
             async for chunk in resp.content.iter_chunked(chunk_size):
-                f.write(decryptor.decrypt(chunk))
+                buf.extend(chunk)
                 downloaded += len(chunk)
+                if len(buf) >= _MEGA_FLUSH_SIZE:
+                    data = bytes(buf)
+                    buf.clear()
+                    await _aio.to_thread(_flush, data)
                 if on_progress:
                     on_progress(downloaded, file_size)
+            if buf:
+                await _aio.to_thread(_flush, bytes(buf))
 
-    if file_size > 0 and output_path.stat().st_size > file_size:
-        with open(output_path, "r+b") as f:
-            f.truncate(file_size)
+    def _finalize():
+        if file_size > 0 and output_path.stat().st_size > file_size:
+            with open(output_path, "r+b") as fh:
+                fh.truncate(file_size)
+
+    await _aio.to_thread(_finalize)
 
     logger.info("MEGA download complete: %s (%d bytes)", output_path.name, file_size)
     return output_path
