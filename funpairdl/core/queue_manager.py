@@ -247,6 +247,13 @@ class QueueManager:
             task.cancel()
         if self._session:
             await self._session.close()
+        # Close this loop's shared probe session (metadata prober) so exit
+        # doesn't spray "Unclosed client session" warnings.
+        try:
+            from funpairdl.providers.probe import close_probe_session
+            await close_probe_session()
+        except Exception:
+            pass
 
     def add_pair(
         self,
@@ -259,6 +266,7 @@ class QueueManager:
         output_dir_override: str = "",
         groups: list[dict] | None = None,
         filenames: dict[str, str] | None = None,
+        sizes: dict | None = None,
     ) -> Pair:
         """Add a Pair to the queue.
 
@@ -272,6 +280,8 @@ class QueueManager:
             "name": "Main" | "Alt 1" | ...,
             "video_urls": [...], "script_urls": [...],
             "script_authors": {url: author},
+            "filenames": {url: real_filename},
+            "sizes": {url: bytes},        # probed sizes the extension knows
             "inherit_multi_axis": bool,   # only meaningful for Alt groups
           }
         """
@@ -284,6 +294,7 @@ class QueueManager:
                 "script_urls": script_urls or [],
                 "script_authors": script_authors or {},
                 "filenames": filenames or {},
+                "sizes": sizes or {},
                 "inherit_multi_axis": False,
             }]
 
@@ -319,6 +330,12 @@ class QueueManager:
                 logger.info("Re-queuing failed pair: %s", name)
                 if self.on_pair_updated:
                     self.on_pair_updated(existing)
+                # Persist the re-queue — a kill before the next unrelated
+                # save would otherwise silently revert it (and the new
+                # preferred_resolution) on restart.
+                if self.on_save_needed:
+                    self.on_save_needed()
+                self.request_metadata_probe(existing)
                 self._ensure_pump_alive()
                 self._wake_pump()
             else:
@@ -335,6 +352,9 @@ class QueueManager:
             # Real filenames the extension already knows (probed bundle files);
             # prefer these over guessing a name from the URL's random file id.
             grp_filenames = grp.get("filenames") or {}
+            # Probed sizes the extension already fetched — reusing them means
+            # Size/ETA show immediately instead of waiting for a resolve slot.
+            grp_sizes = grp.get("sizes") or {}
 
             if grp_name != "Main":
                 pair.alt_group_config[grp_name] = {
@@ -364,6 +384,7 @@ class QueueManager:
                         filename=filename,
                         file_type=FileType.VIDEO,
                         provider_name=provider,
+                        total_bytes=int(grp_sizes.get(url) or 0),
                         group=grp_name,
                     )
                 pair.items.append(item)
@@ -377,12 +398,14 @@ class QueueManager:
                     filename=filename,
                     file_type=FileType.FUNSCRIPT,
                     provider_name=provider,
+                    total_bytes=int(grp_sizes.get(url) or 0),
                     author=grp_authors.get(url, ""),
                     group=grp_name,
                 )
                 pair.items.append(item)
 
-        self.pairs.append(pair)
+        with self._pairs_lock:
+            self.pairs.append(pair)
         logger.info("Added pair: %s (%d items)", name, len(pair.items))
 
         if self.on_pair_added:
@@ -394,6 +417,9 @@ class QueueManager:
         self._ensure_pump_alive()
         # Wake pump immediately so it picks up the new pair
         self._wake_pump()
+        # Fill in missing name/size off-slot so the UI isn't blank while the
+        # pair waits for a download slot.
+        self.request_metadata_probe(pair)
 
         return pair
 
@@ -403,6 +429,90 @@ class QueueManager:
             self._dl_loop.call_soon_threadsafe(self._pump_wake.set)
         else:
             self._pump_wake.set()
+
+    def request_metadata_probe(self, pair: Pair) -> None:
+        """Schedule an off-slot name/size probe for a pair's blank items.
+
+        Runs on the dl-thread so it never blocks the caller. Purely
+        best-effort: if the download loop isn't running yet (tests, early
+        startup) the probe is skipped — resolve will fill the fields later.
+        """
+        loop = self._dl_loop
+        if not loop or not loop.is_running():
+            return
+        pair_id = pair.id
+
+        def _schedule() -> None:
+            loop.create_task(self._probe_pair_metadata(pair_id))
+
+        try:
+            loop.call_soon_threadsafe(_schedule)
+        except RuntimeError:
+            pass  # loop shut down between the check and the call
+
+    async def _probe_pair_metadata(self, pair_id: str) -> None:
+        """Fill in name/size for a pair's PENDING items without a download
+        slot — runs on the dl loop. All failures are swallowed (debug log):
+        this is a UI nicety, resolve remains the authoritative path."""
+        try:
+            try:
+                from funpairdl.providers.probe import probe_meta
+            except ImportError:
+                logger.debug("providers.probe unavailable — metadata probe skipped")
+                return
+
+            pair = self._find_pair(pair_id)
+            if pair is None:
+                return
+            items = [
+                i for i in pair.items
+                if not i.is_bundle and i.total_bytes == 0 and i.state == ItemState.PENDING
+            ]
+            if not items:
+                return
+
+            from funpairdl.persistence.settings import Settings
+            settings = Settings.load()
+            if self._probe_sem is None:  # dl loop started outside _dl_init (tests)
+                self._probe_sem = asyncio.Semaphore(3)
+
+            updated = False
+            for item in items:
+                try:
+                    # Bail out if the pair was removed — don't spend minutes
+                    # of the shared probe slots on a deleted pair's items.
+                    if self._find_pair(pair_id) is None:
+                        return
+                    async with self._probe_sem:
+                        # Re-check: the pump may have started this item while
+                        # we waited on the semaphore.
+                        if item.state != ItemState.PENDING:
+                            continue
+                        meta = await probe_meta(
+                            item.url, settings=settings, session=self._session
+                        )
+                    # Re-check again post-await — never clobber an item that
+                    # resolve/download already started filling in.
+                    if item.state != ItemState.PENDING:
+                        continue
+                    changed = False
+                    if meta.size and meta.size > 0 and item.total_bytes == 0:
+                        item.total_bytes = int(meta.size)
+                        changed = True
+                    if meta.filename:
+                        item.filename = sanitize_filename(meta.filename)
+                        changed = True
+                    if changed:
+                        updated = True
+                        if self.on_item_updated:
+                            self.on_item_updated(item)
+                except Exception as e:
+                    logger.debug("Metadata probe failed for %s: %s", item.url[:80], e)
+
+            if updated and self.on_save_needed:
+                self.on_save_needed()
+        except Exception as e:
+            logger.debug("Metadata probe pass failed (pair %s): %s", pair_id, e)
 
     @staticmethod
     def _is_bundle_url(url: str) -> bool:
@@ -910,16 +1020,20 @@ class QueueManager:
             settings = Settings.load()
 
             try:
+                # Outer timeout must stay ABOVE the providers' internal 120s
+                # budgets (yt-dlp/iwara) or their fallback paths dead-code.
                 resolved = await asyncio.wait_for(
                     registry.resolve(
                         item.url,
                         cookies_from_browser=settings.cookies_from_browser,
                         preferred_resolution=preferred_resolution,
                     ),
-                    timeout=60,
+                    timeout=RESOLVE_TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError:
-                raise TimeoutError(f"Resolve timed out after 60s: {item.url[:80]}")
+                raise TimeoutError(
+                    f"Resolve timed out after {RESOLVE_TIMEOUT_SECONDS}s: {item.url[:80]}"
+                )
 
             item.resolved_url = resolved.direct_url
             if resolved.headers:
@@ -928,6 +1042,12 @@ class QueueManager:
                 item.total_bytes = resolved.total_size
             if resolved.filename:
                 item.filename = resolved.filename
+
+            # Push the freshly-resolved name/size to the UI immediately —
+            # without this the row stays blank until the whole pair's
+            # resolve gather finishes (bounded by its slowest sibling).
+            if self.on_item_updated:
+                self.on_item_updated(item)
 
             logger.info(
                 "Resolved %s -> %s (%s, %d bytes)",

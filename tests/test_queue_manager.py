@@ -1,14 +1,26 @@
 """Tests for QueueManager.add_pair with script_authors."""
+import asyncio
+import threading
 from pathlib import Path
 
 from funpairdl.core.pair import (
-    FileType, ItemState, Pair, PairItem, PairState,
+    FileType, ItemState, Pair, PairItem, PairState, SegmentInfo,
 )
 from funpairdl.core.queue_manager import QueueManager
 
 
 def _vi(name, ftype):
     return PairItem(url="u/" + name, filename=name, file_type=ftype)
+
+
+def _completed_pair(name):
+    item = _vi(f"{name}.mp4", FileType.VIDEO)
+    item.state = ItemState.COMPLETED
+    item.segments = [SegmentInfo(index=0, range_start=0, range_end=9,
+                                 downloaded=10, temp_file="x.part0")]
+    pair = Pair(name=name, items=[item])
+    pair.state = PairState.COMPLETED
+    return pair
 
 
 class TestAutoSplitBundlePair:
@@ -361,6 +373,243 @@ class TestResumePair:
         )
         qm.resume_pair(pair.id)
         assert pair.state == PairState.COMPLETED
+
+
+class TestRetention:
+    """archive_completed / clear_completed — the retention policy that keeps
+    the live queue (and every save/rebuild) small."""
+
+    def _counted_qm(self):
+        qm = QueueManager()
+        calls = {"queue_changed": 0, "save": 0}
+        qm.on_queue_changed = lambda: calls.__setitem__(
+            "queue_changed", calls["queue_changed"] + 1)
+        qm.on_save_needed = lambda: calls.__setitem__("save", calls["save"] + 1)
+        return qm, calls
+
+    def test_archive_completed_keeps_newest(self):
+        qm, calls = self._counted_qm()
+        completed = [_completed_pair(f"C{i}") for i in range(5)]
+        queued = Pair(name="Q", items=[_vi("q.mp4", FileType.VIDEO)])
+        qm.pairs = completed[:3] + [queued] + completed[3:]
+        archived_batches = []
+        qm.archive_sink = archived_batches.append
+
+        n = qm.archive_completed(keep=2)
+
+        assert n == 3
+        # Newest completed (list tail) survive; queued pair untouched.
+        assert qm.pairs == [queued, completed[3], completed[4]]
+        # Archived dicts are the 3 OLDEST completed, segments stripped.
+        assert len(archived_batches) == 1
+        batch = archived_batches[0]
+        assert [d["name"] for d in batch] == ["C0", "C1", "C2"]
+        for d in batch:
+            assert all(it["segments"] == [] for it in d["items"])
+        # One queue-changed + one save for the whole batch.
+        assert calls == {"queue_changed": 1, "save": 1}
+
+    def test_archive_completed_noop_under_keep(self):
+        qm, calls = self._counted_qm()
+        qm.pairs = [_completed_pair("A"), _completed_pair("B")]
+        qm.archive_sink = lambda batch: (_ for _ in ()).throw(
+            AssertionError("sink must not be called"))
+        assert qm.archive_completed(keep=2) == 0
+        assert len(qm.pairs) == 2
+        assert calls == {"queue_changed": 0, "save": 0}
+
+    def test_archive_sink_failure_keeps_pairs_live(self):
+        qm, calls = self._counted_qm()
+        qm.pairs = [_completed_pair(f"C{i}") for i in range(3)]
+
+        def _boom(batch):
+            raise OSError("disk full")
+
+        qm.archive_sink = _boom
+        assert qm.archive_completed(keep=0) == 0
+        assert len(qm.pairs) == 3          # nothing dropped on sink failure
+        assert calls == {"queue_changed": 0, "save": 0}
+
+    def test_clear_completed_removes_all_in_one_batch(self):
+        qm, calls = self._counted_qm()
+        queued = Pair(name="Q", items=[_vi("q.mp4", FileType.VIDEO)])
+        qm.pairs = [_completed_pair("A"), queued, _completed_pair("B")]
+        archived_batches = []
+        qm.archive_sink = archived_batches.append
+
+        assert qm.clear_completed() == 2
+        assert qm.pairs == [queued]
+        assert len(archived_batches) == 1
+        assert [d["name"] for d in archived_batches[0]] == ["A", "B"]
+        # ONE queue-changed + ONE save — not one per removed pair.
+        assert calls == {"queue_changed": 1, "save": 1}
+
+    def test_clear_completed_empty_is_silent(self):
+        qm, calls = self._counted_qm()
+        qm.pairs = [Pair(name="Q", items=[_vi("q.mp4", FileType.VIDEO)])]
+        assert qm.clear_completed() == 0
+        assert calls == {"queue_changed": 0, "save": 0}
+
+    def test_clear_completed_proceeds_on_sink_failure(self):
+        # User explicitly asked to clear — a broken archive must not block it.
+        qm, _ = self._counted_qm()
+        qm.pairs = [_completed_pair("A")]
+
+        def _boom(batch):
+            raise OSError("disk full")
+
+        qm.archive_sink = _boom
+        assert qm.clear_completed() == 1
+        assert qm.pairs == []
+
+
+class TestSnapshotDicts:
+    def test_snapshot_returns_pair_dicts(self):
+        qm = QueueManager()
+        qm.pairs = [_completed_pair("A")]
+        snap = qm.snapshot_dicts()
+        assert len(snap) == 1
+        assert snap[0]["name"] == "A"
+        assert snap[0]["state"] == "completed"
+
+    def test_snapshot_thread_safety_smoke(self):
+        # A mutator thread churns the queue (append + clear_completed) while
+        # this thread snapshots continuously. Every snapshot must be a fully
+        # serialized list — no exception, no torn pair.
+        qm = QueueManager()
+        stop = threading.Event()
+        errors = []
+
+        def _mutate():
+            i = 0
+            try:
+                while not stop.is_set():
+                    with qm._pairs_lock:
+                        qm.pairs.append(_completed_pair(f"C{i}"))
+                    if i % 5 == 0:
+                        qm.clear_completed()
+                    i += 1
+            except Exception as e:  # pragma: no cover
+                errors.append(e)
+
+        t = threading.Thread(target=_mutate, daemon=True)
+        t.start()
+        try:
+            for _ in range(300):
+                snap = qm.snapshot_dicts()
+                for d in snap:
+                    assert "items" in d and "state" in d
+        finally:
+            stop.set()
+            t.join(timeout=5)
+        assert not errors
+
+
+class TestGetQueueStatus:
+    def test_status_strips_segments(self):
+        qm = QueueManager()
+        qm.pairs = [_completed_pair("A")]
+        assert qm.pairs[0].items[0].segments  # in-memory records intact
+        status = qm.get_queue_status()
+        assert status[0]["items"][0]["segments"] == []
+        # stripping must not mutate the live objects
+        assert qm.pairs[0].items[0].segments
+
+
+class TestAddPairSizes:
+    """Probed sizes from the extension flow into total_bytes at add time so
+    Size/ETA are visible before the pair ever wins a download slot."""
+
+    def test_grouped_sizes_applied(self):
+        qm = QueueManager()
+        v = "https://pixeldrain.com/u/787M6f9b"
+        s = "https://pixeldrain.com/u/fu4erZE8"
+        pair = qm.add_pair(
+            name="Sized",
+            groups=[{
+                "name": "Main",
+                "video_urls": [v],
+                "script_urls": [s],
+                "sizes": {v: 123456789, s: 4321},
+            }],
+        )
+        vids = [i for i in pair.items if i.file_type == FileType.VIDEO]
+        scrs = [i for i in pair.items if i.file_type == FileType.FUNSCRIPT]
+        assert vids[0].total_bytes == 123456789
+        assert scrs[0].total_bytes == 4321
+
+    def test_flat_sizes_applied(self):
+        qm = QueueManager()
+        url = "https://pixeldrain.com/u/abc"
+        pair = qm.add_pair(name="X", video_urls=[url], sizes={url: 777})
+        assert pair.items[0].total_bytes == 777
+
+    def test_missing_or_zero_sizes_default_to_zero(self):
+        qm = QueueManager()
+        url = "https://pixeldrain.com/u/abc"
+        pair = qm.add_pair(name="X", video_urls=[url], sizes={url: None})
+        assert pair.items[0].total_bytes == 0
+        pair2 = qm.add_pair(name="Y", video_urls=["https://pixeldrain.com/u/z"])
+        assert pair2.items[0].total_bytes == 0
+
+
+class TestOrganizeAsync:
+    def _organized_call_tracker(self, qm):
+        calls = []
+        qm._organize_output = lambda pair: calls.append(("organize", pair.id))
+        qm._undo_organize = lambda pair: calls.append(("undo", pair.id))
+        return calls
+
+    def test_organize_pair_async_runs_and_flags(self):
+        qm = QueueManager()
+        pair = _completed_pair("A")
+        qm.pairs = [pair]
+        calls = self._organized_call_tracker(qm)
+        assert asyncio.run(qm.organize_pair_async(pair.id)) is True
+        assert calls == [("organize", pair.id)]
+
+    def test_organize_rejects_wrong_state(self):
+        qm = QueueManager()
+        pair = Pair(name="Q", items=[_vi("q.mp4", FileType.VIDEO)])
+        qm.pairs = [pair]  # still QUEUED
+        assert asyncio.run(qm.organize_pair_async(pair.id)) is False
+        pair2 = _completed_pair("B")
+        pair2.organized = True
+        qm.pairs = [pair2]
+        assert asyncio.run(qm.organize_pair_async(pair2.id)) is False
+
+    def test_undo_requires_organized(self):
+        qm = QueueManager()
+        pair = _completed_pair("A")
+        qm.pairs = [pair]
+        assert asyncio.run(qm.undo_organize_pair_async(pair.id)) is False
+        pair.organized = True
+        calls = self._organized_call_tracker(qm)
+        assert asyncio.run(qm.undo_organize_pair_async(pair.id)) is True
+        assert calls == [("undo", pair.id)]
+
+    def test_reorganize_chains_undo_then_organize(self):
+        qm = QueueManager()
+        pair = _completed_pair("A")
+        pair.organized = True
+        qm.pairs = [pair]
+        calls = self._organized_call_tracker(qm)
+        assert asyncio.run(qm.reorganize_pair_async(pair.id)) is True
+        assert calls == [("undo", pair.id), ("organize", pair.id)]
+
+    def test_busy_guard_rejects_concurrent_organize(self):
+        qm = QueueManager()
+        pair = _completed_pair("A")
+        qm.pairs = [pair]
+        assert qm._begin_organize(pair.id)  # someone else is organizing
+        try:
+            assert asyncio.run(qm.organize_pair_async(pair.id)) is False
+            assert asyncio.run(qm.reorganize_pair_async(pair.id)) is False
+        finally:
+            qm._end_organize(pair.id)
+        # guard released → works again
+        self._organized_call_tracker(qm)
+        assert asyncio.run(qm.organize_pair_async(pair.id)) is True
 
 
 class TestCleanTitle:

@@ -1226,6 +1226,7 @@ async function sendPairToServer(data) {
       script_urls: g.scriptUrls || [],
       script_authors: g.scriptAuthors || {},
       filenames: g.filenames || {},
+      sizes: g.sizes || {},   // probed byte sizes {url: bytes}, >0 only
       inherit_multi_axis: g.inheritMultiAxis !== false,
       display_name: (g.displayName || "").trim(),
     }));
@@ -1237,6 +1238,9 @@ async function sendPairToServer(data) {
     }
     if (data.filenames && Object.keys(data.filenames).length > 0) {
       payload.filenames = data.filenames;
+    }
+    if (data.sizes && Object.keys(data.sizes).length > 0) {
+      payload.sizes = data.sizes;
     }
   }
   // In embedded mode, send data directly; in extension, wrap in "data" field
@@ -2146,14 +2150,22 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
           else b.videoUrls.push(bcb.dataset.fileUrl);
         }
       });
-    } else if ((video.probedFilename || "").toLowerCase().endsWith(".funscript")) {
-      // Probe revealed this "video" link is actually a funscript (common when
-      // the script is hosted on pixeldrain/mega rather than as a .funscript
-      // upload). Route it to scripts so it pairs with the real video instead
-      // of landing in a separate group as an orphaned "video".
-      b.scriptUrls.push(video.url);
     } else {
-      b.videoUrls.push(video.url);
+      // Probe may have revealed the real filename for a file-locker link
+      // (pixeldrain /u/, mega /file/, gofile) whose URL is a random id. Carry
+      // it in the filenames map keyed by the SAME URL we push so the backend
+      // names the item — and so its off-slot prober (which only fires on items
+      // with total_bytes==0) still runs even when we seed a probed size.
+      if (video.probedFilename) b.filenames[video.url] = video.probedFilename;
+      if ((video.probedFilename || "").toLowerCase().endsWith(".funscript")) {
+        // Probe revealed this "video" link is actually a funscript (common when
+        // the script is hosted on pixeldrain/mega rather than as a .funscript
+        // upload). Route it to scripts so it pairs with the real video instead
+        // of landing in a separate group as an orphaned "video".
+        b.scriptUrls.push(video.url);
+      } else {
+        b.videoUrls.push(video.url);
+      }
     }
   });
 
@@ -2186,12 +2198,18 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
     const resolvedFilenames = {};
     resolvedV.forEach((u, i) => { if (b.filenames[b.videoUrls[i]]) resolvedFilenames[u] = b.filenames[b.videoUrls[i]]; });
     resolvedS.forEach((u, i) => { if (b.filenames[b.scriptUrls[i]]) resolvedFilenames[u] = b.filenames[b.scriptUrls[i]]; });
+    // Probed byte sizes keyed by resolved URL — the backend seeds each
+    // item's total_bytes from these so Size shows immediately in the queue.
+    const resolvedSizes = {};
+    resolvedV.forEach((u, i) => { const sz = _probedSizeFor(b.videoUrls[i], u); if (sz > 0) resolvedSizes[u] = sz; });
+    resolvedS.forEach((u, i) => { const sz = _probedSizeFor(b.scriptUrls[i], u); if (sz > 0) resolvedSizes[u] = sz; });
     groups.push({
       name: gname,
       videoUrls: resolvedV,
       scriptUrls: resolvedS,
       scriptAuthors: resolvedAuthors,
       filenames: resolvedFilenames,
+      sizes: resolvedSizes,
       inheritMultiAxis: (parsed.groupState && parsed.groupState.inheritAxes[gname] !== false),
       displayName: (parsed.groupState && parsed.groupState.altNames && parsed.groupState.altNames[gname]) || "",
     });
@@ -2255,12 +2273,19 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
             else videoUrls.push(bcb.dataset.fileUrl);
           }
         });
-      } else if ((v.probedFilename || "").toLowerCase().endsWith(".funscript")) {
-        // Probe revealed this "video" link is actually a funscript — route it
-        // to scripts so it pairs instead of becoming an orphaned video.
-        scriptUrls.push(v.url);
       } else {
-        videoUrls.push(v.url);
+        // Probe may have revealed the real filename for a file-locker link
+        // (pixeldrain /u/, mega /file/, gofile) whose URL is a random id —
+        // record it keyed by the SAME URL we push so the backend names the
+        // item and its off-slot prober still fires despite the seeded size.
+        if (v.probedFilename) filenameMap[v.url] = v.probedFilename;
+        if ((v.probedFilename || "").toLowerCase().endsWith(".funscript")) {
+          // Probe revealed this "video" link is actually a funscript — route it
+          // to scripts so it pairs instead of becoming an orphaned video.
+          scriptUrls.push(v.url);
+        } else {
+          videoUrls.push(v.url);
+        }
       }
     });
 
