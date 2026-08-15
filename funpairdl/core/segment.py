@@ -39,6 +39,7 @@ class SegmentDownloader:
         headers: dict[str, str] | None = None,
         on_progress: Callable[[int, int], None] | None = None,
         use_range: bool = True,
+        known_total: int = 0,
     ):
         self.url = url
         self.range_start = range_start
@@ -48,6 +49,10 @@ class SegmentDownloader:
         self.headers = headers or {}
         self.on_progress = on_progress
         self.use_range = use_range
+        # Real total file size, when the caller knows it. For no-range
+        # downloads this is the ONLY trustworthy completeness reference —
+        # range_start/range_end are placeholder zeros there.
+        self.known_total = known_total
 
         self.downloaded: int = 0
         self._cancelled = False
@@ -57,6 +62,12 @@ class SegmentDownloader:
 
     @property
     def is_complete(self) -> bool:
+        if not self.use_range:
+            # No-range plans carry placeholder range_end=0, so the range
+            # arithmetic below would yield a bogus 1-byte expectation and
+            # stamp any leftover partial as complete (audit [14]). Only a
+            # caller-supplied real total can prove completion.
+            return self.known_total > 0 and self.downloaded >= self.known_total
         expected = self.range_end - self.range_start + 1
         return self.downloaded >= expected
 
@@ -73,12 +84,47 @@ class SegmentDownloader:
     async def download(self, session: aiohttp.ClientSession) -> None:
         # Check for existing partial download
         if self.temp_file.exists():
-            self.downloaded = self.temp_file.stat().st_size
-            if self.is_complete:
-                logger.debug("Segment %d already complete", self.index)
-                return
+            size = self.temp_file.stat().st_size
+            if self.use_range:
+                # Resumable: continue from where the file left off.
+                self.downloaded = size
+                if self.is_complete:
+                    logger.debug("Segment %d already complete", self.index)
+                    return
+            else:
+                # No-range downloads can't resume — the server always sends
+                # the file from byte 0, so any leftover partial (failed
+                # attempt, pause, stale .part0 from a previous run) is
+                # unresumable. Only a known real total may prove the file
+                # complete; otherwise delete it and restart (audit [14]).
+                if self.known_total > 0 and size >= self.known_total:
+                    self.downloaded = size
+                    logger.debug(
+                        "Segment %d already complete (matches known total)",
+                        self.index,
+                    )
+                    return
+                logger.debug(
+                    "Segment %d: discarding unresumable partial %s (%d bytes)",
+                    self.index, self.temp_file.name, size,
+                )
+                try:
+                    self.temp_file.unlink()
+                except OSError:
+                    pass
+                self.downloaded = 0
 
         async def _attempt(verify_tls: bool) -> None:
+            if not self.use_range and self.downloaded > 0:
+                # A failed earlier attempt (e.g. the verified-TLS try, or a
+                # previous retry round) left partial state. No-range requests
+                # restart from byte 0, so drop the partial instead of
+                # appending a second copy of the file to it.
+                try:
+                    self.temp_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                self.downloaded = 0
             actual_start = self.range_start + self.downloaded
             req_headers = {**self.headers}
             if self.use_range:
