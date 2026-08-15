@@ -29,7 +29,32 @@ os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", " ".join([
 
 # Enable CDP (Chrome DevTools Protocol) for cookie extraction.
 # PySide6's cookieAdded signal is broken — CDP is the reliable alternative.
-os.environ.setdefault("QTWEBENGINE_REMOTE_DEBUGGING", "9223")
+#
+# The port is PROBED, not hardcoded: Windows (Hyper-V/WinNAT) reserves a
+# different block of "excluded" ports on every boot, and when 9223 lands in
+# one, Chromium's devtools bind fails with WSAEACCES (0x271D) and the whole
+# CDP cookie pipeline silently dies (exactly what happened 2026-08-06 —
+# 9181-9280 got reserved). Bind-test candidates and use the first that works;
+# an explicit QTWEBENGINE_REMOTE_DEBUGGING in the environment still wins.
+def _pick_cdp_port() -> int:
+    import socket
+    for port in (9223, 9723, 9923, 10223, 10723, 11223):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                s.bind(("127.0.0.1", port))
+            finally:
+                s.close()
+            return port
+        except OSError:
+            continue
+    return 0
+
+
+if "QTWEBENGINE_REMOTE_DEBUGGING" not in os.environ:
+    _cdp_port = _pick_cdp_port()
+    if _cdp_port:
+        os.environ["QTWEBENGINE_REMOTE_DEBUGGING"] = str(_cdp_port)
 
 from PySide6.QtWidgets import QApplication
 
