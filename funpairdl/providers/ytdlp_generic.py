@@ -47,9 +47,19 @@ class YtdlpGenericProvider(BaseProvider):
     def name(self) -> str:
         return "ytdlp"
 
+    # Hosts that sign CDN URLs against the extraction client's fingerprint
+    # (VK stamps srcAg=... into the signed query). The aiohttp downloader
+    # cannot replay curl_cffi's impersonated fingerprint, so an impersonated
+    # extraction yields URLs that answer 400 to every segment request —
+    # extract with plain headers instead.
+    IMPERSONATION_UNSAFE = ("vk.com", "vkvideo.ru", "vk.ru")
+
     async def resolve(self, url: str, **kwargs) -> ResolvedFile:
         url = _normalize_url(url)
         preferred_resolution = kwargs.get("preferred_resolution", "best")
+        source_host = (urlparse(url).hostname or "").lower()
+        allow_impersonation = not any(
+            d in source_host for d in self.IMPERSONATION_UNSAFE)
 
         def _extract():
             import yt_dlp
@@ -60,15 +70,16 @@ class YtdlpGenericProvider(BaseProvider):
             }
 
             # Strategy 1: impersonation (best for Cloudflare-protected sites)
-            try:
-                from yt_dlp.networking.impersonate import ImpersonateTarget
-                opts = {**base_opts, "impersonate": ImpersonateTarget(client="chrome")}
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    return ydl.extract_info(url, download=False)
-            except ImportError:
-                pass  # curl_cffi not installed
-            except Exception as e1:
-                logger.debug("yt-dlp impersonation failed for %s: %s", url[:60], e1)
+            if allow_impersonation:
+                try:
+                    from yt_dlp.networking.impersonate import ImpersonateTarget
+                    opts = {**base_opts, "impersonate": ImpersonateTarget(client="chrome")}
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        return ydl.extract_info(url, download=False)
+                except ImportError:
+                    pass  # curl_cffi not installed
+                except Exception as e1:
+                    logger.debug("yt-dlp impersonation failed for %s: %s", url[:60], e1)
 
             # Strategy 2: clean extraction (no impersonation, no cookies)
             with yt_dlp.YoutubeDL(base_opts) as ydl:
@@ -112,12 +123,15 @@ class YtdlpGenericProvider(BaseProvider):
 
         # Sites that require yt-dlp for download (not just extraction):
         # Bilibili uses DASH with authenticated CDN URLs that reject direct HTTP.
-        source_host = (urlparse(url).hostname or "").lower()
         YTDLP_DOWNLOAD_REQUIRED = ["bilibili.com", "b23.tv"]
         if any(d in source_host for d in YTDLP_DOWNLOAD_REQUIRED):
             is_hls = True  # Forces yt-dlp download path (handles DASH merge + auth)
 
-        http_headers = info.get("http_headers", {})
+        # Per-format headers, not just top-level: when the URL comes from a
+        # picked formats[] entry, its http_headers live on that entry (VK's
+        # CDN answers 400 without the User-Agent yt-dlp negotiated).
+        http_headers = ((selected_format or {}).get("http_headers")
+                        or info.get("http_headers", {}))
 
         logger.info(
             "yt-dlp resolved: %s -> %sp (%d bytes, hls=%s)",
