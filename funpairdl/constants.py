@@ -8,7 +8,28 @@ DEFAULT_DOWNLOAD_DIR = Path("G:/Download/nakk7472")
 CONFIG_DIR = Path(__file__).resolve().parent.parent
 CONFIG_FILE = CONFIG_DIR / "config.json"
 QUEUE_FILE = CONFIG_DIR / "queue.json"
+QUEUE_ARCHIVE_FILE = CONFIG_DIR / "queue_archive.jsonl"
 LOG_FILE = CONFIG_DIR / "funpairdl.log"
+
+# Queue retention: completed pairs beyond this count are moved out of the
+# live queue into QUEUE_ARCHIVE_FILE (JSONL, append-only). Keeping the live
+# queue small is what keeps every save/rebuild/status pass cheap.
+COMPLETED_KEEP_LIVE = 100
+
+# Queue persistence: saves are debounced onto a background writer thread.
+# The debounce is trailing-edge but capped: a sustained burst of changes
+# (e.g. many small script pairs completing back-to-back) can postpone the
+# write by at most SAVE_MAX_LATENCY_SECONDS from the first pending change.
+SAVE_DEBOUNCE_SECONDS = 2.0
+SAVE_MAX_LATENCY_SECONDS = 15.0
+
+# Outer per-item resolve timeout. Must stay ABOVE the providers' own
+# budgets (yt-dlp/iwara use 120s internally) or their fallbacks dead-code.
+RESOLVE_TIMEOUT_SECONDS = 150
+
+# TTL for probe results (size/name lookups) shared by /probe and the
+# off-slot metadata prober.
+PROBE_CACHE_TTL_SECONDS = 600
 
 # Download settings
 DEFAULT_SEGMENTS = 16
