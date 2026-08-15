@@ -719,6 +719,15 @@ class BrowserWidget(QWidget):
         self._mega_phase = "done"
         self.sig_mega_login_needed.connect(self._on_mega_login_needed)
         self._setup_profile()
+        # Auto-close registrations: topic_id → {"url", "pair_ids": [...]}
+        # (populated by the batch overlay via the bridge; watched against the
+        # queue manager once MainWindow calls attach_queue_manager).
+        self._qm = None
+        self._autoclose: dict = {}
+        self._autoclose_timer = None
+        self._load_autoclose_registrations()
+        self._bridge_core._dispatcher.autocloseRequested.connect(
+            self._on_autoclose_registered)
         self._setup_ui()
         self._inject_scripts()
         # Restore previous session or open default tab
@@ -788,12 +797,19 @@ class BrowserWidget(QWidget):
         self.btn_new_tab.setFixedWidth(30)
         self.btn_new_tab.setToolTip("New Tab (Ctrl+T)")
 
+        self.btn_send_all = QPushButton("⬇All")
+        self.btn_send_all.setFixedWidth(56)
+        self.btn_send_all.setToolTip(
+            "選擇要送出的帖子分頁,一鍵批量進下載佇列(依各帖預設勾選)"
+        )
+
         nav_bar.addWidget(self.btn_back)
         nav_bar.addWidget(self.btn_forward)
         nav_bar.addWidget(self.btn_reload)
         nav_bar.addWidget(self.btn_home)
         nav_bar.addWidget(self.url_bar)
         nav_bar.addWidget(self.btn_new_tab)
+        nav_bar.addWidget(self.btn_send_all)
 
         layout.addWidget(nav_bar)
 
@@ -811,6 +827,7 @@ class BrowserWidget(QWidget):
         self.btn_reload.clicked.connect(lambda: self._current_view().reload() if self._current_view() else None)
         self.btn_home.clicked.connect(self._go_home)
         self.btn_new_tab.clicked.connect(lambda: self.create_tab(QUrl(HOME_URL)))
+        self.btn_send_all.clicked.connect(self._send_all_tabs)
         self.url_bar.returnPressed.connect(self._navigate)
 
         # Tab signals
@@ -1188,6 +1205,243 @@ class BrowserWidget(QWidget):
     def _current_view(self) -> QWebEngineView | None:
         w = self._tabs.currentWidget()
         return w if isinstance(w, QWebEngineView) else None
+
+    # ─── Batch send (in-page overlay) ───
+    #
+    # ⬇All gathers every open tab's topic URL and opens a full-page overlay
+    # in the current EroScripts tab (content.js funpairdlBatchOpen). The
+    # overlay shows one card per topic embedding the REAL panel body —
+    # probing with file sizes, bundle expansion, group dropdowns,
+    # drag-to-group — built from each topic's JSON. Target tabs are never
+    # loaded (0×0-viewport rendering and forum 429s killed the
+    # drive-each-tab approach). Sending happens inside the overlay; the Qt
+    # side only launches it.
+
+    def _batch_host_view(self):
+        """A loaded EroScripts page to open the batch overlay in."""
+        views = []
+        cur = self._current_view()
+        if cur is not None:
+            views.append(cur)
+        for i in range(self._tabs.count()):
+            v = self._tabs.widget(i)
+            if isinstance(v, QWebEngineView) and v is not cur:
+                views.append(v)
+        for v in views:
+            if v in self._pending_tab_loads:
+                continue  # never loaded — no content.js inside
+            try:
+                url = v.url().toString()
+            except RuntimeError:
+                continue
+            if "eroscripts.com" in url:
+                return v
+        return None
+
+    def _send_all_tabs(self):
+        # Under pythonw a slot exception vanishes (stderr is None) and the
+        # click just "does nothing" — log it instead.
+        try:
+            self._send_all_tabs_inner()
+        except Exception:
+            logger.exception("Batch send: failed to open overlay")
+
+    def _send_all_tabs_inner(self):
+        host = self._batch_host_view()
+        if host is None:
+            try:
+                self.window().statusBar().showMessage(
+                    "批量送出需要至少一個已載入的 EroScripts 分頁", 8000)
+            except Exception:
+                pass
+            return
+        urls = []
+        seen = set()
+        for i in range(self._tabs.count()):
+            v = self._tabs.widget(i)
+            if not isinstance(v, QWebEngineView):
+                continue
+            pending = self._pending_tab_loads.get(v)
+            if pending:
+                url = pending[0]
+            else:
+                try:
+                    url = v.url().toString()
+                except RuntimeError:
+                    continue
+            if _is_topic_url(url) and url not in seen:
+                seen.add(url)
+                urls.append(url)
+        if not urls:
+            try:
+                self.window().statusBar().showMessage("沒有帖子分頁可送出", 8000)
+            except Exception:
+                pass
+            return
+        # Show the overlay where the user is looking: switch to the host tab.
+        idx = self._tabs.indexOf(host)
+        if idx >= 0:
+            self._tabs.setCurrentIndex(idx)
+        self._batch_open_attempts = 0
+        self._batch_open_overlay(host, urls)
+        logger.info("Batch overlay: launching with %d topics", len(urls))
+
+    def _batch_open_overlay(self, host, urls):
+        try:
+            page = host.page()
+        except RuntimeError:
+            page = None
+        if page is None:
+            return
+        js = (f"window.funpairdlBatchOpen ? "
+              f"window.funpairdlBatchOpen({json.dumps(urls)}) : null")
+
+        def _cb(res, h=host, u=urls):
+            if res == "opened":
+                return
+            # content.js not ready yet (page still booting) — retry briefly.
+            self._batch_open_attempts += 1
+            if self._batch_open_attempts <= 5:
+                QTimer.singleShot(1000, lambda: self._batch_open_overlay(h, u))
+            else:
+                logger.warning("Batch overlay: host page never became ready (%s)", res)
+                try:
+                    self.window().statusBar().showMessage(
+                        "批量介面無法開啟 — 請重新整理目前分頁後再試", 8000)
+                except Exception:
+                    pass
+
+        try:
+            page.runJavaScript(js, _cb)
+        except RuntimeError:
+            pass
+
+    # ─── Auto-close downloaded topic tabs ───
+    #
+    # The batch overlay's per-card「完成後關分頁」toggle registers the pairs a
+    # send created (bridge message "register-autoclose"). Once EVERY
+    # registered pair for a topic reaches COMPLETED — or was deleted /
+    # cleared, which counts as settled — the topic's tab(s) are closed,
+    # except a tab the user is currently looking at. Registrations persist
+    # in Settings so a restart mid-download doesn't lose them.
+
+    def _load_autoclose_registrations(self):
+        try:
+            from funpairdl.persistence.settings import Settings
+            saved = Settings.load().batch_autoclose or {}
+            self._autoclose = {
+                str(tid): {
+                    "url": str(e.get("url", "")),
+                    "pair_ids": [str(p) for p in (e.get("pair_ids") or [])],
+                }
+                for tid, e in saved.items()
+                if isinstance(e, dict) and e.get("pair_ids")
+            }
+            if self._autoclose:
+                logger.info(
+                    "Auto-close: restored %d registration(s)", len(self._autoclose))
+        except Exception:
+            logger.exception("Auto-close: failed to load registrations")
+
+    def _persist_autoclose(self):
+        snapshot = {tid: dict(e) for tid, e in self._autoclose.items()}
+
+        def _apply(s, snap=snapshot):
+            s.batch_autoclose = snap
+
+        try:
+            from funpairdl.persistence.settings import Settings
+            with _settings_lock:
+                Settings.update(_apply)
+        except Exception:
+            logger.exception("Auto-close: failed to persist registrations")
+
+    def attach_queue_manager(self, qm):
+        """Called by MainWindow so tab auto-close can watch pair completion."""
+        self._qm = qm
+        timer = QTimer(self)
+        timer.setInterval(30_000)
+        timer.timeout.connect(self._autoclose_sweep)
+        timer.start()
+        self._autoclose_timer = timer
+        # Startup sweep, deferred past session restore: pairs may have
+        # finished while the app was closed.
+        QTimer.singleShot(20_000, self._autoclose_sweep)
+
+    @Slot(str, str)
+    def _on_autoclose_registered(self, url: str, ids_json: str):
+        """Queued from the worker loop via the dispatcher (GUI thread)."""
+        try:
+            ids = [str(p) for p in json.loads(ids_json or "[]")]
+        except (TypeError, ValueError):
+            ids = []
+        tid = _topic_id_from_url(url)
+        if not tid or not ids:
+            return
+        entry = self._autoclose.get(tid)
+        if entry:
+            # Re-send of the same topic — track the union of its pairs.
+            entry["url"] = url
+            entry["pair_ids"] = sorted(set(entry["pair_ids"]) | set(ids))
+        else:
+            self._autoclose[tid] = {"url": url, "pair_ids": ids}
+        self._persist_autoclose()
+        logger.info("Auto-close: registered topic %s with %d pair(s)", tid, len(ids))
+
+    def on_pair_update_for_autoclose(self, pair_id: str):
+        """Connected to MainWindow.sig_pair_updated (GUI thread)."""
+        if not self._autoclose or self._qm is None:
+            return
+        for tid, entry in list(self._autoclose.items()):
+            if pair_id in entry["pair_ids"]:
+                self._autoclose_evaluate(tid)
+
+    def _autoclose_sweep(self):
+        for tid in list(self._autoclose.keys()):
+            self._autoclose_evaluate(tid)
+
+    def _autoclose_evaluate(self, tid: str):
+        if self._qm is None:
+            return
+        entry = self._autoclose.get(tid)
+        if not entry:
+            return
+        from funpairdl.core.pair import PairState
+        by_id = {p.id: p for p in self._qm.pairs}
+        for pid in entry["pair_ids"]:
+            pair = by_id.get(pid)
+            if pair is None:
+                continue  # deleted or cleared — counts as settled
+            if pair.state != PairState.COMPLETED:
+                return  # still downloading (or failed) → keep the tab
+        del self._autoclose[tid]
+        self._persist_autoclose()
+        closed = self._close_topic_tabs(tid)
+        logger.info(
+            "Auto-close: topic %s fully downloaded — closed %d tab(s)", tid, closed)
+
+    def _close_topic_tabs(self, tid: str) -> int:
+        closed = 0
+        current = self._current_view()
+        for i in range(self._tabs.count() - 1, -1, -1):
+            v = self._tabs.widget(i)
+            if not isinstance(v, QWebEngineView):
+                continue
+            pending = self._pending_tab_loads.get(v)
+            if pending:
+                url = pending[0]
+            else:
+                try:
+                    url = v.url().toString()
+                except RuntimeError:
+                    continue
+            if _topic_id_from_url(url) != tid:
+                continue
+            if v is current:
+                continue  # never yank the page the user is looking at
+            self._close_tab(i)
+            closed += 1
+        return closed
 
     # ─── Navigation ───
 

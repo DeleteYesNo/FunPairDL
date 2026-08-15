@@ -77,6 +77,12 @@ class MainWindow(QMainWindow):
         self.qm.on_item_updated = self._on_item_updated
         self.qm.on_queue_changed = self._on_queue_changed
 
+        # Batch-overlay tab auto-close: the browser watches pair completion
+        # to close topic tabs whose downloads have all finished.
+        if self.browser is not None:
+            self.browser.attach_queue_manager(self.qm)
+            self.sig_pair_updated.connect(self.browser.on_pair_update_for_autoclose)
+
         # Populate tree with any pairs already loaded from queue store
         if self.qm.pairs:
             self._refresh_all()

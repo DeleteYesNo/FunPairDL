@@ -2089,6 +2089,9 @@ function updateSendButton(panel, parsed) {
 
 // ─── Send logic ───
 
+// Returns {sent, failed, error?} — pairs enqueued / pairs that errored — so
+// the headless auto-send path can report an outcome. The interactive click
+// handler ignores the return value; all UI feedback still happens on sendBtn.
 async function handleSend(panel, parsed) {
   const sendBtn = panel.querySelector("#funpairdl-send");
   sendBtn.disabled = true;
@@ -2104,7 +2107,7 @@ async function handleSend(panel, parsed) {
       sendBtn.disabled = false;
       if (parsed.mode === "collection") updateSendButton(panel, parsed);
     }, 3000);
-    return;
+    return { sent: 0, failed: 0, error: "server_offline" };
   }
 
   const resSelect = document.getElementById("funpairdl-resolution");
@@ -2113,10 +2116,9 @@ async function handleSend(panel, parsed) {
   const autoRename = autoRenameCb ? autoRenameCb.checked : true;
 
   if (parsed.mode === "collection") {
-    await handleCollectionSend(panel, parsed, sendBtn, preferredResolution, autoRename);
-  } else {
-    await handleSingleSend(panel, parsed, sendBtn, preferredResolution, autoRename);
+    return await handleCollectionSend(panel, parsed, sendBtn, preferredResolution, autoRename);
   }
+  return await handleSingleSend(panel, parsed, sendBtn, preferredResolution, autoRename);
 }
 
 async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, autoRename) {
@@ -2218,7 +2220,7 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
   if (groups.length === 0) {
     sendBtn.textContent = "Nothing selected!";
     setTimeout(() => { sendBtn.disabled = false; sendBtn.textContent = "Send to FunPairDL"; }, 2000);
-    return;
+    return { sent: 0, failed: 0, error: "nothing_selected" };
   }
 
   sendBtn.textContent = "Sending...";
@@ -2234,15 +2236,16 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
       panel.classList.remove("funpairdl-panel-open");
       setTimeout(() => { if (panel.parentNode) panel.remove(); }, 300);
     }, 1500);
-  } else {
-    sendBtn.textContent = `Error: ${result.error}`;
-    sendBtn.classList.add("funpairdl-error");
-    setTimeout(() => {
-      sendBtn.textContent = "Send to FunPairDL";
-      sendBtn.classList.remove("funpairdl-error");
-      sendBtn.disabled = false;
-    }, 3000);
+    return { sent: 1, failed: 0, pairIds: result.pair_id ? [result.pair_id] : [] };
   }
+  sendBtn.textContent = `Error: ${result.error}`;
+  sendBtn.classList.add("funpairdl-error");
+  setTimeout(() => {
+    sendBtn.textContent = "Send to FunPairDL";
+    sendBtn.classList.remove("funpairdl-error");
+    sendBtn.disabled = false;
+  }, 3000);
+  return { sent: 0, failed: 1, error: result.error || "send_failed" };
 }
 
 async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution, autoRename) {
@@ -2344,13 +2347,14 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
   if (pairs.length === 0) {
     sendBtn.textContent = "Nothing selected!";
     setTimeout(() => { sendBtn.disabled = false; updateSendButton(panel, parsed); }, 2000);
-    return;
+    return { sent: 0, failed: 0, error: "nothing_selected" };
   }
 
   sendBtn.textContent = `Resolving URLs (0/${pairs.length})...`;
 
   let sentCount = 0;
   let failCount = 0;
+  const sentPairIds = [];
 
   for (let i = 0; i < pairs.length; i++) {
     const p = pairs[i];
@@ -2375,15 +2379,25 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
       resolvedS.forEach((u, j) => { if (p.filenameMap[p.scriptUrls[j]]) resolvedFilenames[u] = p.filenameMap[p.scriptUrls[j]]; });
     }
 
+    // Probed byte sizes keyed by resolved URL (backend seeds total_bytes)
+    const resolvedSizes = {};
+    resolvedV.forEach((u, j) => { const sz = _probedSizeFor(p.videoUrls[j], u); if (sz > 0) resolvedSizes[u] = sz; });
+    resolvedS.forEach((u, j) => { const sz = _probedSizeFor(p.scriptUrls[j], u); if (sz > 0) resolvedSizes[u] = sz; });
+
     sendBtn.textContent = `Sending (${i + 1}/${pairs.length})...`;
     const result = await sendPairToServer({
       title: p.name, videoUrls: resolvedV, scriptUrls: resolvedS,
       preferredResolution, scriptAuthors: resolvedAuthors, autoRename,
       filenames: resolvedFilenames,
+      sizes: resolvedSizes,
     });
 
-    if (result.success) sentCount++;
-    else failCount++;
+    if (result.success) {
+      sentCount++;
+      if (result.pair_id) sentPairIds.push(result.pair_id);
+    } else {
+      failCount++;
+    }
   }
 
   if (failCount === 0) {
@@ -2402,7 +2416,456 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
       updateSendButton(panel, parsed);
     }, 3000);
   }
+  return { sent: sentCount, failed: failCount, pairIds: sentPairIds };
 }
+
+// ─── Batch overlay (Qt "⬇All") ───
+// Full-page overlay rendered in the CURRENT EroScripts tab, one card per
+// topic; each card embeds the REAL panel body — probing with file sizes,
+// bundle expansion, group dropdowns, drag-to-group, select-all — built from
+// the topic's JSON via _parseTopicRemote, so feature parity with the sidebar
+// panel without loading any tab. Background tabs render with a 0×0 viewport
+// (Discourse virtualizes the post stream to zero posts) and mass tab loads
+// trip the forum's 429 rate limit — that's why nothing here ever drives the
+// target tabs themselves.
+
+function _topicIdFromUrl(url) {
+  const m = String(url || "").match(/\/t\/[^/]+\/(\d+)/);
+  return m ? m[1] : null;
+}
+
+// Rebuild the minimal post-stream structure the parser reads (.topic-post /
+// .cooked / .names .username a / data-post-number) from a topic's JSON.
+// Detached — never appended to the live page.
+function _buildTopicRootFromJson(data) {
+  const root = document.createElement("div");
+  for (const p of ((data.post_stream && data.post_stream.posts) || [])) {
+    const post = document.createElement("article");
+    post.className = "topic-post";
+    post.dataset.postNumber = String(p.post_number || "");
+    const names = document.createElement("div");
+    names.className = "names";
+    const uname = document.createElement("span");
+    uname.className = "username";
+    const a = document.createElement("a");
+    a.textContent = p.username || "";
+    uname.appendChild(a);
+    names.appendChild(uname);
+    post.appendChild(names);
+    const cooked = document.createElement("div");
+    cooked.className = "cooked";
+    cooked.innerHTML = p.cooked || "";
+    post.appendChild(cooked);
+    root.appendChild(post);
+  }
+  return root;
+}
+
+// Fetch a topic's JSON and run the standard parser over a detached rebuild
+// of its posts. Returns { parsed } or { error }.
+async function _parseTopicRemote(url) {
+  if (!_funpairdlHostAllowed()) return { error: "not_eroscripts" };
+  const tid = _topicIdFromUrl(url);
+  if (!tid) return { error: "not_topic" };
+  let data = null;
+  try {
+    const resp = await fetch(`/t/${tid}.json`, { credentials: "include" });
+    if (resp.ok) data = await resp.json();
+    else if (resp.status === 403 || resp.status === 404) return { error: "no_access" };
+  } catch (e) { data = null; }
+  if (!data || !data.post_stream) return { error: "fetch_failed" };
+  const root = _buildTopicRootFromJson(data);
+  const map = _mapFromPosts(data.post_stream.posts, {});
+  const parsed = parseAllPosts(root, (data.title || "").trim(), map);
+  if (!parsed) return { error: "no_links" };
+  const { totalV, totalS } = _parsedTotals(parsed);
+  if (totalV === 0 && totalS === 0) return { error: "no_links" };
+  return { parsed };
+}
+
+const _BATCH_OVERLAY_CSS = `
+#funpairdl-batch-overlay {
+  position: fixed; inset: 0; z-index: 999999;
+  background: rgba(0, 0, 0, 0.55);
+  overflow-y: auto; padding: 24px 0;
+}
+.funpairdl-batch-box {
+  max-width: 880px; margin: 0 auto; background: #1a1a2e; color: #e0e0e0;
+  border-radius: 10px; border: 1px solid #333;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6);
+  font-family: -apple-system, "Segoe UI", sans-serif;
+}
+.funpairdl-batch-header {
+  position: sticky; top: 0; z-index: 5;
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 12px 16px; background: #16213e; border-bottom: 1px solid #333;
+  border-radius: 10px 10px 0 0;
+}
+.funpairdl-batch-title { font-weight: 700; font-size: 15px; margin-right: auto; }
+.funpairdl-batch-send-all { width: auto !important; padding: 8px 14px !important; }
+.funpairdl-batch-cards { padding: 10px 14px 18px; }
+.funpairdl-batch-card {
+  border: 1px solid #333; border-radius: 8px; margin-top: 10px; background: #101728;
+}
+.funpairdl-batch-card-header {
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+  font-weight: 600; font-size: 14px;
+}
+.funpairdl-batch-card-cb { width: 16px; height: 16px; accent-color: #4a90d9; flex-shrink: 0; }
+.funpairdl-batch-card-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.funpairdl-batch-card-status { color: #9aa5b1; font-size: 12px; font-weight: 400; flex-shrink: 0; }
+.funpairdl-batch-card-sent { opacity: 0.65; }
+.funpairdl-batch-card-dead { opacity: 0.5; }
+.funpairdl-batch-card-body { padding: 0 10px 10px; }
+.funpairdl-batch-panel .funpairdl-panel-body {
+  max-height: none; overflow: visible; padding: 0;
+}
+.funpairdl-batch-card-actions { padding: 8px 2px 2px; }
+.funpairdl-batch-card-actions .funpairdl-send-btn {
+  width: auto; padding: 7px 12px; font-size: 13px;
+}
+.funpairdl-batch-close-after {
+  display: flex; align-items: center; gap: 4px; flex-shrink: 0;
+  font-size: 12px; font-weight: 400; color: #9aa5b1; cursor: pointer;
+}
+.funpairdl-batch-close-after input { accent-color: #4a90d9; width: 14px; height: 14px; }
+`;
+
+// ─── Per-topic selection persistence (localStorage, survives restarts) ───
+// Saves each card's checkbox states (items, bundle files, sections), the
+// include toggle, and the close-after-download toggle, keyed by topic id.
+// Restored when the overlay is reopened so half-finished curation isn't lost.
+
+const _BATCH_SEL_PREFIX = "fpdl_batch_sel_";
+const _BATCH_SEL_TTL_MS = 30 * 24 * 3600 * 1000;
+
+function _batchSelKey(url) {
+  const tid = _topicIdFromUrl(url);
+  return tid ? _BATCH_SEL_PREFIX + tid : null;
+}
+
+function _batchSaveCardState(card) {
+  const key = _batchSelKey(card._url);
+  if (!key) return;
+  try {
+    const includeCb = card.querySelector(".funpairdl-batch-card-cb");
+    const closeCb = card.querySelector(".funpairdl-batch-close-cb");
+    const state = {
+      ts: Date.now(),
+      include: includeCb ? !!includeCb.checked : true,
+      closeAfter: closeCb ? !!closeCb.checked : true,
+      items: {},
+      bundles: {},
+    };
+    if (card._panel) {
+      card._panel.querySelectorAll('.funpairdl-item input[type="checkbox"][name]').forEach((cb) => {
+        if (/^(video|script|sv-\d+|ss-\d+|cv|cs)$/.test(cb.name)) {
+          state.items[`${cb.name}-${cb.value}`] = cb.checked;
+        }
+      });
+      card._panel.querySelectorAll(".funpairdl-section-cb").forEach((cb) => {
+        state.items[`sec-${cb.dataset.section}`] = cb.checked;
+      });
+      card._panel.querySelectorAll(".funpairdl-bundle-cb").forEach((cb) => {
+        if (cb.dataset.fileUrl) state.bundles[cb.dataset.fileUrl] = cb.checked;
+      });
+    }
+    localStorage.setItem(key, JSON.stringify(state));
+  } catch (e) {}
+}
+
+function _batchLoadCardState(url) {
+  const key = _batchSelKey(url);
+  if (!key) return null;
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const st = JSON.parse(raw);
+    if (!st || Date.now() - (st.ts || 0) > _BATCH_SEL_TTL_MS) {
+      localStorage.removeItem(key);
+      return null;
+    }
+    return st;
+  } catch (e) { return null; }
+}
+
+// Idempotent: applies whatever checkboxes exist right now. Called again on a
+// short interval because bundle dropdowns appear asynchronously after probes
+// — stops as soon as the user touches the card (card._dirty).
+function _batchApplyCardState(card, st) {
+  if (!card._panel || !st) return;
+  const items = st.items || {};
+  const bundles = st.bundles || {};
+  card._panel.querySelectorAll('.funpairdl-item input[type="checkbox"][name]').forEach((cb) => {
+    const k = `${cb.name}-${cb.value}`;
+    if (k in items) cb.checked = items[k];
+  });
+  card._panel.querySelectorAll(".funpairdl-section-cb").forEach((cb) => {
+    const k = `sec-${cb.dataset.section}`;
+    if (k in items) cb.checked = items[k];
+  });
+  card._panel.querySelectorAll(".funpairdl-bundle-cb").forEach((cb) => {
+    const u = cb.dataset.fileUrl;
+    if (u && u in bundles) cb.checked = bundles[u];
+  });
+}
+
+function _batchPruneSavedStates() {
+  try {
+    const dead = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith(_BATCH_SEL_PREFIX)) continue;
+      try {
+        const st = JSON.parse(localStorage.getItem(k) || "null");
+        if (!st || Date.now() - (st.ts || 0) > _BATCH_SEL_TTL_MS) dead.push(k);
+      } catch (e) { dead.push(k); }
+    }
+    dead.forEach((k) => localStorage.removeItem(k));
+  } catch (e) {}
+}
+
+function _batchInjectStyles() {
+  if (document.getElementById("funpairdl-batch-style")) return;
+  const style = document.createElement("style");
+  style.id = "funpairdl-batch-style";
+  style.textContent = _BATCH_OVERLAY_CSS;
+  document.head.appendChild(style);
+}
+
+// Card panel: the sidebar panel's BODY (same builders, same classes → same
+// content.css styling) without the fixed-position #funpairdl-panel shell.
+// The per-card #funpairdl-send button lets handleSend() run unchanged and
+// doubles as the card's live progress display.
+function _batchBuildCardPanel(parsed) {
+  const panel = document.createElement("div");
+  panel.className = "funpairdl-batch-panel";
+  panel.dataset.mode = parsed.mode;
+  const bodyHtml = parsed.mode === "collection"
+    ? buildCollectionPanelHTML(parsed)
+    : buildSinglePanelHTML(parsed);
+  panel.innerHTML = `
+    <div class="funpairdl-panel-body">${bodyHtml}</div>
+    <div class="funpairdl-batch-card-actions">
+      <button id="funpairdl-send" class="funpairdl-send-btn" type="button">送出這一帖</button>
+    </div>`;
+  return panel;
+}
+
+const _BATCH_ERROR_TEXT = {
+  no_links: "無可下載項目",
+  fetch_failed: "讀取失敗",
+  no_access: "無權限或已刪除",
+  not_topic: "非帖子",
+  not_eroscripts: "非 EroScripts",
+};
+
+async function _batchBuildCard(card, url) {
+  const statusEl = card.querySelector(".funpairdl-batch-card-status");
+  const bodyWrap = card.querySelector(".funpairdl-batch-card-body");
+  const ready = await _parseTopicRemote(url);
+  if (ready.error) {
+    statusEl.textContent = _BATCH_ERROR_TEXT[ready.error] || ready.error;
+    card.classList.add("funpairdl-batch-card-dead");
+    const cb = card.querySelector(".funpairdl-batch-card-cb");
+    if (cb) { cb.checked = false; cb.disabled = true; }
+    bodyWrap.textContent = "";
+    return;
+  }
+  const parsed = ready.parsed;
+  card._parsed = parsed;
+  if (parsed.title) {
+    card.querySelector(".funpairdl-batch-card-title").textContent = parsed.title;
+  }
+  const panel = _batchBuildCardPanel(parsed);
+  card._panel = panel;
+  bodyWrap.textContent = "";
+  bodyWrap.appendChild(panel);
+  statusEl.textContent = "";
+  if (parsed.mode === "single") {
+    populateSingleItems(panel, parsed);
+    _setupSingleSelectAll(panel);
+    _enableDragToGroup(panel, parsed);
+  } else {
+    setupCollectionEvents(panel, parsed);
+  }
+  _enableDragSelect(panel);
+  setupProbing(panel, parsed);
+  panel.querySelector("#funpairdl-send")
+    .addEventListener("click", () => _batchSendCard(card));
+
+  // Restore the last saved selection for this topic, then keep re-applying
+  // briefly (bundle checkboxes appear asynchronously after probes) until the
+  // user touches the card. Any change after that autosaves, debounced.
+  const saved = _batchLoadCardState(url);
+  if (saved) {
+    const includeCb = card.querySelector(".funpairdl-batch-card-cb");
+    const closeCb = card.querySelector(".funpairdl-batch-close-cb");
+    if (includeCb && typeof saved.include === "boolean") includeCb.checked = saved.include;
+    if (closeCb && typeof saved.closeAfter === "boolean") closeCb.checked = saved.closeAfter;
+    _batchApplyCardState(card, saved);
+    const restoreTimer = setInterval(() => {
+      if (card._dirty || !card._panel || !card._panel.parentNode) {
+        clearInterval(restoreTimer);
+        return;
+      }
+      _batchApplyCardState(card, saved);
+    }, 1500);
+    setTimeout(() => clearInterval(restoreTimer), 20_000);
+  }
+  card.addEventListener("change", () => {
+    card._dirty = true;
+    if (card._saveTimer) clearTimeout(card._saveTimer);
+    card._saveTimer = setTimeout(() => _batchSaveCardState(card), 400);
+  });
+}
+
+async function _batchSendCard(card) {
+  // handleSend removes the panel ~1.5 s after a full success (the card body
+  // collapses, marking it done) — the header keeps the final status.
+  if (card._sending) return { sent: 0, failed: 0 };
+  if (!card._panel || !card._panel.parentNode) {
+    return card._lastResult || { sent: 0, failed: 0 };
+  }
+  card._sending = true;
+  const statusEl = card.querySelector(".funpairdl-batch-card-status");
+  try {
+    _batchSaveCardState(card);  // snapshot the final selection
+    const res = (await handleSend(card._panel, card._parsed)) || {};
+    card._lastResult = res;
+    if ((res.sent || 0) > 0 && !(res.failed || 0)) {
+      statusEl.textContent = `✓ 已送出 ${res.sent} 組`;
+      card.classList.add("funpairdl-batch-card-sent");
+      const cb = card.querySelector(".funpairdl-batch-card-cb");
+      if (cb) cb.checked = false;
+      // Auto-close: hand the created pair ids to the app; it closes this
+      // topic's tab(s) once every pair finishes downloading.
+      const closeCb = card.querySelector(".funpairdl-batch-close-cb");
+      if (closeCb && closeCb.checked && (res.pairIds || []).length > 0) {
+        _sendMsg("register-autoclose", {
+          url: card._url, pair_ids: res.pairIds,
+        });
+        statusEl.textContent += "(下載完自動關分頁)";
+      }
+    } else if (res.error === "nothing_selected") {
+      statusEl.textContent = "未勾選任何項目";
+    } else if (res.error === "server_offline") {
+      statusEl.textContent = "✗ 後端離線";
+    } else if (res.failed) {
+      statusEl.textContent = `${res.sent || 0} 組送出,${res.failed} 組失敗`;
+    } else if (res.error) {
+      statusEl.textContent = `✗ ${res.error}`;
+    }
+    return res;
+  } finally {
+    card._sending = false;
+  }
+}
+
+window.funpairdlBatchOpen = function (urls) {
+  if (!_funpairdlHostAllowed()) return "not_eroscripts";
+  _batchInjectStyles();
+  _batchPruneSavedStates();
+  const old = document.getElementById("funpairdl-batch-overlay");
+  if (old) old.remove();
+  // The sidebar panel shares control ids (#funpairdl-resolution,
+  // #funpairdl-auto-rename) — close it so the overlay's are the only ones.
+  const sidebar = document.getElementById("funpairdl-panel");
+  if (sidebar) sidebar.remove();
+
+  const overlay = document.createElement("div");
+  overlay.id = "funpairdl-batch-overlay";
+  overlay.innerHTML = `
+    <div class="funpairdl-batch-box">
+      <div class="funpairdl-batch-header">
+        <span class="funpairdl-batch-title">⬇ 批量下載(${(urls || []).length} 個帖子)</span>
+        <div class="funpairdl-resolution-row" style="margin:0">
+          <label class="funpairdl-resolution-label">Resolution</label>
+          <select id="funpairdl-resolution" class="funpairdl-resolution-select">
+            <option value="best">Best</option>
+            <option value="2160">2160p (4K)</option>
+            <option value="1080">1080p</option>
+            <option value="720">720p</option>
+            <option value="480">480p</option>
+            <option value="360">360p</option>
+          </select>
+          <label class="funpairdl-item" style="margin:0;padding:2px 6px">
+            <input type="checkbox" id="funpairdl-auto-rename" checked>
+            <span class="funpairdl-label">Auto Rename</span>
+          </label>
+        </div>
+        <button class="funpairdl-batch-send-all funpairdl-send-btn" type="button">送出勾選的帖子</button>
+        <button class="funpairdl-panel-close funpairdl-batch-close" type="button">✕</button>
+      </div>
+      <div class="funpairdl-batch-cards"></div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector(".funpairdl-batch-close")
+    .addEventListener("click", () => overlay.remove());
+
+  const cardsEl = overlay.querySelector(".funpairdl-batch-cards");
+  const cards = [];
+  for (const url of (urls || [])) {
+    const card = document.createElement("div");
+    card.className = "funpairdl-batch-card";
+    card.innerHTML = `
+      <div class="funpairdl-batch-card-header">
+        <input type="checkbox" class="funpairdl-batch-card-cb" checked>
+        <span class="funpairdl-batch-card-title">${escapeAttr(url)}</span>
+        <label class="funpairdl-batch-close-after"
+               title="這一帖送出後,等它的下載全部完成,自動關閉對應的瀏覽器分頁">
+          <input type="checkbox" class="funpairdl-batch-close-cb" checked>完成後關分頁
+        </label>
+        <span class="funpairdl-batch-card-status">解析中…</span>
+      </div>
+      <div class="funpairdl-batch-card-body"></div>`;
+    card._url = url;
+    cardsEl.appendChild(card);
+    cards.push(card);
+  }
+
+  // Build cards sequentially — one JSON fetch each, gentle on the forum.
+  (async () => {
+    for (const card of cards) {
+      if (!overlay.parentNode) return; // overlay closed — stop fetching
+      try {
+        await _batchBuildCard(card, card._url);
+      } catch (e) {
+        card.querySelector(".funpairdl-batch-card-status").textContent =
+          "解析失敗: " + ((e && e.message) || e);
+      }
+    }
+  })();
+
+  const sendAllBtn = overlay.querySelector(".funpairdl-batch-send-all");
+  sendAllBtn.addEventListener("click", async () => {
+    sendAllBtn.disabled = true;
+    let sent = 0;
+    let failed = 0;
+    let done = 0;
+    try {
+      for (const card of cards) {
+        if (!overlay.parentNode) return;
+        const cb = card.querySelector(".funpairdl-batch-card-cb");
+        if (!cb || !cb.checked || !card._panel || !card._panel.parentNode) continue;
+        done += 1;
+        sendAllBtn.textContent = `送出中… (${done})`;
+        const res = await _batchSendCard(card);
+        sent += res.sent || 0;
+        failed += res.failed || 0;
+      }
+      sendAllBtn.textContent =
+        `完成:${sent} 組已進佇列` + (failed ? `,${failed} 組失敗` : "");
+    } finally {
+      setTimeout(() => {
+        sendAllBtn.disabled = false;
+        sendAllBtn.textContent = "送出勾選的帖子";
+      }, 6000);
+    }
+  });
+
+  return "opened";
+};
 
 // ─── Selection helpers (drag-paint + select all/none) ───
 
@@ -2584,6 +3047,16 @@ function _setupSingleSelectAll(panel) {
 
 // ─── Main injection ───
 
+function _parsedTotals(parsed) {
+  const totalV = parsed.mode === "collection"
+    ? parsed.sections.reduce((n, s) => n + s.videos.length, 0) + (parsed.commentVideos?.length || 0)
+    : parsed.videos.length;
+  const totalS = parsed.mode === "collection"
+    ? parsed.sections.reduce((n, s) => n + s.scripts.length, 0) + (parsed.commentScripts?.length || 0)
+    : parsed.scripts.length;
+  return { totalV, totalS };
+}
+
 function injectButton() {
   if (document.getElementById("funpairdl-send-btn")) return;
 
@@ -2593,12 +3066,7 @@ function injectButton() {
   const parsed = parseAllPosts();
   if (!parsed) return;
 
-  const totalV = parsed.mode === "collection"
-    ? parsed.sections.reduce((n, s) => n + s.videos.length, 0) + (parsed.commentVideos?.length || 0)
-    : parsed.videos.length;
-  const totalS = parsed.mode === "collection"
-    ? parsed.sections.reduce((n, s) => n + s.scripts.length, 0) + (parsed.commentScripts?.length || 0)
-    : parsed.scripts.length;
+  const { totalV, totalS } = _parsedTotals(parsed);
 
   if (totalV === 0 && totalS === 0) return;
 
