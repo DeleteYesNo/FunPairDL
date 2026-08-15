@@ -93,53 +93,99 @@ class DownloadTask:
         url = self.item.resolved_url or self.item.url
         headers = {**self.item.headers}
 
-        try:
-            async with session.head(
-                url, headers=headers, allow_redirects=True,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                if resp.status >= 400:
-                    # 4xx (except 429) are permanent errors — don't retry
-                    if 400 <= resp.status < 500 and resp.status != 429:
-                        raise RuntimeError(
-                            f"HTTP {resp.status} (permanent): {url[:100]}"
+        supports_range = False
+        # Skip the HEAD entirely when the provider already resolved a direct
+        # URL and a real size — this HEAD would just duplicate the probing the
+        # provider did seconds ago (audit [8g]). Range support, if still
+        # needed for a large file, is confirmed by the single 1-byte ranged
+        # GET below (need_range gate).
+        need_head = not (self.item.resolved_url and self.item.total_bytes > 0)
+        if need_head:
+            try:
+                async with session.head(
+                    url, headers=headers, allow_redirects=True,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status >= 400:
+                        # 4xx (except 429) are permanent errors — don't retry
+                        if 400 <= resp.status < 500 and resp.status != 429:
+                            raise RuntimeError(
+                                f"HTTP {resp.status} (permanent): {url[:100]}"
+                            )
+                        raise aiohttp.ClientResponseError(
+                            resp.request_info, resp.history,
+                            status=resp.status,
+                            message=f"HEAD request failed: {resp.status}",
                         )
-                    raise aiohttp.ClientResponseError(
-                        resp.request_info, resp.history,
-                        status=resp.status,
-                        message=f"HEAD request failed: {resp.status}",
+
+                    self.item.resolved_url = str(resp.url)
+                    content_length = resp.headers.get("Content-Length")
+                    # Don't clobber a size the provider already resolved with a
+                    # blank/zero HEAD value — some hosts (catbox.moe) answer HEAD
+                    # with Content-Length: 0.
+                    if content_length and int(content_length) > 0:
+                        self.item.total_bytes = int(content_length)
+
+                    # Check range support
+                    accept_ranges = resp.headers.get("Accept-Ranges", "")
+                    supports_range = accept_ranges.lower() == "bytes"
+
+                    # Try to get filename from Content-Disposition
+                    cd = resp.headers.get("Content-Disposition", "")
+                    if cd:
+                        from funpairdl.utils.filename import parse_content_disposition, sanitize_filename
+                        fname = parse_content_disposition(cd)
+                        if fname:
+                            self.item.filename = sanitize_filename(fname)
+
+            except Exception as e:
+                # If HEAD fails but we have a resolved URL from provider,
+                # fall through to the ranged-GET probe below (it may still work).
+                if self.item.resolved_url:
+                    logger.warning(
+                        "HEAD failed for %s but have resolved URL, proceeding: %s",
+                        url, e,
                     )
+                else:
+                    logger.error("Failed to resolve URL %s: %s", url, e)
+                    raise
 
-                self.item.resolved_url = str(resp.url)
-                content_length = resp.headers.get("Content-Length")
-                if content_length:
-                    self.item.total_bytes = int(content_length)
+        # When HEAD couldn't confirm size or range support, probe with a 1-byte
+        # ranged GET. A 206 + Content-Range gives the true size and proves range
+        # support even when the server omits Accept-Ranges (e.g. catbox.moe).
+        # Only probe when it can actually change the outcome: either the size is
+        # unknown, or the file is big enough to be multi-segmented but range
+        # support is still unconfirmed. Small files download single-segment
+        # regardless, so don't spend an extra request (and, for eroscripts
+        # short-urls, an extra cookie-rotating round-trip) discovering range
+        # support we'd never use.
+        need_size = self.item.total_bytes <= 0
+        need_range = not supports_range and self.item.total_bytes >= SMALL_FILE_THRESHOLD
+        if need_size or need_range:
+            probe_url = self.item.resolved_url or url
+            try:
+                async with session.get(
+                    probe_url, headers={**headers, "Range": "bytes=0-0"},
+                    allow_redirects=True,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status in (200, 206):
+                        self.item.resolved_url = str(resp.url)
+                        content_range = resp.headers.get("Content-Range", "")
+                        if resp.status == 206 and "/" in content_range:
+                            supports_range = True
+                            try:
+                                self.item.total_bytes = int(content_range.rsplit("/", 1)[-1])
+                            except ValueError:
+                                pass
+                        elif self.item.total_bytes <= 0:
+                            cl = resp.headers.get("Content-Length")
+                            if cl and int(cl) > 0:
+                                self.item.total_bytes = int(cl)
+            except Exception as e:
+                logger.debug("Ranged GET probe failed for %s: %s", probe_url[:80], e)
 
-                # Check range support
-                accept_ranges = resp.headers.get("Accept-Ranges", "")
-                supports_range = accept_ranges.lower() == "bytes"
-
-                # Try to get filename from Content-Disposition
-                cd = resp.headers.get("Content-Disposition", "")
-                if cd:
-                    from funpairdl.utils.filename import parse_content_disposition, sanitize_filename
-                    fname = parse_content_disposition(cd)
-                    if fname:
-                        self.item.filename = sanitize_filename(fname)
-
-                return supports_range
-
-        except Exception as e:
-            # If HEAD fails but we have a resolved URL from provider,
-            # proceed with single-segment download (size may be unknown)
-            if self.item.resolved_url:
-                logger.warning(
-                    "HEAD failed for %s but have resolved URL, proceeding: %s",
-                    url, e,
-                )
-                return False  # no range support assumed
-            logger.error("Failed to resolve URL %s: %s", url, e)
-            raise
+        return supports_range
 
     def _plan_segments(self, supports_range: bool) -> list[SegmentDownloader]:
         total = self.item.total_bytes
@@ -164,6 +210,10 @@ class DownloadTask:
                 headers=self.item.headers,
                 on_progress=self._update_progress,
                 use_range=use_range,
+                # For no-range plans this is the only trustworthy completeness
+                # reference — without it a leftover partial .part0 would be
+                # stamped complete (audit [14]).
+                known_total=max(total, 0),
             )
             segments.append(seg)
         else:
