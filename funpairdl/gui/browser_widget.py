@@ -666,7 +666,7 @@ class TabWebEnginePage(QWebEnginePage):
 
     def __init__(self, profile, parent=None):
         super().__init__(profile, parent)
-        self._create_tab_func: Callable[[], QWebEnginePage] | None = None
+        self._create_tab_func: Callable[[bool], QWebEnginePage] | None = None
 
     def createWindow(self, window_type):
         """Called when JS does window.open() or user middle-clicks a link.
@@ -674,9 +674,18 @@ class TabWebEnginePage(QWebEnginePage):
         Directly creates a new tab via callback and returns its page.
         Chromium will load the target URL into the returned page.
         Single page creation (fast) instead of temp-page URL capture (slow).
+
+        Middle-click / Ctrl+click report WebBrowserBackgroundTab — open the
+        tab WITHOUT switching to it (Chrome-like), so the user can queue up
+        topics from a listing without losing their place. Explicit
+        window.open()/target=_blank keep the switch-to behavior.
         """
         if self._create_tab_func:
-            return self._create_tab_func()
+            background = (
+                window_type
+                == QWebEnginePage.WebWindowType.WebBrowserBackgroundTab
+            )
+            return self._create_tab_func(background)
         return None
 
 
@@ -1120,12 +1129,13 @@ class BrowserWidget(QWidget):
 
         return page
 
-    def _create_tab_for_window(self) -> TabWebEnginePage:
+    def _create_tab_for_window(self, background: bool = False) -> TabWebEnginePage:
         """Called from createWindow — create a new tab and return its page.
 
         Chromium will load the target URL into the returned page.
+        background=True (middle-click) keeps the current tab focused.
         """
-        return self.create_tab()
+        return self.create_tab(select=not background)
 
     def _close_tab(self, index: int):
         """Close tab at index. Keep at least one tab open.
