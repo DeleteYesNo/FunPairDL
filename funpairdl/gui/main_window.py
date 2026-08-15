@@ -663,6 +663,14 @@ class MainWindow(QMainWindow):
             self.settings.save()
             # Invalidate cached registry so new credentials take effect
             self.qm._registry = None
+            # Apply download_dir/num_segments to the running QueueManager —
+            # it snapshots both at construction (app.py), so without this a
+            # settings change silently keeps the old values until restart.
+            # (Already-queued pairs keep their baked output_dir by design;
+            # this affects pairs added from now on.)
+            from pathlib import Path as _Path
+            self.qm.download_dir = _Path(self.settings.download_dir)
+            self.qm.num_segments = self.settings.max_segments
             # Apply clipboard-watcher changes immediately
             if hasattr(self, "clipboard_watcher"):
                 self.clipboard_watcher.refresh_settings(self.settings)
