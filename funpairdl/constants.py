@@ -74,6 +74,7 @@ VIDEO_HOSTS = [
     "rule34.xxx",
     "hanime1.me",
     "hmvmania.com",
+    "socigames.com",
 ]
 
 # Known script extensions
