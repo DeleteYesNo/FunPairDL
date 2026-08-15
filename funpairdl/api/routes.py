@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException
@@ -70,17 +71,23 @@ async def add_pair(req: AddPairRequest) -> dict:
     if not has_legacy and not has_groups:
         raise HTTPException(status_code=400, detail="At least one URL required")
 
-    # Save EroScripts cookies from extension for backend downloads
+    # Save EroScripts cookies from extension for backend downloads.
+    # Settings.update = locked read-modify-write: a plain load+save here
+    # would race the browser's tab-state/cookie-jar saves on other threads
+    # and revert their fields.
     if req.eroscripts_cookies:
         from funpairdl.persistence.settings import Settings
-        settings = Settings.load()
-        if settings.eroscripts_cookies != req.eroscripts_cookies:
-            settings.eroscripts_cookies = req.eroscripts_cookies
-            settings.save()
-            logger.info("Saved EroScripts cookies from extension (%d chars)", len(req.eroscripts_cookies))
+
+        def _apply(s, cookies=req.eroscripts_cookies):
+            if s.eroscripts_cookies != cookies:
+                s.eroscripts_cookies = cookies
+                logger.info("Saved EroScripts cookies from extension (%d chars)", len(cookies))
+
+        await asyncio.to_thread(Settings.update, _apply)
 
     groups_payload: list[dict] | None = None
     if req.groups:
+        # model_dump includes each group's probed "sizes"/"filenames" maps.
         groups_payload = [g.model_dump() for g in req.groups]
 
     pair = qm.add_pair(
@@ -121,13 +128,16 @@ async def resolve_url(req: ResolveRequest) -> dict:
                 k, v = part.strip().split("=", 1)
                 cookies[k.strip()] = v.strip()
 
-    # Also save cookies to settings if provided (for backend download use)
+    # Also save cookies to settings if provided (for backend download use).
+    # Locked read-modify-write — see /pair's cookie save.
     if req.cookies:
         from funpairdl.persistence.settings import Settings
-        settings = Settings.load()
-        if settings.eroscripts_cookies != req.cookies:
-            settings.eroscripts_cookies = req.cookies
-            settings.save()
+
+        def _apply(s, cookies=req.cookies):
+            if s.eroscripts_cookies != cookies:
+                s.eroscripts_cookies = cookies
+
+        await asyncio.to_thread(Settings.update, _apply)
 
     try:
         async with aiohttp.ClientSession(
@@ -147,7 +157,7 @@ async def resolve_url(req: ResolveRequest) -> dict:
                     return {"success": False, "error": "No redirect (missing authentication?)"}
 
                 # Propagate rotated cookies back to settings
-                _sync_resolve_cookies(resp, req.cookies)
+                await _sync_resolve_cookies(resp, req.cookies)
 
                 logger.info("Resolved %s -> %s", req.url[:80], final_url[:80])
                 return {"success": True, "url": final_url}
@@ -156,7 +166,7 @@ async def resolve_url(req: ResolveRequest) -> dict:
         return {"success": False, "error": str(e)}
 
 
-def _sync_resolve_cookies(resp, original_cookie_str: str | None) -> None:
+async def _sync_resolve_cookies(resp, original_cookie_str: str | None) -> None:
     """Capture rotated cookies from resolve response and update settings."""
     if not original_cookie_str:
         return
