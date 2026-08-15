@@ -154,17 +154,26 @@ class MainWindow(QMainWindow):
         self.tree.setColumnCount(6)
         self.tree.setRootIsDecorated(True)
         self.tree.setAlternatingRowColors(True)
+        self.tree.setUniformRowHeights(True)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._on_context_menu)
 
+        # Interactive (not ResizeToContents) columns: ResizeToContents forces a
+        # full-column re-measurement on the GUI thread after every dataChanged
+        # batch, which stalls the whole app on large queues. These columns hold
+        # short bounded strings, so one-time widths are fine.
         header = self.tree.header()
         header.setSectionResizeMode(0, QHeaderView.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Interactive)
         header.setSectionResizeMode(2, QHeaderView.Fixed)
-        header.resizeSection(2, 150)
-        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.Interactive)
+        header.setSectionResizeMode(4, QHeaderView.Interactive)
+        header.setSectionResizeMode(5, QHeaderView.Interactive)
+        header.resizeSection(1, 110)  # Status
+        header.resizeSection(2, 150)  # Progress
+        header.resizeSection(3, 90)   # Size
+        header.resizeSection(4, 90)   # Speed
+        header.resizeSection(5, 70)   # ETA
 
         dl_layout.addWidget(self.tree)
 
@@ -285,10 +294,25 @@ class MainWindow(QMainWindow):
         self.sig_pair_added.connect(self._refresh_pair)
         self.sig_pair_updated.connect(self._mark_pair_dirty)
         self.sig_item_updated.connect(self._mark_item_dirty)
-        self.sig_queue_changed.connect(self._refresh_all)
+        # Debounce queue-changed: coalesce bursts of queue mutations (batch
+        # adds, auto-splits, clear-completed) into a single full-tree rebuild.
+        # Kept as a member so the timer is never garbage-collected.
+        self._queue_changed_timer = QTimer(self)
+        self._queue_changed_timer.setSingleShot(True)
+        self._queue_changed_timer.setInterval(250)
+        self._queue_changed_timer.timeout.connect(self._refresh_all)
+        self.sig_queue_changed.connect(self._on_queue_changed_debounced)
         self.sig_quota_updated.connect(self._on_quota_text)
         # Flush pending updates immediately when switching to Downloads tab
         self.tabs.currentChanged.connect(self._on_main_tab_changed)
+
+    @Slot()
+    def _on_queue_changed_debounced(self):
+        # Coalesce: if a rebuild is already scheduled, let it cover this
+        # change too (guarantees a rebuild at most 250ms after the first
+        # change of a burst, and never starves under sustained mutations).
+        if not self._queue_changed_timer.isActive():
+            self._queue_changed_timer.start()
 
     @Slot(int)
     def _on_main_tab_changed(self, index: int):
@@ -432,6 +456,20 @@ class MainWindow(QMainWindow):
             self._item_lookup[pi.id] = (pair_id, idx)
             self._update_item_row(child, pi)
 
+        # Trim surplus child rows left behind when pair.items shrank
+        # (bundle replacement, auto-split clearing items), and drop stale
+        # lookup entries for this pair that point at removed/reused slots.
+        if tree_item.childCount() > len(pair.items):
+            while tree_item.childCount() > len(pair.items):
+                tree_item.takeChild(tree_item.childCount() - 1)
+            live_ids = {pi.id for pi in pair.items}
+            stale = [
+                iid for iid, (pid, _idx) in self._item_lookup.items()
+                if pid == pair_id and iid not in live_ids
+            ]
+            for iid in stale:
+                del self._item_lookup[iid]
+
     def _update_item_row(self, tree_item: QTreeWidgetItem, item: PairItem):
         type_icon = "V" if item.file_type == FileType.VIDEO else "S"
         tree_item.setText(0, f"[{type_icon}] {item.filename}")
@@ -453,12 +491,17 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _refresh_all(self):
-        self.tree.clear()
-        self._pair_items.clear()
-        self._item_lookup.clear()
-        # pairs list is oldest-first; inserting each at position 0 reverses the order
-        for pair in self.qm.pairs:
-            self._refresh_pair(pair.id)
+        self.tree.setUpdatesEnabled(False)
+        try:
+            self.tree.clear()
+            self._pair_items.clear()
+            self._item_lookup.clear()
+            # pairs list is oldest-first; inserting each at position 0 reverses
+            # the order. Snapshot the list: mutations may come from other threads.
+            for pair in list(self.qm.pairs):
+                self._refresh_pair(pair.id)
+        finally:
+            self.tree.setUpdatesEnabled(True)
 
     def _update_status_bar(self):
         total_pairs = len(self.qm.pairs)

@@ -796,10 +796,20 @@ class PixeldrainPickerDialog(QDialog):
         # (the picker normally lazy-creates it on first parse).
         if not self._aiohttp_session:
             init_future = self._worker.submit(self._init_session())
-            try:
-                init_future.result(timeout=5)
-            except Exception as e:
-                logger.warning("session init failed: %s", e)
+            # Poll instead of blocking on result() so the GUI thread stays
+            # responsive while the worker creates the session (5s budget).
+            import time
+            deadline = time.monotonic() + 5.0
+            while not init_future.done() and time.monotonic() < deadline:
+                QApplication.processEvents()
+                self._sleep_ms(20)
+            if init_future.done():
+                try:
+                    init_future.result(timeout=0)
+                except Exception as e:
+                    logger.warning("session init failed: %s", e)
+            else:
+                logger.warning("session init timed out after 5s")
         logger.info("Submitting driver to worker loop")
         future = self._worker.submit(driver(start_paths))
 
@@ -1174,6 +1184,8 @@ class PixeldrainPickerDialog(QDialog):
         # Spin on Qt event loop until done or cancelled
         while not future.done():
             QApplication.processEvents()
+            # Tiny sleep keeps CPU sane without breaking responsiveness
+            self._sleep_ms(20)
         progress.close()
 
         if cancel_event.is_set():
