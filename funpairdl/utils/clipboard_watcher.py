@@ -101,7 +101,10 @@ class ClipboardWatcher(QObject):
         for u in urls:
             if ttl > 0 and u in self._recent:
                 continue
-            self._recent[u] = now
+            # Only record when dedupe is active; with ttl == 0 the GC above
+            # is off too, so inserting would grow _recent unboundedly.
+            if ttl > 0:
+                self._recent[u] = now
             fresh.append(u)
 
         if not fresh:
