@@ -15,7 +15,7 @@ from funpairdl.api.schemas import (
     ResolveRequest,
     StatusResponse,
 )
-from funpairdl.core.pair import PairState
+from funpairdl.core.pair import ItemState, PairState
 from funpairdl.core.queue_manager import QueueManager
 from funpairdl.utils.filename import guess_file_type
 
@@ -51,7 +51,8 @@ async def get_status() -> StatusResponse:
 async def get_config() -> dict:
     """Return extension-relevant config values."""
     from funpairdl.persistence.settings import Settings
-    settings = Settings.load()
+    # File I/O off the api-worker loop — handlers must not block it.
+    settings = await asyncio.to_thread(Settings.load)
     return {
         "gofile_token": settings.gofile_token,
         "default_resolution": settings.default_resolution,
@@ -560,23 +561,47 @@ async def add_link(req: AddLinkRequest) -> dict:
     }
 
 
+def _pair_progress_from_dict(d: dict) -> float:
+    """Replicate Pair.progress from a snapshot dict (see core/pair.py)."""
+    items = d.get("items", [])
+    if not items:
+        return 0.0
+    completed = sum(1 for i in items if i.get("state") == ItemState.COMPLETED.value)
+    if completed == len(items):
+        return 100.0
+    total = sum(int(i.get("total_bytes") or 0) for i in items)
+    if total <= 0:
+        return completed / len(items) * 100
+    downloaded = sum(int(i.get("downloaded_bytes") or 0) for i in items)
+    pct = min(downloaded / total * 100, 100.0)
+    # Same clamp as Pair.progress: byte-progress can hit 100 while an item
+    # that failed before getting a size (total_bytes=0) is still incomplete.
+    if pct >= 100.0 and completed < len(items):
+        return completed / len(items) * 100
+    return pct
+
+
 @router.get("/queue")
 async def get_queue() -> QueueStatusResponse:
     qm = _get_qm()
 
+    # Lock-held snapshot with segments already stripped from item dicts —
+    # the API response never needs them and they dominate payload size.
+    pair_dicts = qm.get_queue_status()
+
     pairs = []
     active_pair = None
 
-    for p in qm.pairs:
+    for d in pair_dicts:
         pairs.append(PairStatusResponse(
-            id=p.id,
-            name=p.name,
-            state=p.state.value,
-            progress=p.progress,
-            items=[i.to_dict() for i in p.items],
+            id=d.get("id", ""),
+            name=d.get("name", ""),
+            state=d.get("state", ""),
+            progress=_pair_progress_from_dict(d),
+            items=d.get("items", []),
         ))
-        if p.state == PairState.DOWNLOADING:
-            active_pair = p.id
+        if d.get("state") == PairState.DOWNLOADING.value:
+            active_pair = d.get("id")
 
     return QueueStatusResponse(
         pairs=pairs,
@@ -617,7 +642,9 @@ async def move_pair(pair_id: str, direction: int = 0) -> dict:
 async def organize_pair(pair_id: str) -> dict:
     """Trigger file rename/organize for a completed pair."""
     qm = _get_qm()
-    ok = qm.organize_pair(pair_id)
+    # Async variant runs the sha256/rename work via to_thread and returns
+    # False when the pair is busy/not eligible.
+    ok = await qm.organize_pair_async(pair_id)
     if not ok:
         raise HTTPException(status_code=400, detail="Pair not found, not completed, or already organized")
     return {"status": "ok"}
@@ -627,7 +654,7 @@ async def organize_pair(pair_id: str) -> dict:
 async def undo_organize_pair(pair_id: str) -> dict:
     """Undo file rename/organize for a completed pair."""
     qm = _get_qm()
-    ok = qm.undo_organize_pair(pair_id)
+    ok = await qm.undo_organize_pair_async(pair_id)
     if not ok:
         raise HTTPException(status_code=400, detail="Pair not found, not completed, or not organized")
     return {"status": "ok"}

@@ -59,6 +59,11 @@ class DownloadTask:
     def _set_state(self, state: ItemState, error: str = "") -> None:
         self.item.state = state
         self.item.error_message = error
+        if state == ItemState.COMPLETED:
+            # Segments are download-time bookkeeping only — the temp files
+            # are already merged and deleted. Keeping them on completed items
+            # bloats queue.json forever (audit [0]).
+            self.item.segments = []
         if self.on_state_change:
             self.on_state_change(self.item)
 

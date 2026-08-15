@@ -189,8 +189,13 @@ class Pair:
             "preferred_resolution": self.preferred_resolution,
             "auto_rename": self.auto_rename,
             "organized": self.organized,
-            "original_filenames": self.original_filenames,
-            "alt_group_config": self.alt_group_config,
+            # Copies, not references: snapshots taken under the queue lock
+            # are serialized later on the writer thread, and organize workers
+            # mutate these dicts in place — an aliased dict would make
+            # json.dump race the mutation ("dict changed size during
+            # iteration") and silently skip the save.
+            "original_filenames": dict(self.original_filenames),
+            "alt_group_config": {k: dict(v) for k, v in self.alt_group_config.items()},
             "error_message": self.error_message,
             "items": [i.to_dict() for i in self.items],
         }

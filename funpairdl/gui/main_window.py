@@ -603,14 +603,10 @@ class MainWindow(QMainWindow):
                 self.qm.resume_pair(pair.id)
 
     def _on_clear_completed(self):
-        completed_ids = [p.id for p in self.qm.pairs if p.state == PairState.COMPLETED]
-        for pid in completed_ids:
-            self.qm.remove_pair(pid)
-            if pid in self._pair_items:
-                idx = self.tree.indexOfTopLevelItem(self._pair_items[pid])
-                if idx >= 0:
-                    self.tree.takeTopLevelItem(idx)
-                del self._pair_items[pid]
+        # Batch removal in QueueManager: one queue-changed + one debounced
+        # save. Tree rows are rebuilt by the debounced queue-changed refresh.
+        removed = self.qm.clear_completed()
+        logger.info("Clear Completed: removed %d pair(s)", removed)
 
     def _on_restart_pump(self):
         """Force-restart the download pump when downloads appear stuck."""
@@ -667,10 +663,14 @@ class MainWindow(QMainWindow):
                 )
                 reorg_action.triggered.connect(lambda: self._reorganize_pair(pair_id))
                 undo_action = menu.addAction("Undo Rename")
-                undo_action.triggered.connect(lambda: self.qm.undo_organize_pair(pair_id))
+                undo_action.triggered.connect(
+                    lambda: asyncio.ensure_future(self.qm.undo_organize_pair_async(pair_id))
+                )
             else:
                 org_action = menu.addAction("Rename Files")
-                org_action.triggered.connect(lambda: self.qm.organize_pair(pair_id))
+                org_action.triggered.connect(
+                    lambda: asyncio.ensure_future(self.qm.organize_pair_async(pair_id))
+                )
 
         menu.addSeparator()
 
@@ -687,12 +687,9 @@ class MainWindow(QMainWindow):
     def _reorganize_pair(self, pair_id: str):
         """Undo + re-run organize so newer organize logic (e.g. sibling
         funscript hardlinks for extra videos) gets applied to a Pair
-        that was organized before the upgrade."""
-        ok = self.qm.undo_organize_pair(pair_id)
-        if not ok:
-            logger.warning("Re-organize: undo failed for %s", pair_id)
-            return
-        self.qm.organize_pair(pair_id)
+        that was organized before the upgrade. The undo+organize chain
+        runs inside QueueManager.reorganize_pair_async off the GUI thread."""
+        asyncio.ensure_future(self.qm.reorganize_pair_async(pair_id))
 
     def _open_folder(self, path: str):
         import subprocess
