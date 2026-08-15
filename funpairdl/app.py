@@ -11,14 +11,15 @@ import sys
 os.environ.setdefault("PYTHONUTF8", "1")
 
 # Chromium flags for QWebEngine — must be set BEFORE QWebEngineProfile is created
+# NOTE: renderer backgrounding / timer throttling stay ENABLED on purpose.
+# Disabling them (as an earlier version did) kept every background tab's
+# renderer at foreground priority forever — with 15-22 Discourse tabs that
+# meant continuous full-speed JS/compositing in all of them and a frozen app.
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", " ".join([
     "--enable-features=BackForwardCache",       # Instant back/forward navigation
     "--back-forward-cache-size=3",              # Cache up to 3 pages for back/forward
     "--disk-cache-size=268435456",              # 256 MB disk cache
     "--enable-quic",                            # QUIC protocol for faster HTTPS
-    "--disable-renderer-backgrounding",         # Keep background tabs' renderers active
-    "--disable-background-timer-throttling",    # Don't throttle JS timers in background tabs
-    "--disable-backgrounding-occluded-windows", # Don't throttle occluded windows
     # GPU rendering acceleration
     "--ignore-gpu-blocklist",                   # Use GPU even if driver is blocklisted
     "--enable-gpu-rasterization",               # Rasterize page tiles on GPU
