@@ -19,6 +19,10 @@ class PairGroupSpec(BaseModel):
     # only guess a name from the URL (a random file id), which breaks pair
     # naming and video↔script stem matching when a bundle is sent expanded.
     filenames: dict[str, str] | None = None
+    # {url: size_bytes} — probed sizes from the extension's /probe cache
+    # (only entries > 0). Lets queued items show Size/ETA immediately
+    # instead of waiting for a download slot to resolve.
+    sizes: dict[str, int] | None = None
     inherit_multi_axis: bool = True                 # ignored for Main
     # Folder/file stem to use inside the Alt's subfolder. The backend
     # appends ".alt" + collision suffix. Empty → fall back to "<topic>.altN".
@@ -35,6 +39,7 @@ class AddPairRequest(BaseModel):
     script_urls: list[str] = []
     script_authors: dict[str, str] | None = None  # {script_url: author_name}
     filenames: dict[str, str] | None = None  # {url: real_filename} for probed files
+    sizes: dict[str, int] | None = None  # {url: size_bytes} for probed files (>0 only)
     # New grouped interface: each entry becomes its own folder slot
     # (Main = root, Alt N = subfolder), with optional multi-axis inheritance.
     groups: list[PairGroupSpec] | None = None
