@@ -1,12 +1,24 @@
 # ── Secrets & local state (NEVER commit) ─────────────────────────────
 # config.json holds API keys, plaintext passwords and live session
-# cookies. Ship config.example.json instead.
+# cookies. Ship config.example.json instead. The .bak-* copies made
+# before risky edits carry the same secrets, so ignore every suffix.
 config.json
+config.json.*
 queue.json
+queue.json.bak-*
+queue.json.tmp-*
+queue_archive.jsonl*
+funpairdl.log*
 *.log
 
 # Dev / analysis artifacts
 analysis_output.txt
+_lost_*.json
+_lost_report.txt
+_perf_*.md
+_queue_integrity_report.txt
+s1.json
+s2.json
 
 # ── Python ───────────────────────────────────────────────────────────
 __pycache__/
