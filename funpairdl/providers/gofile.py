@@ -1,17 +1,119 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import threading
+import time
 from urllib.parse import urlparse
 
 import aiohttp
 
+from funpairdl.constants import BROWSER_USER_AGENT
 from funpairdl.providers.base import BaseProvider, ResolvedFile
+from funpairdl.providers import gofile_wt
 from funpairdl.utils.filename import sanitize_filename
 
 logger = logging.getLogger("funpairdl.providers.gofile")
 
 GOFILE_API = "https://api.gofile.io"
+
+# Language advertised as X-BL. It feeds the website-token hash, so it has to
+# match what gofile_wt was told.
+GOFILE_LANGUAGE = "en-US"
+
+# Query parameters the site sends on /contents. pageSize matters: without it
+# large folders come back truncated.
+CONTENTS_PARAMS = {
+    "contentFilter": "",
+    "page": "1",
+    "pageSize": "1000",
+    "sortField": "createTime",
+    "sortDirection": "-1",
+}
+
+
+def api_headers(account_token: str, website_token: str) -> dict[str, str]:
+    """Headers for a /contents request, mirroring GoFile's own front end.
+
+    The User-Agent is not decoration: it is mixed into the website token, so
+    the value sent here must be the one gofile_wt hashed.
+    """
+    return {
+        "Authorization": f"Bearer {account_token}",
+        "X-Website-Token": website_token,
+        "X-BL": GOFILE_LANGUAGE,
+        "User-Agent": BROWSER_USER_AGENT,
+        "Accept": "*/*",
+    }
+
+# --- Module-level token TTL caches (audit [7]) ------------------------------
+# The guest account token and the website token (wt) are stable for long
+# stretches, but were re-fetched on EVERY probe and EVERY resolve (guest POST
+# 10s + JS-bundle scrape up to 2x10s each time). Caching at module level means
+# both the /probe path (which calls _get_token/_get_website_token directly)
+# and resolve() share the same entries, across provider instances and event
+# loops. Entries are dropped via invalidate_token_cache() on auth failures so
+# a rotated/expired token self-heals on the next attempt.
+TOKEN_CACHE_TTL_SECONDS = 30 * 60
+
+_cache_lock = threading.Lock()
+_guest_token_cache: tuple[str, float] | None = None  # (token, fetched_at)
+
+
+def _cache_get(entry: tuple[str, float] | None) -> str | None:
+    if entry and (time.monotonic() - entry[1]) < TOKEN_CACHE_TTL_SECONDS:
+        return entry[0]
+    return None
+
+
+def invalidate_token_cache() -> None:
+    """Drop the cached guest account token and the website-token cache."""
+    global _guest_token_cache
+    with _cache_lock:
+        _guest_token_cache = None
+    gofile_wt.invalidate()
+
+
+def _describe_error(status_code: int, api_status: str | None) -> str:
+    """Turn GoFile's terse status strings into something actionable.
+
+    Two of them are actively misleading: `error-notPremium` is about the
+    website token rather than the account tier, and `error-rateLimit` is the
+    step before GoFile null-routes the IP for a while.
+    """
+    s = (api_status or "").lower()
+    if "notpremium" in s:
+        return (
+            "GoFile rejected the request as error-notPremium. Despite the name "
+            "this is the website-token check, not the account tier — GoFile has "
+            "most likely rotated the salt in wt.obf.js. Retry; if it persists "
+            "the token generator changed."
+        )
+    if "ratelimit" in s:
+        return (
+            "GoFile rate-limited this client (error-rateLimit). Wait before "
+            "retrying — repeated failures get the IP temporarily blocked."
+        )
+    if "notfound" in s:
+        return "GoFile content not found — the link has expired or was deleted."
+    if api_status:
+        return f"GoFile API error: {api_status} (HTTP {status_code})"
+    return f"GoFile API returned HTTP {status_code}"
+
+
+def _is_auth_error(status_code: int, api_status: str | None) -> bool:
+    """Does this response mean 'retry with fresh tokens'?
+
+    `error-notPremium` is included deliberately: despite its name it is what
+    GoFile returns for a missing or stale X-Website-Token, and it appears for
+    guest and paid accounts alike. Treating it as an auth error means a salt
+    rotation self-heals on the retry instead of looking like a paywall.
+    """
+    if status_code in (401, 403):
+        return True
+    s = (api_status or "").lower()
+    return "auth" in s or "token" in s or "notpremium" in s
 
 
 class GoFileProvider(BaseProvider):
@@ -30,9 +132,15 @@ class GoFileProvider(BaseProvider):
         return "gofile"
 
     async def _get_token(self, session: aiohttp.ClientSession) -> str:
-        """Return configured token, or create a guest account as fallback."""
+        """Return configured token, or a (cached) guest account token."""
         if self.token:
+            # Paid token: use as-is, never cached/invalidated here.
             return self.token
+        global _guest_token_cache
+        with _cache_lock:
+            cached = _cache_get(_guest_token_cache)
+        if cached:
+            return cached
         async with session.post(
             f"{GOFILE_API}/accounts",
             timeout=aiohttp.ClientTimeout(total=10),
@@ -42,44 +150,21 @@ class GoFileProvider(BaseProvider):
             if not token:
                 raise ValueError("Failed to create GoFile guest account")
             logger.info("Created GoFile guest account")
+            with _cache_lock:
+                _guest_token_cache = (token, time.monotonic())
             return token
 
     async def _get_website_token(self, session: aiohttp.ClientSession) -> str:
-        """Extract the website token (wt) from GoFile's JS."""
-        import re
+        """Website token for the current account, valid for this 4h window.
 
-        js_urls = [
-            "https://gofile.io/dist/js/alljs.js",
-            "https://gofile.io/dist/js/global.js",
-        ]
-
-        for js_url in js_urls:
-            try:
-                async with session.get(
-                    js_url,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    if resp.status != 200:
-                        continue
-                    text = await resp.text()
-                    # Try multiple patterns GoFile has used
-                    patterns = [
-                        r'fetchData\s*\(\s*["\']wt["\']\s*,\s*["\']([^"\']+)["\']',
-                        r'wt\s*:\s*["\']([a-zA-Z0-9]+)["\']',
-                        r'websiteToken\s*=\s*["\']([a-zA-Z0-9]+)["\']',
-                        r'["\']wt["\']\s*,\s*["\']([a-zA-Z0-9]+)["\']',
-                    ]
-                    for pat in patterns:
-                        m = re.search(pat, text)
-                        if m:
-                            token = m.group(1)
-                            logger.info("GoFile wt token extracted: %s from %s", token[:8], js_url)
-                            return token
-            except Exception as e:
-                logger.debug("Failed to fetch %s: %s", js_url, e)
-
-        logger.warning("Could not extract GoFile wt token, using fallback")
-        return "4fd6sg89d7s6"
+        Previously this scraped a static value out of alljs.js/global.js. Both
+        of those 404 now, and the value they held is no longer what the API
+        checks — see gofile_wt for what replaced it.
+        """
+        account_token = await self._get_token(session)
+        return await gofile_wt.website_token(
+            session, account_token, BROWSER_USER_AGENT, GOFILE_LANGUAGE,
+        )
 
     async def resolve(self, url: str, **kwargs) -> ResolvedFile:
         content_id = self._extract_content_id(url)
@@ -87,20 +172,41 @@ class GoFileProvider(BaseProvider):
             raise ValueError(f"Cannot extract GoFile content ID from: {url}")
 
         async with aiohttp.ClientSession() as session:
-            token = await self._get_token(session)
-            wt = await self._get_website_token(session)
+            data: dict = {}
+            for attempt in (0, 1):
+                token = await self._get_token(session)
+                wt = await self._get_website_token(session)
 
-            async with session.get(
-                f"{GOFILE_API}/contents/{content_id}?wt={wt}",
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp:
-                if resp.status != 200:
-                    raise ValueError(f"GoFile API returned status {resp.status}")
-                data = await resp.json()
+                async with session.get(
+                    f"{GOFILE_API}/contents/{content_id}",
+                    params=CONTENTS_PARAMS,
+                    headers=api_headers(token, wt),
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    status_code = resp.status
+                    # Non-200 bodies still carry the real reason
+                    # (error-notPremium / error-rateLimit); dropping them left
+                    # users with a bare "status 401".
+                    body = await resp.text()
+                try:
+                    data = json.loads(body) if body else {}
+                except ValueError:
+                    data = {}
 
-            if data.get("status") != "ok":
-                raise ValueError(f"GoFile API error: {data.get('status')}, data={data}")
+                api_status = data.get("status")
+                if status_code == 200 and api_status == "ok":
+                    break
+                if attempt == 0 and _is_auth_error(status_code, api_status):
+                    # Cached token(s) likely expired/rotated — drop and retry
+                    # once with freshly fetched ones.
+                    logger.info(
+                        "GoFile auth failure (HTTP %s, status=%s) — "
+                        "invalidating cached tokens and retrying",
+                        status_code, api_status,
+                    )
+                    invalidate_token_cache()
+                    continue
+                raise ValueError(_describe_error(status_code, api_status))
 
             content_data = data.get("data", {})
 
