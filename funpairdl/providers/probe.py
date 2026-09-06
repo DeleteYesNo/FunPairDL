@@ -267,6 +267,9 @@ async def _probe_uncached(
     if provider == "socigames":
         return await _probe_socigames(url, session)
 
+    if provider == "e621":
+        return await _probe_e621(url, session)
+
     # EroScripts short-urls: need cookies, skip probing
     if provider == "eroscripts":
         return {"success": True, "provider": "eroscripts", "size": 0}
@@ -421,6 +424,8 @@ async def _probe_ytdlp(url: str, session: aiohttp.ClientSession) -> dict:
             "title": info.get("title", ""),
             "filename": info.get("title", ""),
             "formats": available,
+            "thumbnail": info.get("thumbnail") or "",
+            "duration": info.get("duration") or None,
         }
     except asyncio.TimeoutError:
         logger.error("yt-dlp probe timed out after %ds for %s", _YTDLP_TIMEOUT, url[:80])
@@ -570,12 +575,24 @@ async def _probe_pixeldrain(url: str, settings, session: aiohttp.ClientSession) 
         ) as resp:
             if resp.status == 200:
                 data = await resp.json()
-                return {
+                result = {
                     "success": True,
                     "provider": "pixeldrain",
                     "size": data.get("size", 0),
                     "filename": data.get("name", ""),
                 }
+                # Duration from the container header — two small ranged
+                # reads against the file endpoint, not a download.
+                from funpairdl.utils.media_duration import (
+                    looks_like_video, probe_media_duration,
+                )
+                name = data.get("name", "") or ""
+                if looks_like_video(name):
+                    duration = await probe_media_duration(
+                        f"https://pixeldrain.com/api/file/{file_id}", session, {}, name)
+                    if duration:
+                        result["duration"] = duration
+                return result
             return {"success": False, "error": f"Status {resp.status}"}
     except Exception as e:
         logger.error("Probe failed for %s: %s", url[:80], e)
@@ -652,6 +669,54 @@ async def _probe_hmvmania(url: str, session: aiohttp.ClientSession) -> dict:
         return {"success": False, "error": str(e)}
 
 
+async def _probe_e621(url: str, session: aiohttp.ClientSession) -> dict:
+    """e621: one JSON call lists the original file and every transcode with
+    exact sizes — no HEAD needed."""
+    try:
+        from funpairdl.providers.e621 import (
+            build_filename, build_formats, describe_unavailable, fetch_post,
+            fetch_title, select_format,
+        )
+
+        post, title = await asyncio.gather(
+            fetch_post(url, session), fetch_title(url, session))
+        renditions = build_formats(post)
+        best = select_format(renditions, "best")
+        if best is None:
+            return {"success": False, "error": describe_unavailable(post)}
+
+        # Ascending lo→hi like the other branches; format_id carries e621's
+        # rendition label so the picker can tell "480p" from "original".
+        formats = [
+            {"height": f["height"], "size": f["size"], "format_id": f["label"]}
+            for f in renditions
+        ]
+        filename = build_filename(post, best, title)
+        # Posts in one topic often share a title ("alpha and beta
+        # (…) created by X" ×2); the general tags name the scene (shower,
+        # kneeling, reverse_cowgirl_position) and the thumbnail shows it —
+        # what the panel needs to tell them apart and to pair scripts named
+        # after scenes. Tags are alphabetical on e621; keep a generous slice.
+        tags = post.get("tags") or {}
+        general = [t for t in (tags.get("general") or []) if isinstance(t, str)][:120]
+        thumbnail = ((post.get("preview") or {}).get("url")
+                     or (post.get("sample") or {}).get("url") or "")
+        return {
+            "success": True,
+            "provider": "e621",
+            "title": filename.rsplit(".", 1)[0],
+            "filename": filename,
+            "size": best["size"],
+            "formats": formats,
+            "tags": general,
+            "thumbnail": thumbnail,
+            "duration": post.get("duration") or None,
+        }
+    except Exception as e:
+        logger.error("e621 probe failed for %s: %s", url[:80], e)
+        return {"success": False, "error": str(e)}
+
+
 async def _probe_socigames(url: str, session: aiohttp.ClientSession) -> dict:
     """SociGames: fetch the page past Cloudflare, then size whichever player
     layout it uses — a partner-CDN mp4 (HEAD it) or a Bunny Stream embed
@@ -717,6 +782,37 @@ async def _probe_direct(url: str, provider: str, session: aiohttp.ClientSession)
     whose Content-Range reveals the true size."""
     headers = {"User-Agent": BROWSER_USER_AGENT}
     try:
+        from urllib.parse import urlparse as _urlparse
+        from funpairdl.utils.media_duration import (
+            funscript_info, looks_like_video, probe_media_duration,
+        )
+        path = (_urlparse(url).path or "").lower()
+
+        # A funscript is a few KB: read it whole. Its last action gives the
+        # duration and its metadata may name the video outright — both feed
+        # the pairing preview.
+        if path.endswith(".funscript"):
+            async with session.get(
+                url, headers=headers, allow_redirects=True,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                resp.raise_for_status()
+                # resp.read(): the whole body. (StreamReader.read(n) returns
+                # whatever happens to be buffered — a 3 KB slice of a 13 KB
+                # script — which parses as nothing.)
+                data = await resp.read()
+            if len(data) > 8 * 1024 * 1024:
+                data = b""
+            info = funscript_info(data)
+            return {
+                "success": True,
+                "provider": provider or "direct",
+                "size": len(data),
+                "duration": info["duration"],
+                "script_title": info["title"],
+                "video_url": info["video_url"],
+            }
+
         size = 0
         try:
             async with session.head(
@@ -741,11 +837,16 @@ async def _probe_direct(url: str, provider: str, session: aiohttp.ClientSession)
                 else:
                     size = int(resp.headers.get("Content-Length", 0) or 0)
 
-        return {
+        result = {
             "success": True,
             "provider": provider or "direct",
             "size": size,
         }
+        if looks_like_video(path):
+            duration = await probe_media_duration(url, session, headers, path)
+            if duration:
+                result["duration"] = duration
+        return result
     except Exception as e:
         logger.error("Probe failed for %s: %s", url[:80], e)
         return {"success": False, "error": str(e)}

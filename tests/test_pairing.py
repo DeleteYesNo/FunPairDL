@@ -44,6 +44,11 @@ class TestNormalize:
 
     def test_axis_suffix_stripped(self):
         assert normalize("Foo.pitch.funscript") == normalize("Foo.funscript")
+        assert normalize("Foo.suckManual.funscript") == normalize("Foo.funscript")
+        assert normalize("Foo.R2.funscript") == normalize("Foo.funscript")
+        assert normalize("Foo.valve.funscript") == normalize("Foo.funscript")
+        # A stray word is part of the name, not an axis.
+        assert normalize("Foo.rolling.funscript") != normalize("Foo.funscript")
 
     def test_resolution_token_stripped(self):
         assert normalize("Clip 1080p.mp4") == normalize("Clip.funscript")

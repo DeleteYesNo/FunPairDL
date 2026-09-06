@@ -33,7 +33,32 @@ import aiohttp
 
 logger = logging.getLogger("funpairdl.providers.gofile_wt")
 
-WT_JS_URL = "https://gofile.io/dist/js/wt.obf.js"
+import re
+
+# GoFile moves the bundle around (it lived at /dist/js/wt.obf.js until
+# 2026-08, then /js/wt.obf.js). Known locations are tried first; when all of
+# them 404 the home page is read for whatever <script src="…wt….js"> it
+# references now, so a future move is absorbed without a code change.
+WT_JS_CANDIDATES = (
+    "https://gofile.io/js/wt.obf.js",
+    "https://gofile.io/dist/js/wt.obf.js",
+)
+WT_JS_URL = WT_JS_CANDIDATES[0]
+GOFILE_HOME_URL = "https://gofile.io/"
+_WT_SCRIPT_SRC_RE = re.compile(r"""<script[^>]+src=["']([^"']*wt[^"']*\.js[^"']*)["']""", re.IGNORECASE)
+
+
+def bundle_url_from_html(html: str) -> str:
+    """The wt bundle URL a GoFile page references, or "" when none does."""
+    m = _WT_SCRIPT_SRC_RE.search(html or "")
+    if not m:
+        return ""
+    src = m.group(1)
+    if src.startswith("//"):
+        return "https:" + src
+    if src.startswith("http"):
+        return src
+    return "https://gofile.io/" + src.lstrip("/")
 
 # The token rotates on absolute 4-hour boundaries.
 WT_WINDOW_SECONDS = 4 * 60 * 60
@@ -145,14 +170,41 @@ async def _fetch_js(session: aiohttp.ClientSession, user_agent: str) -> str:
     with _lock:
         if _js_cache and (time.monotonic() - _js_cache[1]) < JS_CACHE_TTL_SECONDS:
             return _js_cache[0]
-    async with session.get(
-        WT_JS_URL, headers={"User-Agent": user_agent},
-        timeout=aiohttp.ClientTimeout(total=20),
-    ) as resp:
-        resp.raise_for_status()
-        source = await resp.text()
+    headers = {"User-Agent": user_agent}
+    timeout = aiohttp.ClientTimeout(total=20)
+
+    async def _get(url: str) -> str | None:
+        """Bundle source at `url`, or None on 404 (the path moved)."""
+        async with session.get(url, headers=headers, timeout=timeout) as resp:
+            if resp.status == 404:
+                return None
+            resp.raise_for_status()
+            return await resp.text()
+
+    tried: list[str] = []
+    source = None
+    for url in WT_JS_CANDIDATES:
+        tried.append(url)
+        source = await _get(url)
+        if source is not None:
+            break
+    if source is None:
+        # Every known path is gone — ask the home page where it lives now.
+        async with session.get(GOFILE_HOME_URL, headers=headers, timeout=timeout) as resp:
+            resp.raise_for_status()
+            discovered = bundle_url_from_html(await resp.text())
+        if not discovered or discovered in tried:
+            raise RuntimeError(
+                "GoFile wt bundle not found at any known path and the home "
+                f"page names none (tried {', '.join(tried)})"
+            )
+        logger.info("GoFile wt bundle moved; using %s", discovered)
+        tried.append(discovered)
+        source = await _get(discovered)
+        if source is None:
+            raise RuntimeError(f"GoFile wt bundle 404 at discovered path {discovered}")
     if "generateWT" not in source:
-        raise RuntimeError(f"{WT_JS_URL} no longer contains generateWT")
+        raise RuntimeError(f"{tried[-1]} no longer contains generateWT")
     with _lock:
         _js_cache = (source, time.monotonic())
     return source

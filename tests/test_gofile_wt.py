@@ -55,6 +55,55 @@ def test_token_depends_on_account_user_agent_and_language():
     assert gofile_wt.compute_token(FAKE_BUNDLE, "tok", "UA-A", "fr-FR") != base
 
 
+def test_bundle_url_is_read_from_the_home_page():
+    # 2026-08: the bundle moved from /dist/js/wt.obf.js to /js/wt.obf.js and
+    # every request 404'd until the path was updated by hand.
+    html = '<script src="/js/wt.obf.js"></script><script src="/js/app.js"></script>'
+    assert gofile_wt.bundle_url_from_html(html) == "https://gofile.io/js/wt.obf.js"
+    assert gofile_wt.bundle_url_from_html('<script src="https://cdn.gofile.io/x/wt.obf.js">') \
+        == "https://cdn.gofile.io/x/wt.obf.js"
+    assert gofile_wt.bundle_url_from_html('<script src="/js/app.js"></script>') == ""
+    assert gofile_wt.bundle_url_from_html("") == ""
+    assert gofile_wt.WT_JS_CANDIDATES[0] == "https://gofile.io/js/wt.obf.js"
+
+
+def test_fetch_js_falls_back_across_candidates_and_discovers_a_moved_bundle():
+    """A 404 at every known path must not be fatal: the home page names the
+    live bundle and that is fetched instead."""
+
+    class _Resp:
+        def __init__(self, status, text):
+            self.status, self._text = status, text
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        def raise_for_status(self):
+            if self.status >= 400:
+                raise RuntimeError(f"HTTP {self.status}")
+        async def text(self):
+            return self._text
+
+    calls = []
+
+    class _Session:
+        def get(self, url, **kw):
+            calls.append(url)
+            if url == gofile_wt.GOFILE_HOME_URL:
+                return _Resp(200, '<script src="/new/place/wt.obf.js"></script>')
+            if url == "https://gofile.io/new/place/wt.obf.js":
+                return _Resp(200, FAKE_BUNDLE)
+            return _Resp(404, "")
+
+    src = asyncio.run(gofile_wt._fetch_js(_Session(), "UA"))
+    assert "generateWT" in src
+    assert calls == [*gofile_wt.WT_JS_CANDIDATES, gofile_wt.GOFILE_HOME_URL,
+                     "https://gofile.io/new/place/wt.obf.js"]
+    # Cached: a second call makes no request.
+    asyncio.run(gofile_wt._fetch_js(_Session(), "UA"))
+    assert len(calls) == 4
+
+
 def test_bundle_without_generatewt_is_reported_clearly():
     with pytest.raises(RuntimeError, match="generateWT"):
         gofile_wt.compute_token("var x = 1;", "tok", "UA", "en-US")
@@ -83,6 +132,8 @@ def test_window_is_four_hours_aligned_to_the_epoch():
 
 
 class _FakeResp:
+    status = 200  # real aiohttp responses carry one; _fetch_js reads it for 404s
+
     def __init__(self, text):
         self._text = text
 

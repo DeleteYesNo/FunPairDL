@@ -26,9 +26,12 @@ LEADING_BRACKETS = re.compile(r"^\s*[\[(\{][^\]\)\}]+[\]\)\}]\s*")
 ANY_BRACKETS = re.compile(r"[\[(\{][^\]\)\}]*[\]\)\}]")
 # Trailing version markers like "_v2", "-final", " (1)"
 VERSION_SUFFIX = re.compile(r"[_\-\s]+(?:v\d+|final|fixed|edit\d*|copy)$", re.IGNORECASE)
-# Funscript axis suffix like ".roll" / ".pitch" / ".yaw" / ".twist" / ".surge" / ".sway"
+# Funscript axis suffix like ".roll" / ".pitch" / ".yaw" / ".twist" / ".surge"
+# / ".sway", the erodeck codes (".L1", ".R2"), and a word axis with a glued
+# qualifier (".suckManual", ".roll-v2") — all name the same work as the video.
 AXIS_SUFFIX = re.compile(
-    r"\.(?:roll|pitch|yaw|twist|surge|sway|stroke)$", re.IGNORECASE,
+    r"\.(?:(?i:roll|pitch|yaw|twist|surge|sway|stroke|suck|vibe|vibration|vib"
+    r"|pump|lube|valve)(?:[A-Z0-9_\- ][A-Za-z0-9_\- ]*)?|(?i:[LRVA]\d))$",
 )
 
 
