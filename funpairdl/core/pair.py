@@ -134,6 +134,11 @@ class Pair:
     # Currently only `inherit_multi_axis` — whether Main's multi-axis
     # funscripts should be hardlinked into this Alt's subfolder.
     alt_group_config: dict[str, dict] = field(default_factory=dict)
+    # Bundle arrangement from the panel: {item url: group label}. When a
+    # bundle (pixeldrain list, MEGA/GoFile folder) holds several works, the
+    # user can group its files before sending; _auto_split_bundle_pair then
+    # honours these labels instead of guessing by name.
+    bundle_plan: dict[str, str] = field(default_factory=dict)
 
     @property
     def total_bytes(self) -> int:
@@ -196,6 +201,7 @@ class Pair:
             # iteration") and silently skip the save.
             "original_filenames": dict(self.original_filenames),
             "alt_group_config": {k: dict(v) for k, v in self.alt_group_config.items()},
+            "bundle_plan": dict(self.bundle_plan),
             "error_message": self.error_message,
             "items": [i.to_dict() for i in self.items],
         }
@@ -213,6 +219,7 @@ class Pair:
             organized=d.get("organized", False),
             original_filenames=d.get("original_filenames", {}),
             alt_group_config=d.get("alt_group_config", {}),
+            bundle_plan=dict(d.get("bundle_plan") or {}),
             error_message=d.get("error_message", ""),
         )
         pair.items = [PairItem.from_dict(i) for i in d.get("items", [])]

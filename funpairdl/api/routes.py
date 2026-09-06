@@ -9,6 +9,7 @@ from funpairdl import __version__
 from funpairdl.api.schemas import (
     AddLinkRequest,
     AddPairRequest,
+    BundlePlanRequest,
     PairStatusResponse,
     ProbeRequest,
     QueueStatusResponse,
@@ -101,6 +102,7 @@ async def add_pair(req: AddPairRequest) -> dict:
         groups=groups_payload,
         filenames=req.filenames,
         sizes=req.sizes,
+        bundle_plan=req.bundle_plan,
     )
 
     logger.info("Pair added via API: %s (%d items)", pair.name, len(pair.items))
@@ -212,6 +214,57 @@ async def _sync_resolve_cookies(resp, original_cookie_str: str | None) -> None:
 
         # Locked read-modify-write — see /pair's cookie save.
         await asyncio.to_thread(Settings.update, _apply)
+
+
+@router.post("/bundle/plan")
+async def bundle_plan(req: BundlePlanRequest) -> dict:
+    """Preview how a bundle's files split into pairs — the same code the
+    queue runs at download time, so what the panel shows is what happens.
+    ``split`` is False when the files stay one pair (single video, mirrors).
+    """
+    from funpairdl.core.pair import FileType, PairItem
+
+    qm = _get_qm()
+    items: list[PairItem] = []
+    hints: dict[str, str] = {}
+    durations: dict[str, float] = {}
+    links: dict[str, str] = {}
+    for v in req.videos:
+        items.append(PairItem(
+            url=v.url, file_type=FileType.VIDEO,
+            filename=v.name or qm._guess_filename(v.url, "video")))
+        if v.hints:
+            hints[v.url] = v.hints
+        if v.duration:
+            durations[v.url] = float(v.duration)
+    for s in req.scripts:
+        items.append(PairItem(
+            url=s.url, file_type=FileType.FUNSCRIPT,
+            filename=s.name or qm._guess_filename(s.url, "funscript")))
+        if s.duration:
+            durations[s.url] = float(s.duration)
+        if s.link:
+            links[s.url] = s.link
+    groups = qm.plan_bundle_split(
+        items, None, req.name or "", hints=hints, durations=durations, links=links)
+    if not groups:
+        return {"split": False, "groups": []}
+    return {
+        "split": True,
+        "groups": [
+            {
+                "name": g["name"],
+                "videos": [i.url for i in g["videos"]],
+                "scripts": [i.url for i in g["scripts"]],
+                # How the scripts got here — the panel shows a confidence
+                # tag so a guessed pairing looks different from a named one.
+                "basis": g.get("basis", ""),
+                "script_basis": {i.url: g.get("script_basis", {}).get(i.url, "")
+                                 for i in g["scripts"]},
+            }
+            for g in groups
+        ],
+    }
 
 
 @router.post("/probe")

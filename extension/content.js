@@ -46,6 +46,9 @@ const VIDEO_PRIORITY = {
   // HMV-specific sites
   "hmvmania.com": 7,
   "socigames.com": 7,
+  // Booru animation posts (webm + mp4 transcodes via JSON API)
+  "e621.net": 7,
+  "e926.net": 7,
   // Adult video sites (yt-dlp supported)
   "pornhub.com": 8,
   "xvideos.com": 8,
@@ -74,9 +77,9 @@ const AXIS_SUFFIXES = [
   "pump", "stroke", "suck", "valve", "lube",
   "L0", "L1", "L2", "L3", "R0", "R1", "R2", "V0", "V1", "V2", "A0", "A1", "A2",
 ];
-const AXIS_REGEX_KNOWN = new RegExp(`\\.(${AXIS_SUFFIXES.join("|")})\\.funscript$`, "i");
-// Broader pattern: any .word.funscript where word is alphanumeric (catches custom axes like .suckManual)
-const AXIS_REGEX_ANY = /\.([a-zA-Z][a-zA-Z0-9]{1,30})\.funscript$/;
+const AXIS_SUFFIX_SET = new Set(AXIS_SUFFIXES.map((s) => s.toLowerCase()));
+// Spellings of the main (stroke) axis — shown as "main", never as an axis tag.
+const AXIS_MAIN_ALIASES = new Set(["l0", "stroke"]);
 
 // ─── Utility functions ───
 
@@ -131,8 +134,50 @@ const NON_VIDEO_HOSTS = [
   "uptimerobot.com",
 ];
 
+// A heading that is literally a video filename ("Work_longer.mp4") — how a
+// file host's onebox card titles itself when a commenter posts a longer or
+// upscaled cut. Its link is the video even though the host is unknown.
+const VIDEO_FILE_HEADING_RE = /\.(mp4|mkv|webm|mov|avi|m4v|wmv)\s*$/i;
+
 function _isVideoLinkHeadingText(text) {
-  return VIDEO_LINK_HEADING_RE.test((text || "").trim());
+  const t = (text || "").trim();
+  return VIDEO_LINK_HEADING_RE.test(t) || VIDEO_FILE_HEADING_RE.test(t);
+}
+
+// A work name taken from a heading, or "" when the heading is a generic
+// label ("Video link", "Downloads") rather than the work's name. A trailing
+// video extension is dropped so "Work_longer.mp4" names a folder
+// "Work_longer".
+function _cleanWorkName(text) {
+  const t = (text || "").trim().replace(VIDEO_FILE_HEADING_RE, "").trim();
+  if (!t || _isGenericSectionName(t) || VIDEO_LINK_HEADING_RE.test(t)) return "";
+  return t;
+}
+
+// Name of the work a video link belongs to: its owning heading — the last
+// heading before the link, or the onebox <h3> that wraps the link itself.
+function _workNameFromHeading(cookedEl, url) {
+  let link = null;
+  try {
+    for (const a of cookedEl.querySelectorAll("a[href]")) {
+      if (a.getAttribute("href") !== url) continue;
+      // A onebox card links its URL twice: a small source link at the top
+      // and the <h3> title. The title IS the work name — take it directly
+      // rather than the heading that happens to precede the source link
+      // (that is the previous work's).
+      const inHeading = a.closest("h1,h2,h3,h4,h5,h6");
+      if (inHeading) return _cleanWorkName(inHeading.textContent);
+      if (!link) link = a;
+    }
+  } catch (e) { return ""; }
+  if (!link) return "";
+  const headings = cookedEl.querySelectorAll("h1,h2,h3,h4,h5,h6");
+  for (let i = headings.length - 1; i >= 0; i--) {
+    if (headings[i].compareDocumentPosition(link) & Node.DOCUMENT_POSITION_FOLLOWING) {
+      return _cleanWorkName(headings[i].textContent);
+    }
+  }
+  return "";
 }
 
 // Whether an UNKNOWN-host link may be offered as a video candidate: a real
@@ -216,6 +261,7 @@ function getVideoLabel(url) {
     if (host.includes("hanime")) return "Hanime1";
     if (host.includes("hmvmania")) return "HMV Mania";
     if (host.includes("socigames")) return "SociGames";
+    if (host.includes("e621") || host.includes("e926")) return "e621";
     if (host.includes("pornhub")) return "PornHub";
     if (host.includes("xvideos")) return "XVideos";
     if (host.includes("xnxx")) return "XNXX";
@@ -234,14 +280,44 @@ function getVideoLabel(url) {
   } catch (e) { return "Direct"; }
 }
 
+// Mirrors the backend's _parse_axis: scan the dot-components before
+// ".funscript" right→left for a known axis ("X.raw.pitch" → pitch,
+// "X.L0.max" → main). Any other word (".raw", ".final", ".suckManual") is
+// part of the name, not an axis — the backend files such a script as the
+// main (L0) script, so the panel must say "main" too. The old "any
+// .word.funscript is an axis" fallback labelled "Title.raw.funscript" as a
+// "raw" axis and left the pair with no main script in the UI.
 function detectAxis(filename) {
-  // Try known axes first (exact match)
-  const known = filename.match(AXIS_REGEX_KNOWN);
-  if (known) return known[1].toLowerCase();
-  // Fall back to any .word.funscript pattern (custom axes like .suckManual)
-  const any = filename.match(AXIS_REGEX_ANY);
-  if (any) return any[1];
+  const stem = (filename || "").trim().replace(/\.funscript$/i, "");
+  const parts = stem.split(".");
+  for (let i = parts.length - 1; i >= 1; i--) {
+    const p = parts[i].trim().toLowerCase();
+    if (!AXIS_SUFFIX_SET.has(p)) continue;
+    return AXIS_MAIN_ALIASES.has(p) ? "main" : p;
+  }
+  // A word axis with a qualifier glued on (".suckManual", ".twist_v2") is
+  // still that axis — the backend files it under the axis, keeping the
+  // full component as the suffix. Shown with the scripter's own spelling.
+  for (let i = parts.length - 1; i >= 1; i--) {
+    const axis = _axisFromPrefixed(parts[i].trim());
+    if (axis) return axis;
+  }
   return "main";
+}
+
+// "suckManual" → "suckManual" (an axis label), "rolling" → "" (not one): a
+// known word axis (3+ letters, not the L0/R1 codes) followed by a qualifier
+// starting with an uppercase letter, digit or separator.
+function _axisFromPrefixed(part) {
+  const low = part.toLowerCase();
+  for (const word of AXIS_SUFFIX_SET) {
+    if (word.length < 3 || !/^[a-z]+$/.test(word)) continue;
+    if (low.length > word.length && low.startsWith(word)) {
+      const rest = part.slice(word.length);
+      if (/^[A-Z0-9_\- ]/.test(rest)) return AXIS_MAIN_ALIASES.has(word) ? "main" : part;
+    }
+  }
+  return "";
 }
 
 /**
@@ -286,6 +362,47 @@ function getTopicTitle() {
   const h1 = document.querySelector("h1");
   if (h1) return h1.textContent.trim();
   return document.title.replace(" - Scripts / Free Scripts - EroScripts", "").trim();
+}
+
+// Seconds → "m:ss" / "h:mm:ss"; "" when unknown.
+function formatDuration(sec) {
+  const s = Math.round(Number(sec) || 0);
+  if (s <= 0) return "";
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const r = s % 60;
+  return h > 0
+    ? `${h}:${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`
+    : `${m}:${String(r).padStart(2, "0")}`;
+}
+
+// Why a script sits with a video (see plan_bundle_split's basis): label +
+// colour. Green = certain, blue = inferred, orange = a positional guess.
+const _BASIS_LABEL = {
+  plan: ["手動", "#2e9e6a"],
+  name: ["名稱", "#2e9e6a"],
+  link: ["腳本註記", "#2e9e6a"],
+  tokens: ["關鍵字/tags", "#4a90d9"],
+  duration: ["時長", "#4a90d9"],
+  order: ["順序(猜測)", "#c2842a"],
+  none: ["未配對", "#666"],
+};
+const _BASIS_RANK = { none: 0, order: 1, duration: 2, tokens: 3, link: 4, name: 5, plan: 6 };
+
+function _basisTagHTML(basis) {
+  const e = _BASIS_LABEL[basis];
+  if (!e) return "";
+  return `<span class="funpairdl-tag-basis" style="background:${e[1]}" title="這組配對的依據">${e[0]}</span>`;
+}
+
+// The weakest basis among a group's scripts is the group's.
+function _weakestBasis(list) {
+  let best = "";
+  for (const b of list || []) {
+    if (!b) continue;
+    if (!best || (_BASIS_RANK[b] ?? 0) < (_BASIS_RANK[best] ?? 0)) best = b;
+  }
+  return best;
 }
 
 function formatSize(bytes) {
@@ -729,6 +846,102 @@ function _isGenericSectionName(name) {
   );
 }
 
+// ─── Collection mode: hand orphan scripts to the video section they name ───
+//
+// A common OP layout is one heading per work (each with its video link) and
+// then ONE generic "Script"/"Downloads" heading holding every funscript.
+// Section parsing faithfully yields N video-only sections plus a script-only
+// section, which would send N videos without scripts and a pile of scripts
+// without a video. Scripts are named after the work, so match each one to
+// the section whose heading it contains and move it there.
+
+// Encoding noise that appears in filenames but never identifies a work.
+const _NAME_NOISE_RE =
+  /(?<![a-z0-9])(?:\d{3,4}p|[248]k|\d{1,3}\s?fps|h\.?26[45]|x26[45]|hevc|av1|no[-_ ]?wm|wm)(?![a-z0-9])/g;
+
+function _squashName(s) {
+  return (s || "").toLowerCase().replace(_NAME_NOISE_RE, " ").replace(/[^a-z0-9]+/g, "");
+}
+
+function _nameTokens(s) {
+  return new Set(
+    (s || "").toLowerCase().replace(_NAME_NOISE_RE, " ")
+      .split(/[^a-z0-9]+/).filter((t) => t.length >= 3));
+}
+
+// Squashed forms of a heading and of each "A / B", "A | B", "A - B",
+// "A [B]" part of it. A script whose squashed stem contains one of these
+// belongs to that heading.
+function _sectionNameKeys(name) {
+  const keys = new Set();
+  const parts = (name || "").split(/\s*(?:\/|\||—|–|:|[\[\]()])\s*|\s+-\s+/);
+  for (const p of parts) {
+    const sq = _squashName(p);
+    if (sq.length >= 4) keys.add(sq);
+  }
+  const whole = _squashName(name);
+  if (whole.length >= 4) keys.add(whole);
+  return keys;
+}
+
+// Pure: returns the sections with every script from a generic-named,
+// video-less section moved into the video section it names. Scripts that
+// name no section (or name several equally) stay put; an emptied donor
+// section is dropped. Scoring: a heading key found inside the script name
+// wins by key length; else a distinctive (unique-to-one-section, 4+ char)
+// heading word equal to a script word. Keys/words shared by 2+ video
+// sections (series name, author) never decide.
+function _distributeOrphanScripts(sections) {
+  const videoSecs = sections.filter((s) => s.videos.length > 0);
+  if (videoSecs.length < 2) return sections;
+  const donors = sections.filter(
+    (s) => s.videos.length === 0 && s.scripts.length > 0 && _isGenericSectionName(s.name));
+  if (donors.length === 0) return sections;
+
+  const keyDf = {};
+  const tokDf = {};
+  const info = videoSecs.map((s) => {
+    const keys = _sectionNameKeys(s.name);
+    const toks = _nameTokens(s.name);
+    for (const k of keys) keyDf[k] = (keyDf[k] || 0) + 1;
+    for (const t of toks) tokDf[t] = (tokDf[t] || 0) + 1;
+    return { s, keys, toks };
+  });
+
+  function _match(filename) {
+    const stem = (filename || "").replace(/\.funscript$/i, "");
+    const sq = _squashName(stem);
+    const toks = _nameTokens(stem);
+    let best = null, bestScore = 0, tie = false;
+    for (const { s, keys, toks: stoks } of info) {
+      let score = 0;
+      for (const k of keys) {
+        if (keyDf[k] === 1 && sq.includes(k)) score = Math.max(score, k.length);
+      }
+      if (!score) {
+        for (const t of stoks) {
+          if (t.length >= 4 && tokDf[t] === 1 && toks.has(t)) score = Math.max(score, t.length);
+        }
+      }
+      if (!score) continue;
+      if (score > bestScore) { best = s; bestScore = score; tie = false; }
+      else if (score === bestScore) tie = true;
+    }
+    return tie ? null : best;
+  }
+
+  for (const d of donors) {
+    const keep = [];
+    for (const sc of d.scripts) {
+      const target = _match(sc.filename);
+      if (!target) { keep.push(sc); continue; }
+      if (!target.scripts.some((x) => x.url === sc.url)) target.scripts.push(sc);
+    }
+    d.scripts = keep;
+  }
+  return sections.filter((s) => s.videos.length > 0 || s.scripts.length > 0);
+}
+
 // ─── Per-post in-DOM pairing helpers (for auto-grouping) ───
 
 /**
@@ -761,7 +974,15 @@ function _buildUrlOrdinalMap(cookedEl, elIndex) {
     const href = link.getAttribute("href");
     if (!href || map.has(href)) return;
     const ord = elIndex.get(link);
-    if (ord !== undefined) map.set(href, ord);
+    if (ord === undefined) return;
+    map.set(href, ord);
+    // Uploaded scripts are extracted with an absolute URL while the DOM
+    // href is site-relative ("/uploads/short-url/…"); without this alias
+    // every script looked unplaceable and all fell to the first video.
+    if (href.startsWith("/")) {
+      const abs = `https://discuss.eroscripts.com${href}`;
+      if (!map.has(abs)) map.set(abs, ord);
+    }
   });
   cookedEl.querySelectorAll("code").forEach((code) => {
     const text = code.textContent.trim();
@@ -790,29 +1011,105 @@ function _urlOrdinal(ordMap, url) {
  *                    the first sub-group.
  */
 function _pairWithinPost(cookedEl, videos, scripts) {
+  // Each sub-group carries the work name its video's heading gives it ("" when
+  // there is none) — collection mode shows comment sub-groups as sections.
   if (videos.length === 0) {
-    return scripts.length > 0 ? [{ videos: [], scripts }] : [];
+    return scripts.length > 0 ? [{ name: "", videos: [], scripts }] : [];
   }
   if (videos.length === 1) {
-    return [{ videos, scripts }];
+    return [{ name: _workNameFromHeading(cookedEl, videos[0].url), videos, scripts }];
   }
 
   const elIndex = _buildElementIndex(cookedEl);
   const ordMap = _buildUrlOrdinalMap(cookedEl, elIndex);
   const videoOrds = videos.map((v) => _urlOrdinal(ordMap, v.url));
+  const scriptOrds = scripts.map((s) => _urlOrdinal(ordMap, s.url));
   const buckets = videos.map(() => []);
 
-  for (const s of scripts) {
-    const sOrd = _urlOrdinal(ordMap, s.url);
+  // Posts lay works out consistently: "video, its script, next video, its
+  // script…" or the reverse. A video's ordinal is its first link — for a
+  // onebox card that is the card's top — so the script after a card sits
+  // nearer the NEXT card's top than its own card's; plain nearest-ordinal
+  // would pair every script with the following video. Decide the layout
+  // from whichever comes first, then walk in that direction.
+  const firstV = Math.min(...videoOrds.filter(Number.isFinite), Infinity);
+  const firstS = Math.min(...scriptOrds.filter(Number.isFinite), Infinity);
+  const videoFirst = firstV <= firstS;
+
+  function _nearest(sOrd) {
     let best = 0;
     let bestDist = Math.abs(sOrd - videoOrds[0]);
     for (let i = 1; i < videoOrds.length; i++) {
       const d = Math.abs(sOrd - videoOrds[i]);
       if (d < bestDist) { bestDist = d; best = i; }
     }
-    buckets[best].push(s);
+    return best;
   }
-  return videos.map((v, i) => ({ videos: [v], scripts: buckets[i] }));
+
+  scripts.forEach((s, si) => {
+    const sOrd = scriptOrds[si];
+    let pick = -1;
+    if (Number.isFinite(sOrd)) {
+      if (videoFirst) {
+        // Last video above the script.
+        for (let i = 0; i < videoOrds.length; i++) {
+          if (Number.isFinite(videoOrds[i]) && videoOrds[i] <= sOrd) pick = i;
+        }
+      } else {
+        // First video below the script.
+        for (let i = 0; i < videoOrds.length; i++) {
+          if (Number.isFinite(videoOrds[i]) && videoOrds[i] >= sOrd) { pick = i; break; }
+        }
+      }
+    }
+    if (pick < 0) pick = _nearest(sOrd);
+    buckets[pick].push(s);
+  });
+  return videos.map((v, i) => ({
+    name: _workNameFromHeading(cookedEl, v.url), videos: [v], scripts: buckets[i],
+  }));
+}
+
+// Collection mode: each comment post's in-post pairing becomes its own
+// section ("#7 @user"), so a commenter's alternate cuts are offered as
+// separate works instead of one flat Comments pile. Entries are indices into
+// the deduped comment arrays — the row keys "cv-N"/"cs-N" are those indices
+// — and a URL already claimed by an earlier group is not listed twice.
+function _buildCommentGroups(perPost, commentVideos, commentScripts) {
+  const vIdx = new Map(commentVideos.map((v, i) => [v.url, i]));
+  const sIdx = new Map(commentScripts.map((s, i) => [s.url, i]));
+  const usedV = new Set();
+  const usedS = new Set();
+  const groups = [];
+  for (const p of perPost) {
+    if (p.isOP) continue;
+    for (const sg of p.subGroups) {
+      const videos = [];
+      const scripts = [];
+      for (const v of sg.videos) {
+        const i = vIdx.get(v.url);
+        if (i !== undefined && !usedV.has(i)) { usedV.add(i); videos.push(i); }
+      }
+      for (const s of sg.scripts) {
+        const i = sIdx.get(s.url);
+        if (i !== undefined && !usedS.has(i)) { usedS.add(i); scripts.push(i); }
+      }
+      if (videos.length === 0 && scripts.length === 0) continue;
+      groups.push({
+        id: `c${groups.length}`,
+        name: sg.name || "",
+        label: `#${p.postNumber}${p.username ? ` @${p.username}` : ""}`,
+        videos, scripts,
+      });
+    }
+  }
+  // Defensive: anything no post claimed still gets a row.
+  const restV = commentVideos.map((_, i) => i).filter((i) => !usedV.has(i));
+  const restS = commentScripts.map((_, i) => i).filter((i) => !usedS.has(i));
+  if (restV.length || restS.length) {
+    groups.push({ id: `c${groups.length}`, name: "", label: "Comments", videos: restV, scripts: restS });
+  }
+  return groups;
 }
 
 // ─── Main parser ───
@@ -872,8 +1169,9 @@ function parseAllPosts(rootOverride, titleOverride, metaMapOverride) {
   const title = titleOverride || getTopicTitle();
   const opCooked = posts[0]?.querySelector(".cooked");
 
-  // Try section-based parsing on OP
-  const sections = opCooked ? parseOPSections(opCooked) : [];
+  // Try section-based parsing on OP. Scripts parked under a generic
+  // "Script" heading are handed to the work sections they name first.
+  const sections = opCooked ? _distributeOrphanScripts(parseOPSections(opCooked)) : [];
 
   // Walk every post (including OP) building both:
   //   - flat comment* arrays for the existing collection mode UI
@@ -947,12 +1245,15 @@ function parseAllPosts(rootOverride, titleOverride, metaMapOverride) {
   if (sections.length >= 2) {
     const sectionsWithVideos = sections.filter(s => s.videos.length > 0);
     if (sectionsWithVideos.length >= 2) {
+      const cVideos = dedupArr(commentVideos);
+      const cScripts = dedupArr(commentScripts);
       return {
         mode: "collection",
         title,
         sections,
-        commentVideos: dedupArr(commentVideos),
-        commentScripts: dedupArr(commentScripts),
+        commentVideos: cVideos,
+        commentScripts: cScripts,
+        commentGroups: _buildCommentGroups(perPost, cVideos, cScripts),
       };
     }
     // Single video (or no video) across sections → flatten to single mode
@@ -1117,6 +1418,8 @@ const _PROBE_CACHE_MAX = 500;
 // re-uploaded to a new size/name). Entries older than this count as misses; the
 // backend's own 600 s cache absorbs the re-probe cost.
 const _PROBE_CACHE_TTL_MS = 30 * 60 * 1000;
+// One automatic re-probe after a failure (see setupProbing._retryLater).
+const PROBE_RETRY_DELAY_MS = 6000;
 const _probeCache = new Map();     // url → { ts, value } successful probe response
 const _probeInflight = new Map();  // url → pending Promise (dedup concurrent)
 const _probeSizeByUrl = new Map(); // url → { ts, value } probed byte size (send-pair "sizes")
@@ -1227,12 +1530,14 @@ async function sendPairToServer(data) {
       script_authors: g.scriptAuthors || {},
       filenames: g.filenames || {},
       sizes: g.sizes || {},   // probed byte sizes {url: bytes}, >0 only
+      bundle_plan: g.bundlePlan || {},  // bundle file url → sub-group label
       inherit_multi_axis: g.inheritMultiAxis !== false,
       display_name: (g.displayName || "").trim(),
     }));
   } else {
     payload.video_urls = data.videoUrls || [];
     payload.script_urls = data.scriptUrls || [];
+    if (data.bundlePlan && Object.keys(data.bundlePlan).length > 0) payload.bundle_plan = data.bundlePlan;
     if (data.scriptAuthors && Object.keys(data.scriptAuthors).length > 0) {
       payload.script_authors = data.scriptAuthors;
     }
@@ -1263,8 +1568,19 @@ async function checkServer() {
 // into). Collection-mode sections have no group bodies, so dragging is moot.
 function _dragHandleHTML(withHandle) {
   return withHandle
-    ? `<span class="funpairdl-drag-handle" draggable="true" title="拖曳到群組(可先勾選多個一起拖)">⠿</span>`
+    ? `<span class="funpairdl-drag-handle" draggable="true" title="拖曳到其他群組(按住 Ctrl 或 Shift 拖曳可把勾選的列一起帶走)">⠿</span>`
     : "";
+}
+
+// Host tag pinned to the right of a row. The row's main text starts as the
+// host label but showProbeExtras() swaps it for the probed filename, so
+// without this tag the source vanishes once a probe lands.
+function _sourceTagHTML(url, label) {
+  let text = (label || "").trim();
+  if (!text) {
+    try { text = new URL(url).hostname.replace("www.", ""); } catch (e) {}
+  }
+  return text ? `<span class="funpairdl-tag-source">${escapeAttr(text)}</span>` : "";
 }
 
 function renderVideoItem(v, idx, namePrefix, checked, withHandle = false) {
@@ -1279,6 +1595,7 @@ function renderVideoItem(v, idx, namePrefix, checked, withHandle = false) {
       <span class="funpairdl-label">${escapeAttr(v.label)}</span>
       ${bundleTag}
       <span class="funpairdl-size" data-probe="${namePrefix}-${idx}"></span>
+      ${_sourceTagHTML(v.url, v.label)}
       <span class="funpairdl-priority">P${Math.floor(v.priority)}</span>
     </label>`;
 }
@@ -1299,6 +1616,7 @@ function renderScriptItem(s, idx, namePrefix, checked, withHandle = false) {
       <span class="funpairdl-label">${safe}</span>
       ${axisTag}${externalTag}
       <span class="funpairdl-size" data-probe="${namePrefix}-${idx}"></span>
+      ${s.isExternal ? _sourceTagHTML(s.url, getVideoLabel(s.url)) : ""}
     </label>`;
 }
 
@@ -1433,6 +1751,8 @@ function _moveItemToGroup(panel, parsed, item, targetGroup) {
   // leaves the row's selector showing the group it now lives in.
   const sel = item.querySelector(".funpairdl-item-group-select");
   if (sel && sel.value !== targetGroup) sel.value = targetGroup;
+  // Main's membership changed → the pairing preview must follow.
+  _scheduleWorkPlan(panel, parsed);
 }
 
 /** Re-render all group blocks (called on add/remove group). */
@@ -1465,6 +1785,8 @@ function _rerenderGroupBlocks(panel, parsed) {
 
   _attachGroupBlockEvents(panel, parsed);
   _updateInheritancePreviews(panel, parsed);
+  // The pairing preview lived inside Main's block, which was just rebuilt.
+  _scheduleWorkPlan(panel, parsed);
 }
 
 // Kept as an alias for the shared attribute escaper defined at the top.
@@ -1697,6 +2019,10 @@ function buildCollectionPanelHTML(parsed) {
       <input type="checkbox" id="funpairdl-select-all" checked>
       <span class="funpairdl-label" style="font-weight:700">Select All (${parsed.sections.length} sections)</span>
     </label>
+    <button id="funpairdl-add-section" class="funpairdl-add-alt-btn funpairdl-add-section-btn" type="button"
+            title="建立一個空群組;把列拖進去,送出時就是獨立的一組">+ 新增群組</button>
+    <button id="funpairdl-reset-layout" class="funpairdl-add-alt-btn funpairdl-add-section-btn" type="button"
+            title="把所有列送回解析出的原段落,並移除自建群組">還原編排</button>
   </div>`;
 
   parsed.sections.forEach((section, si) => {
@@ -1713,10 +2039,13 @@ function buildCollectionPanelHTML(parsed) {
       </div>
       <div class="funpairdl-section-body" style="display:none">`;
 
+    // Rows carry a grip in collection mode too: sections are only as good
+    // as the OP's headings, so the user can drag a script (or video) into
+    // the section it really belongs to before sending.
     if (vCount > 0) {
       html += `<div class="funpairdl-subsection-title">Videos</div>`;
       section.videos.forEach((v, vi) => {
-        html += renderVideoItem(v, vi, `sv-${si}`, vi === 0);
+        html += renderVideoItem(v, vi, `sv-${si}`, vi === 0, true);
       });
     }
     if (sCount > 0) {
@@ -1742,7 +2071,7 @@ function buildCollectionPanelHTML(parsed) {
               <span class="funpairdl-author-count">${items.length} scripts</span>
             </div>`;
           items.forEach(({ s, idx }) => {
-            html += renderScriptItem(s, idx, `ss-${si}`, isFirstAuthor);
+            html += renderScriptItem(s, idx, `ss-${si}`, isFirstAuthor, true);
           });
           html += `</div>`;
           isFirstAuthor = false;
@@ -1750,7 +2079,7 @@ function buildCollectionPanelHTML(parsed) {
       } else {
         html += `<div class="funpairdl-subsection-title">Scripts</div>`;
         section.scripts.forEach((s, si2) => {
-          html += renderScriptItem(s, si2, `ss-${si}`, true);
+          html += renderScriptItem(s, si2, `ss-${si}`, true, true);
         });
       }
     }
@@ -1758,26 +2087,126 @@ function buildCollectionPanelHTML(parsed) {
     html += `</div></div>`;
   });
 
-  // Comment items (if any)
-  if (parsed.commentVideos.length > 0 || parsed.commentScripts.length > 0) {
-    html += `<div class="funpairdl-section-group" data-section="comments">
-      <div class="funpairdl-section-header">
-        <input type="checkbox" class="funpairdl-section-cb" data-section="comments">
-        <span class="funpairdl-section-toggle" data-section="comments">▸</span>
-        <span class="funpairdl-section-name">Comments</span>
-        <span class="funpairdl-section-count">${parsed.commentVideos.length}V + ${parsed.commentScripts.length}S</span>
-      </div>
-      <div class="funpairdl-section-body" style="display:none">`;
-    parsed.commentVideos.forEach((v, i) => {
-      html += renderVideoItem(v, i, "cv", false);
-    });
-    parsed.commentScripts.forEach((s, i) => {
-      html += renderScriptItem(s, i, "cs", false);
-    });
-    html += `</div></div>`;
+  // Comment posts: one section per in-post pairing, unchecked by default.
+  // Row keys stay "cv-N"/"cs-N" (indices into the flat comment arrays).
+  for (const g of (parsed.commentGroups || [])) {
+    let body = "";
+    if (g.videos.length > 0) {
+      body += `<div class="funpairdl-subsection-title">Videos</div>`;
+      for (const i of g.videos) body += renderVideoItem(parsed.commentVideos[i], i, "cv", false, true);
+    }
+    if (g.scripts.length > 0) {
+      body += `<div class="funpairdl-subsection-title">Scripts</div>`;
+      for (const i of g.scripts) body += renderScriptItem(parsed.commentScripts[i], i, "cs", false, true);
+    }
+    html += _collectionGroupHTML(
+      g.id, escapeAttr(g.name || g.label), g.name ? escapeAttr(g.label) : "",
+      `${g.videos.length}V + ${g.scripts.length}S`, body, false, {});
   }
 
   return html;
+}
+
+// One collapsible section block. `opts.editable` renders the name as a text
+// input (user-created groups), `opts.removable` adds a ✕, `opts.open`
+// starts it expanded.
+function _collectionGroupHTML(id, titleHtml, subLabelHtml, countText, bodyHtml, checked, opts) {
+  const o = opts || {};
+  const nameCell = o.editable
+    ? `<input type="text" class="funpairdl-alt-name-input funpairdl-section-name-input" data-section="${id}"
+              placeholder="群組名稱(留空則用帖子標題)" value="${titleHtml}">`
+    : `<span class="funpairdl-section-name">${titleHtml}</span>`;
+  const sub = subLabelHtml ? `<span class="funpairdl-section-sub">${subLabelHtml}</span>` : "";
+  const remove = o.removable
+    ? `<button class="funpairdl-group-remove funpairdl-section-remove" data-section="${id}"
+               title="移除此群組,裡面的列送回原段落" type="button">✕</button>`
+    : "";
+  return `<div class="funpairdl-section-group" data-section="${id}">
+      <div class="funpairdl-section-header">
+        <input type="checkbox" class="funpairdl-section-cb" data-section="${id}" ${checked ? "checked" : ""}>
+        <span class="funpairdl-section-toggle" data-section="${id}">${o.open ? "▾" : "▸"}</span>
+        ${nameCell}${sub}
+        <span class="funpairdl-section-count">${countText}</span>${remove}
+      </div>
+      <div class="funpairdl-section-body" style="display:${o.open ? "block" : "none"}">${bodyHtml}</div>
+    </div>`;
+}
+
+// Folder/pair name for a section id: OP sections use their heading, comment
+// groups the work name their heading gave them, user groups what was typed.
+// Empty or generic ("Video link", "Downloads") → the topic title.
+function _collectionPairName(parsed, id) {
+  let name = "";
+  if (/^\d+$/.test(id)) name = (parsed.sections[parseInt(id)] || {}).name || "";
+  else if (id.startsWith("c")) name = ((parsed.commentGroups || []).find((g) => g.id === id) || {}).name || "";
+  else if (id.startsWith("x")) name = ((parsed.extraSections || []).find((g) => g.id === id) || {}).name || "";
+  name = name.trim();
+  return (!name || _isGenericSectionName(name)) ? parsed.title : name;
+}
+
+// Add an empty, user-named section (id "x1", "x2", …). Idempotent per id so
+// the batch card can replay saved groups.
+function _addCollectionSection(panel, parsed, name, id, focus) {
+  if (!parsed.extraSections) parsed.extraSections = [];
+  if (id) {
+    const existing = panel.querySelector(`.funpairdl-section-group[data-section="${id}"]`);
+    if (existing) return existing;
+  } else {
+    let n = 1;
+    while (parsed.extraSections.some((x) => x.id === `x${n}`) ||
+           panel.querySelector(`.funpairdl-section-group[data-section="x${n}"]`)) n++;
+    id = `x${n}`;
+  }
+  parsed.extraSections.push({ id, name: name || "" });
+  const tmp = document.createElement("div");
+  tmp.innerHTML = _collectionGroupHTML(id, escapeAttr(name || ""), "", "empty", "", true,
+    { editable: true, removable: true, open: true });
+  const group = tmp.firstElementChild;
+  const groups = panel.querySelectorAll(".funpairdl-section-group");
+  const last = groups[groups.length - 1];
+  const parent = last ? last.parentNode : panel.querySelector(".funpairdl-panel-body");
+  // Sit after the OP sections / earlier user groups, before comment groups.
+  const anchor = parent.querySelector('.funpairdl-section-group[data-section^="c"]');
+  if (anchor) parent.insertBefore(group, anchor); else parent.appendChild(group);
+  _wireCollectionGroup(panel, parsed, group);
+  updateSendButton(panel, parsed);
+  if (focus) {
+    const inp = group.querySelector(".funpairdl-section-name-input");
+    if (inp) inp.focus();
+  }
+  return group;
+}
+
+// Undo every drag move and drop every user group — the panel returns to
+// what parsing produced. Also the escape hatch for a saved arrangement the
+// batch card replays.
+function _resetCollectionLayout(panel, parsed) {
+  panel.querySelectorAll(".funpairdl-item[data-key]").forEach((row) => {
+    if (row.dataset.home) _moveItemToSection(panel, parsed, row, row.dataset.home);
+  });
+  for (const x of [...(parsed.extraSections || [])]) {
+    const group = panel.querySelector(`.funpairdl-section-group[data-section="${x.id}"]`);
+    if (group) group.remove();
+  }
+  parsed.extraSections = [];
+  parsed.sectionOverride = {};
+  _refreshSectionCounts(panel);
+  updateSendButton(panel, parsed);
+  panel.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+// Remove a user section; its rows go back to the section they were parsed in.
+function _removeCollectionSection(panel, parsed, id) {
+  const group = panel.querySelector(`.funpairdl-section-group[data-section="${id}"]`);
+  if (!group) return;
+  group.querySelectorAll(".funpairdl-item[data-key]").forEach((row) => {
+    _moveItemToSection(panel, parsed, row, row.dataset.home || "0");
+  });
+  group.remove();
+  parsed.extraSections = (parsed.extraSections || []).filter((x) => x.id !== id);
+  _refreshSectionCounts(panel);
+  updateSendButton(panel, parsed);
+  panel.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
 // ─── Create panel element ───
@@ -1863,6 +2292,10 @@ function setupProbing(panel, parsed) {
     } else {
       sizeEl.textContent = "";
     }
+    // Duration next to the size — the number a user can check a script
+    // against by eye.
+    const dur = formatDuration(info.duration);
+    if (dur) sizeEl.textContent = [sizeEl.textContent, dur].filter(Boolean).join(" · ");
     // Filename + bundle are handled by showProbeExtras()
   }
 
@@ -1890,22 +2323,11 @@ function setupProbing(panel, parsed) {
         const dropdown = document.createElement("div");
         dropdown.className = "funpairdl-bundle-files";
         dropdown.style.display = "none";
-        let listHtml = "";
-        for (const f of info.files) {
-          const fname = escapeAttr(f.name);
-          const fsize = f.size ? formatSize(f.size) : "";
-          const furl = escapeAttr(f.url || "");
-          listHtml += `<label class="funpairdl-bundle-file funpairdl-bundle-selectable" title="${fname}">
-            <input type="checkbox" class="funpairdl-bundle-cb"
-                   data-probe-key="${probeKey}"
-                   data-file-url="${furl}"
-                   data-file-name="${fname}" checked>
-            <span class="funpairdl-bundle-fname">${fname}</span>
-            <span class="funpairdl-bundle-fsize">${fsize}</span>
-          </label>`;
-        }
-        dropdown.innerHTML = listHtml;
+        dropdown.innerHTML = info.files.map((f) => _bundleFileRowHTML(f, probeKey)).join("");
         item.after(dropdown);
+        // Several works in one bundle: show how they will be split into
+        // pairs, as sub-groups the user can rearrange before sending.
+        _planBundleLayout(panel, parsed, dropdown, info.files, probeKey);
 
         let bundleTag = item.querySelector(".funpairdl-tag-bundle");
         if (!bundleTag) {
@@ -1926,19 +2348,40 @@ function setupProbing(panel, parsed) {
     }
   }
 
+  // A failed probe is often transient (a Cloudflare challenge, a dropped
+  // connection, a host that answers on the second try). Failures are never
+  // cached, so one delayed re-probe recovers those instead of leaving "?"
+  // until the panel is reopened.
+  const _retried = new Set();
+  function _retryLater(probeKey, fn) {
+    if (_retried.has(probeKey)) return false;
+    _retried.add(probeKey);
+    setTimeout(fn, PROBE_RETRY_DELAY_MS);
+    return true;
+  }
+
   function probeVideo(v, probeKey) {
     const sizeEl = panel.querySelector(`[data-probe="${probeKey}"]`);
     if (!sizeEl) return;
     sizeEl.textContent = "...";
     probeUrl(v.url).then((info) => {
-      if (!info) { sizeEl.textContent = "?"; return; }
+      if (!info) {
+        sizeEl.textContent = "?";
+        _retryLater(probeKey, () => probeVideo(v, probeKey));
+        return;
+      }
       probeResults[probeKey] = info;
       // A file-locker URL (pixeldrain /u/, mega /file/, ...) carries no type
       // hint, so a funscript hosted there is initially treated as a "video".
       // Remember the probed filename so send-time can re-route it to scripts.
       if (info.filename) v.probedFilename = info.filename;
+      if (Array.isArray(info.tags) && info.tags.length) v.probedTags = info.tags;
+      if (info.thumbnail) v.probedThumb = info.thumbnail;
+      if (info.duration) v.probedDuration = Number(info.duration) || 0;
       updateVideoSize(probeKey, info);
       showProbeExtras(sizeEl, probeKey, info);
+      _attachMediaHints(sizeEl.closest(".funpairdl-item"), info);
+      _scheduleWorkPlan(panel, parsed);
     });
   }
 
@@ -1947,10 +2390,18 @@ function setupProbing(panel, parsed) {
     if (!sizeEl) return;
     sizeEl.textContent = "...";
     const handleResult = (info) => {
-      if (!info) { sizeEl.textContent = "?"; return; }
+      if (!info) {
+        sizeEl.textContent = "?";
+        _retryLater(probeKey, () => probeScript(s, probeKey));
+        return;
+      }
       probeResults[probeKey] = info;
-      sizeEl.textContent = info.size ? formatSize(info.size) : "";
+      sizeEl.textContent = [info.size ? formatSize(info.size) : "", formatDuration(info.duration)]
+        .filter(Boolean).join(" · ");
+      if (info.duration) s.probedDuration = Number(info.duration) || 0;
+      if (info.video_url) s.probedLink = info.video_url;
       showProbeExtras(sizeEl, probeKey, info);
+      _scheduleWorkPlan(panel, parsed);
     };
     if (s.url.includes("discuss.eroscripts.com/uploads/short-url/")) {
       resolveShortUrl(s.url).then((resolved) => {
@@ -2016,55 +2467,75 @@ function setupProbing(panel, parsed) {
 
 // ─── Collection mode: section toggle/select logic ───
 
-function setupCollectionEvents(panel, parsed) {
-  // Section toggle (expand/collapse)
-  panel.querySelectorAll(".funpairdl-section-toggle").forEach((toggle) => {
+// Wire one section block: expand/collapse, section checkbox ⇄ its rows,
+// name editing and removal for user groups. Called for every block at panel
+// setup and again for each group added later.
+function _wireCollectionGroup(panel, parsed, group) {
+  const id = group.dataset.section;
+  const toggle = group.querySelector(".funpairdl-section-toggle");
+  const body = group.querySelector(".funpairdl-section-body");
+  const header = group.querySelector(".funpairdl-section-header");
+  const cb = group.querySelector(".funpairdl-section-cb");
+
+  if (toggle && body) {
     toggle.addEventListener("click", () => {
-      const si = toggle.dataset.section;
-      const body = panel.querySelector(`.funpairdl-section-group[data-section="${si}"] .funpairdl-section-body`);
-      if (!body) return;
       const visible = body.style.display !== "none";
       body.style.display = visible ? "none" : "block";
       toggle.textContent = visible ? "▸" : "▾";
     });
-  });
-
-  // Section header click (expand/collapse, excluding checkbox)
-  panel.querySelectorAll(".funpairdl-section-header").forEach((header) => {
+  }
+  if (header) {
     header.style.cursor = "pointer";
     header.addEventListener("click", (e) => {
-      if (e.target.tagName === "INPUT") return;
-      const toggle = header.querySelector(".funpairdl-section-toggle");
+      if (e.target.tagName === "INPUT" || e.target.tagName === "BUTTON") return;
       if (toggle) toggle.click();
     });
-  });
-
-  // Section checkbox → check/uncheck all items in section
-  panel.querySelectorAll(".funpairdl-section-cb").forEach((cb) => {
+  }
+  if (cb && body) {
+    // Section checkbox → check/uncheck every row in it
     cb.addEventListener("change", () => {
-      const si = cb.dataset.section;
-      const body = panel.querySelector(`.funpairdl-section-group[data-section="${si}"] .funpairdl-section-body`);
-      if (!body) return;
       body.querySelectorAll('input[type="checkbox"]').forEach((inner) => {
         inner.checked = cb.checked;
       });
       updateSendButton(panel, parsed);
     });
-  });
-
-  // Item checkbox → bubble up to section checkbox
-  panel.querySelectorAll(".funpairdl-section-body").forEach((body) => {
+    // Row checkbox → bubble up to the section checkbox
     body.addEventListener("change", (e) => {
       if (e.target.type !== "checkbox") return;
-      const group = body.closest(".funpairdl-section-group");
-      if (!group) return;
-      const sectionCb = group.querySelector(".funpairdl-section-cb");
-      if (!sectionCb) return;
-      const anyChecked = body.querySelector('input[type="checkbox"]:checked') !== null;
-      sectionCb.checked = anyChecked;
+      cb.checked = body.querySelector('input[type="checkbox"]:checked') !== null;
       updateSendButton(panel, parsed);
     });
-  });
+  }
+  const nameInp = group.querySelector(".funpairdl-section-name-input");
+  if (nameInp) {
+    nameInp.addEventListener("input", () => {
+      const ex = (parsed.extraSections || []).find((x) => x.id === id);
+      if (ex) ex.name = nameInp.value;
+    });
+  }
+  const rm = group.querySelector(".funpairdl-section-remove");
+  if (rm) {
+    rm.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      _removeCollectionSection(panel, parsed, id);
+    });
+  }
+}
+
+function setupCollectionEvents(panel, parsed) {
+  panel.querySelectorAll(".funpairdl-section-group")
+    .forEach((group) => _wireCollectionGroup(panel, parsed, group));
+
+  const addBtn = panel.querySelector("#funpairdl-add-section");
+  if (addBtn) {
+    addBtn.addEventListener("click", () => {
+      _addCollectionSection(panel, parsed, "", null, true);
+      panel.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  }
+  const resetBtn = panel.querySelector("#funpairdl-reset-layout");
+  if (resetBtn) resetBtn.addEventListener("click", () => _resetCollectionLayout(panel, parsed));
 
   // Select All checkbox
   const selectAll = panel.querySelector("#funpairdl-select-all");
@@ -2129,9 +2600,10 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
   // bucket first is to keep the group association after resolution.
   const buckets = {}; // groupName → { videoUrls, scriptUrls, scriptAuthorMap }
   function _bucket(g) {
-    if (!buckets[g]) buckets[g] = { videoUrls: [], scriptUrls: [], scriptAuthorMap: {}, filenames: {} };
+    if (!buckets[g]) buckets[g] = { videoUrls: [], scriptUrls: [], scriptAuthorMap: {}, filenames: {}, bundlePlan: {} };
     return buckets[g];
   }
+  const bundlePlan = panel._bundlePlan || {};
 
   panel.querySelectorAll('input[name="video"]:checked').forEach((cb) => {
     const idx = parseInt(cb.value);
@@ -2139,6 +2611,8 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
     const key = `video-${idx}`;
     const gname = (parsed.groupState && parsed.groupState.itemGroup[key]) || "Main";
     const b = _bucket(gname);
+    // Work group the row was placed in by the pairing preview (plain rows).
+    if (bundlePlan[video.url]) b.bundlePlan[video.url] = bundlePlan[video.url];
     const bundleCbs = panel.querySelectorAll(`.funpairdl-bundle-cb[data-probe-key="${key}"]`);
     if (bundleCbs.length > 0) {
       bundleCbs.forEach((bcb) => {
@@ -2150,6 +2624,8 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
           if (realName) b.filenames[bcb.dataset.fileUrl] = realName;
           if (fn.endsWith(".funscript")) b.scriptUrls.push(bcb.dataset.fileUrl);
           else b.videoUrls.push(bcb.dataset.fileUrl);
+          // The sub-group this file was placed in (see _renderBundleGroups).
+          if (bundlePlan[bcb.dataset.fileUrl]) b.bundlePlan[bcb.dataset.fileUrl] = bundlePlan[bcb.dataset.fileUrl];
         }
       });
     } else {
@@ -2179,6 +2655,7 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
     const b = _bucket(gname);
     b.scriptUrls.push(script.url);
     if (script.author) b.scriptAuthorMap[script.url] = script.author;
+    if (bundlePlan[script.url]) b.bundlePlan[script.url] = bundlePlan[script.url];
   });
 
   // Build groups list in the user-visible order; drop empties.
@@ -2205,6 +2682,11 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
     const resolvedSizes = {};
     resolvedV.forEach((u, i) => { const sz = _probedSizeFor(b.videoUrls[i], u); if (sz > 0) resolvedSizes[u] = sz; });
     resolvedS.forEach((u, i) => { const sz = _probedSizeFor(b.scriptUrls[i], u); if (sz > 0) resolvedSizes[u] = sz; });
+    // Work-group labels keyed by the resolved URL (a forum short-url
+    // resolves to the CDN URL the backend stores).
+    const resolvedPlan = {};
+    resolvedV.forEach((u, i) => { const lb = b.bundlePlan[b.videoUrls[i]]; if (lb) resolvedPlan[u] = lb; });
+    resolvedS.forEach((u, i) => { const lb = b.bundlePlan[b.scriptUrls[i]]; if (lb) resolvedPlan[u] = lb; });
     groups.push({
       name: gname,
       videoUrls: resolvedV,
@@ -2212,6 +2694,7 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
       scriptAuthors: resolvedAuthors,
       filenames: resolvedFilenames,
       sizes: resolvedSizes,
+      bundlePlan: resolvedPlan,
       inheritMultiAxis: (parsed.groupState && parsed.groupState.inheritAxes[gname] !== false),
       displayName: (parsed.groupState && parsed.groupState.altNames && parsed.groupState.altNames[gname]) || "",
     });
@@ -2248,24 +2731,83 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
   return { sent: 0, failed: 1, error: result.error || "send_failed" };
 }
 
+// Where a collection row was parsed from, by its checkbox name:
+// "sv-3"/"ss-3" → section 3, "cv"/"cs" → the Comments block.
+function _collectionItemOrigin(name) {
+  const m = /^s([vs])-(\d+)$/.exec(name || "");
+  if (m) return { kind: m[1] === "v" ? "video" : "script", section: m[2] };
+  if (name === "cv") return { kind: "video", section: "comments" };
+  if (name === "cs") return { kind: "script", section: "comments" };
+  return null;
+}
+
+// Pure: group checked collection rows by the section they should be sent
+// with — their parsed section unless a drag moved them (`overrides` maps
+// row key → target section id). Returns { sectionId: { videos, scripts } }
+// with each entry as { name, value, key }.
+function _bucketCollectionInputs(entries, overrides) {
+  const buckets = {};
+  for (const { name, value, section } of entries) {
+    const origin = _collectionItemOrigin(name);
+    if (!origin) continue;
+    const key = `${name}-${value}`;
+    const moved = overrides && overrides[key];
+    // Precedence: an explicit drag move, then the section the row's DOM sits
+    // in (comment rows render inside per-post groups), then the parsed origin.
+    let target = origin.section;
+    if (moved !== undefined && moved !== null) target = moved;
+    else if (section !== undefined && section !== null) target = section;
+    target = String(target);
+    if (!buckets[target]) buckets[target] = { videos: [], scripts: [] };
+    buckets[target][origin.kind === "video" ? "videos" : "scripts"]
+      .push({ name, value: parseInt(value), key });
+  }
+  return buckets;
+}
+
+function _collectionRowObject(parsed, name, value) {
+  const origin = _collectionItemOrigin(name);
+  if (!origin) return null;
+  if (origin.section === "comments") {
+    return origin.kind === "video" ? parsed.commentVideos[value] : parsed.commentScripts[value];
+  }
+  const section = parsed.sections[parseInt(origin.section)];
+  if (!section) return null;
+  return origin.kind === "video" ? section.videos[value] : section.scripts[value];
+}
+
 async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution, autoRename) {
-  // Gather all checked sections
   const pairs = [];
 
-  parsed.sections.forEach((section, si) => {
-    const sectionCb = panel.querySelector(`.funpairdl-section-cb[data-section="${si}"]`);
-    if (!sectionCb || !sectionCb.checked) return;
+  // Checked rows, bucketed by the section they sit in now (drag moves
+  // included). Every row keeps its original checkbox name/value, so probe
+  // results and bundle dropdowns stay attached wherever it was dropped.
+  const checked = [...panel.querySelectorAll('.funpairdl-item input[type="checkbox"][name]:checked')]
+    .map((cb) => {
+      const group = cb.closest(".funpairdl-section-group");
+      return { name: cb.name, value: cb.value, section: group ? group.dataset.section : undefined };
+    });
+  const buckets = _bucketCollectionInputs(checked, parsed.sectionOverride || {});
+  // Sections in on-screen order: OP sections, user groups, comment groups.
+  const targets = [...panel.querySelectorAll(".funpairdl-section-group")].map((g) => g.dataset.section);
+  const bundlePlanAll = panel._bundlePlan || {};
+
+  for (const target of targets) {
+    const bucket = buckets[target];
+    if (!bucket) continue;
+    const sectionCb = panel.querySelector(`.funpairdl-section-cb[data-section="${target}"]`);
+    if (!sectionCb || !sectionCb.checked) continue;
 
     const videoUrls = [];
     const scriptUrls = [];
     const scriptAuthorMap = {};
     const filenameMap = {};
+    const bundlePlan = {};
 
-    // Collect checked videos in this section
-    panel.querySelectorAll(`input[name="sv-${si}"]:checked`).forEach((cb) => {
-      const vi = parseInt(cb.value);
-      const v = section.videos[vi];
-      const bundleCbs = panel.querySelectorAll(`.funpairdl-bundle-cb[data-probe-key="sv-${si}-${vi}"]`);
+    for (const row of bucket.videos) {
+      const v = _collectionRowObject(parsed, row.name, row.value);
+      if (!v) continue;
+      const bundleCbs = panel.querySelectorAll(`.funpairdl-bundle-cb[data-probe-key="${row.key}"]`);
       if (bundleCbs.length > 0) {
         bundleCbs.forEach((bcb) => {
           if (bcb.checked) {
@@ -2274,6 +2816,7 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
             if (realName) filenameMap[bcb.dataset.fileUrl] = realName;
             if (fn.endsWith(".funscript")) scriptUrls.push(bcb.dataset.fileUrl);
             else videoUrls.push(bcb.dataset.fileUrl);
+            if (bundlePlanAll[bcb.dataset.fileUrl]) bundlePlan[bcb.dataset.fileUrl] = bundlePlanAll[bcb.dataset.fileUrl];
           }
         });
       } else {
@@ -2290,57 +2833,29 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
           videoUrls.push(v.url);
         }
       }
-    });
+    }
 
-    // Collect checked scripts in this section
-    panel.querySelectorAll(`input[name="ss-${si}"]:checked`).forEach((cb) => {
-      const script = section.scripts[parseInt(cb.value)];
+    for (const row of bucket.scripts) {
+      const script = _collectionRowObject(parsed, row.name, row.value);
+      if (!script) continue;
       scriptUrls.push(script.url);
       if (script.author) scriptAuthorMap[script.url] = script.author;
-    });
-
-    if (videoUrls.length > 0 || scriptUrls.length > 0) {
-      // Generic section heading ("Video link", "Downloads", "1080p", …) →
-      // borrow the topic title; a real work name → keep it as the folder name.
-      const pairName = _isGenericSectionName(section.name) ? parsed.title : section.name;
-
-      // Merge into existing pair with same name
-      const existing = pairs.find((p) => p.name === pairName);
-      if (existing) {
-        existing.videoUrls.push(...videoUrls);
-        existing.scriptUrls.push(...scriptUrls);
-        Object.assign(existing.scriptAuthorMap, scriptAuthorMap);
-        Object.assign(existing.filenameMap, filenameMap);
-      } else {
-        pairs.push({ name: pairName, videoUrls, scriptUrls, scriptAuthorMap, filenameMap });
-      }
     }
-  });
 
-  // Also check comment section
-  const commentCb = panel.querySelector('.funpairdl-section-cb[data-section="comments"]');
-  if (commentCb && commentCb.checked) {
-    const cVideoUrls = [];
-    const cScriptUrls = [];
-    const cScriptAuthorMap = {};
-    panel.querySelectorAll('input[name="cv"]:checked').forEach((cb) => {
-      cVideoUrls.push(parsed.commentVideos[parseInt(cb.value)].url);
-    });
-    panel.querySelectorAll('input[name="cs"]:checked').forEach((cb) => {
-      const script = parsed.commentScripts[parseInt(cb.value)];
-      cScriptUrls.push(script.url);
-      if (script.author) cScriptAuthorMap[script.url] = script.author;
-    });
-    if (cVideoUrls.length > 0 || cScriptUrls.length > 0) {
-      // Merge comment URLs into existing pair if possible
-      const existing = pairs.find((p) => p.name === parsed.title);
-      if (existing) {
-        existing.videoUrls.push(...cVideoUrls);
-        existing.scriptUrls.push(...cScriptUrls);
-        Object.assign(existing.scriptAuthorMap, cScriptAuthorMap);
-      } else {
-        pairs.push({ name: parsed.title, videoUrls: cVideoUrls, scriptUrls: cScriptUrls, scriptAuthorMap: cScriptAuthorMap, filenameMap: {} });
-      }
+    if (videoUrls.length === 0 && scriptUrls.length === 0) continue;
+
+    const pairName = _collectionPairName(parsed, target);
+
+    // Merge into existing pair with same name
+    const existing = pairs.find((p) => p.name === pairName);
+    if (existing) {
+      existing.videoUrls.push(...videoUrls);
+      existing.scriptUrls.push(...scriptUrls);
+      Object.assign(existing.scriptAuthorMap, scriptAuthorMap);
+      Object.assign(existing.filenameMap, filenameMap);
+      Object.assign(existing.bundlePlan, bundlePlan);
+    } else {
+      pairs.push({ name: pairName, videoUrls, scriptUrls, scriptAuthorMap, filenameMap, bundlePlan });
     }
   }
 
@@ -2390,6 +2905,7 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
       preferredResolution, scriptAuthors: resolvedAuthors, autoRename,
       filenames: resolvedFilenames,
       sizes: resolvedSizes,
+      bundlePlan: p.bundlePlan || {},
     });
 
     if (result.success) {
@@ -2556,6 +3072,15 @@ function _batchSaveCardState(card) {
       closeAfter: closeCb ? !!closeCb.checked : true,
       items: {},
       bundles: {},
+      // Collection rows dragged into another section (row key → section id)
+      // and the user-created groups they may have been dragged into.
+      moves: { ...((card._parsed && card._parsed.sectionOverride) || {}) },
+      extraSections: ((card._parsed && card._parsed.extraSections) || [])
+        .map((x) => ({ id: x.id, name: x.name || "" })),
+      // Bundle sub-group / work-group arrangement (url → label) and any
+      // empty work groups the user created.
+      bundlePlan: { ...((card._panel && card._panel._bundlePlan) || {}) },
+      workGroupsExtra: [...((card._panel && card._panel._workGroupsExtra) || [])],
     };
     if (card._panel) {
       card._panel.querySelectorAll('.funpairdl-item input[type="checkbox"][name]').forEach((cb) => {
@@ -2596,6 +3121,17 @@ function _batchApplyCardState(card, st) {
   if (!card._panel || !st) return;
   const items = st.items || {};
   const bundles = st.bundles || {};
+  // Replay drag moves first (no-op for rows already in place) so the
+  // checkbox states below land on rows in their final sections.
+  if (card._parsed && card._parsed.mode === "collection") {
+    for (const x of (st.extraSections || [])) {
+      if (x && x.id) _addCollectionSection(card._panel, card._parsed, x.name || "", x.id, false);
+    }
+    for (const [key, target] of Object.entries(st.moves || {})) {
+      const row = card._panel.querySelector(`.funpairdl-item[data-key="${key}"]`);
+      if (row) _moveItemToSection(card._panel, card._parsed, row, target);
+    }
+  }
   card._panel.querySelectorAll('.funpairdl-item input[type="checkbox"][name]').forEach((cb) => {
     const k = `${cb.name}-${cb.value}`;
     if (k in items) cb.checked = items[k];
@@ -2608,6 +3144,21 @@ function _batchApplyCardState(card, st) {
     const u = cb.dataset.fileUrl;
     if (u && u in bundles) cb.checked = bundles[u];
   });
+  // Bundle sub-groups: seed the plan so a dropdown rendered later honours
+  // it, and re-lay-out dropdowns that already exist.
+  if (st.bundlePlan && Object.keys(st.bundlePlan).length > 0) {
+    card._panel._bundlePlan = Object.assign(card._panel._bundlePlan || {}, st.bundlePlan);
+    card._panel.querySelectorAll(".funpairdl-bundle-files").forEach((dd) => {
+      _applyBundlePlanToDom(dd, card._panel._bundlePlan);
+    });
+  }
+  if (Array.isArray(st.workGroupsExtra) && st.workGroupsExtra.length > 0) {
+    card._panel._workGroupsExtra = [...st.workGroupsExtra];
+  }
+  if (card._parsed && card._parsed.mode === "single" &&
+      ((st.bundlePlan && Object.keys(st.bundlePlan).length > 0) || (st.workGroupsExtra || []).length > 0)) {
+    _scheduleWorkPlan(card._panel, card._parsed);
+  }
 }
 
 function _batchPruneSavedStates() {
@@ -2686,8 +3237,10 @@ async function _batchBuildCard(card, url) {
     populateSingleItems(panel, parsed);
     _setupSingleSelectAll(panel);
     _enableDragToGroup(panel, parsed);
+    _scheduleWorkPlan(panel, parsed);
   } else {
     setupCollectionEvents(panel, parsed);
+    _enableDragToSection(panel, parsed);
   }
   _enableDragSelect(panel);
   setupProbing(panel, parsed);
@@ -2943,16 +3496,15 @@ function _enableDragSelect(panel) {
 function _enableDragToGroup(panel, parsed) {
   let draggedKeys = [];
 
-  function _itemsToMove(item) {
-    const cb = item.querySelector('input[type="checkbox"]');
-    if (cb && cb.checked) {
-      const checked = [...panel.querySelectorAll(".funpairdl-item[data-key]")].filter((it) => {
-        const c = it.querySelector('input[type="checkbox"]');
-        return c && c.checked;
-      });
-      if (checked.length > 1) return checked;
-    }
-    return [item];
+  // Plain drag moves the one row under the grip; Ctrl/Shift held at drag
+  // start brings every checked row along (same rule as collection mode).
+  function _itemsToMove(item, multi) {
+    if (!multi) return [item];
+    const checked = [...panel.querySelectorAll(".funpairdl-item[data-key]")].filter((it) => {
+      const c = it.querySelector('input[type="checkbox"]');
+      return c && c.checked;
+    });
+    return checked.length > 1 ? checked : [item];
   }
 
   function _clearHighlights() {
@@ -2965,7 +3517,7 @@ function _enableDragToGroup(panel, parsed) {
     if (!handle) return;
     const item = handle.closest(".funpairdl-item[data-key]");
     if (!item) return;
-    const moving = _itemsToMove(item);
+    const moving = _itemsToMove(item, e.ctrlKey || e.shiftKey || e.metaKey);
     draggedKeys = moving.map((it) => it.dataset.key);
     moving.forEach((it) => it.classList.add("funpairdl-dragging"));
     e.dataTransfer.effectAllowed = "move";
@@ -2973,12 +3525,30 @@ function _enableDragToGroup(panel, parsed) {
     try { e.dataTransfer.setData("text/plain", draggedKeys.join(",")); } catch (_) {}
   });
 
+  function _clearWorkHighlights() {
+    panel.querySelectorAll(".funpairdl-work-group.funpairdl-drag-over")
+      .forEach((g) => g.classList.remove("funpairdl-drag-over"));
+  }
+
   panel.addEventListener("dragover", (e) => {
     if (draggedKeys.length === 0) return;
+    // A work group (pairing preview inside Main) is a drop target of its own.
+    const wg = e.target.closest && e.target.closest(".funpairdl-work-group");
+    if (wg) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      _clearHighlights();
+      if (!wg.classList.contains("funpairdl-drag-over")) {
+        _clearWorkHighlights();
+        wg.classList.add("funpairdl-drag-over");
+      }
+      return;
+    }
     const block = e.target.closest && e.target.closest(".funpairdl-group-block");
     if (!block) return;
     e.preventDefault();            // mark this a valid drop target
     e.dataTransfer.dropEffect = "move";
+    _clearWorkHighlights();
     if (!block.classList.contains("funpairdl-drag-over")) {
       _clearHighlights();
       block.classList.add("funpairdl-drag-over");
@@ -2987,6 +3557,13 @@ function _enableDragToGroup(panel, parsed) {
 
   panel.addEventListener("drop", (e) => {
     if (draggedKeys.length === 0) return;
+    const wg = e.target.closest && e.target.closest(".funpairdl-work-group");
+    if (wg) {
+      e.preventDefault();
+      _dropRowsOnWorkGroup(panel, parsed, draggedKeys, wg);
+      _updateInheritancePreviews(panel, parsed);
+      return;
+    }
     const block = e.target.closest && e.target.closest(".funpairdl-group-block");
     if (!block) return;
     e.preventDefault();
@@ -2996,6 +3573,740 @@ function _enableDragToGroup(panel, parsed) {
       if (item) _moveItemToGroup(panel, parsed, item, target);
     }
     _updateInheritancePreviews(panel, parsed);
+    _scheduleWorkPlan(panel, parsed);
+  });
+
+  panel.addEventListener("dragend", () => {
+    panel.querySelectorAll(".funpairdl-dragging").forEach((it) => it.classList.remove("funpairdl-dragging"));
+    _clearHighlights();
+    _clearWorkHighlights();
+    draggedKeys = [];
+  });
+
+  // A bare click on the grip would otherwise toggle the row's checkbox (it
+  // lives inside the <label>). Swallow it in the capture phase so grabbing
+  // the handle never flips the selection.
+  panel.addEventListener("click", (e) => {
+    if (e.target.closest && e.target.closest(".funpairdl-drag-handle")) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  }, true);
+}
+
+// ─── Bundle sub-groups: the backend's planned split, draggable ───
+//
+// A pixeldrain list / MEGA or GoFile folder often holds several works. The
+// backend splits such a bundle into one pair per work by name matching at
+// download time — invisible to the user until folders appear, and wrong
+// pairings could not be corrected. The bundle dropdown now asks the backend
+// for that plan up front (/bundle/plan — the same code that will run) and
+// shows it as sub-groups; files can be dragged between them, groups renamed
+// or added, and the arrangement travels with the send as `bundle_plan`.
+
+function _bundleFileRowHTML(f, probeKey) {
+  const fname = escapeAttr(f.name);
+  const fsize = f.size ? formatSize(f.size) : "";
+  const furl = escapeAttr(f.url || "");
+  return `<label class="funpairdl-bundle-file funpairdl-bundle-selectable" title="${fname}" data-file-url="${furl}">
+    <span class="funpairdl-drag-handle funpairdl-bundle-grip" draggable="true" title="拖曳到其他子組" hidden>⠿</span>
+    <input type="checkbox" class="funpairdl-bundle-cb"
+           data-probe-key="${probeKey}"
+           data-file-url="${furl}"
+           data-file-name="${fname}" checked>
+    <span class="funpairdl-bundle-fname">${fname}</span>
+    <span class="funpairdl-bundle-fsize">${fsize}</span>
+  </label>`;
+}
+
+// Split a bundle's file list the way send does: funscripts vs everything
+// else (the backend types the rest by extension).
+function _bundleVideosAndScripts(files) {
+  const videos = [];
+  const scripts = [];
+  for (const f of files || []) {
+    if (!f || !f.url) continue;
+    const entry = { url: f.url, name: f.name || "" };
+    if ((f.name || "").toLowerCase().endsWith(".funscript")) scripts.push(entry);
+    else videos.push(entry);
+  }
+  return { videos, scripts };
+}
+
+async function _planBundleLayout(panel, parsed, dropdown, files, probeKey) {
+  const { videos, scripts } = _bundleVideosAndScripts(files);
+  if (videos.length < 2) return;
+  let plan = null;
+  try {
+    plan = await _sendMsg("bundle-plan", { name: parsed.title || "", videos, scripts });
+  } catch (e) { plan = null; }
+  if (!plan || !plan.split || !Array.isArray(plan.groups) || plan.groups.length < 2) return;
+  if (!dropdown.parentNode) return;
+  _renderBundleGroups(panel, dropdown, plan.groups);
+}
+
+function _bundleGroupEl(name, userMade, basis) {
+  const el = document.createElement("div");
+  el.className = "funpairdl-bundle-group";
+  if (userMade) el.dataset.user = "1";
+  el.innerHTML = `<div class="funpairdl-bundle-group-header">
+      <input type="text" class="funpairdl-alt-name-input funpairdl-bundle-group-name"
+             placeholder="子組名稱(資料夾名)" value="${escapeAttr(name)}">
+      ${_basisTagHTML(basis || "")}<span class="funpairdl-bundle-group-count"></span>
+      <button class="funpairdl-group-remove funpairdl-bundle-group-remove" type="button"
+              title="解散此子組,檔案併回第一組">✕</button>
+    </div>`;
+  return el;
+}
+
+function _bundleGroupName(groupEl) {
+  const inp = groupEl.querySelector(".funpairdl-bundle-group-name");
+  return inp ? inp.value.trim() : "";
+}
+
+function _refreshBundleGroupCounts(dropdown) {
+  dropdown.querySelectorAll(".funpairdl-bundle-group").forEach((g) => {
+    let v = 0, s = 0;
+    g.querySelectorAll(".funpairdl-bundle-file").forEach((row) => {
+      const cb = row.querySelector(".funpairdl-bundle-cb");
+      if ((cb && cb.dataset.fileName || "").toLowerCase().endsWith(".funscript")) s++; else v++;
+    });
+    const badge = g.querySelector(".funpairdl-bundle-group-count");
+    if (badge) badge.textContent = [v ? `${v}V` : "", s ? `${s}S` : ""].filter(Boolean).join(" + ") || "empty";
+  });
+}
+
+// Record the labels of every row so send-time has a full url → label map.
+function _syncBundlePlanFromDom(panel, dropdown) {
+  if (!panel._bundlePlan) panel._bundlePlan = {};
+  dropdown.querySelectorAll(".funpairdl-bundle-group").forEach((g) => {
+    const name = _bundleGroupName(g);
+    g.querySelectorAll(".funpairdl-bundle-file[data-file-url]").forEach((row) => {
+      if (name) panel._bundlePlan[row.dataset.fileUrl] = name;
+      else delete panel._bundlePlan[row.dataset.fileUrl];
+    });
+  });
+}
+
+// Move rows into the groups their labels name, creating groups as needed.
+// Idempotent — the batch card replays a saved plan through this repeatedly
+// while the dropdowns are still appearing.
+function _applyBundlePlanToDom(dropdown, plan) {
+  if (!plan || !dropdown.querySelector(".funpairdl-bundle-group")) return false;
+  let changed = false;
+  dropdown.querySelectorAll(".funpairdl-bundle-file[data-file-url]").forEach((row) => {
+    const label = plan[row.dataset.fileUrl];
+    if (!label) return;
+    const groups = [...dropdown.querySelectorAll(".funpairdl-bundle-group")];
+    let target = groups.find((g) => _bundleGroupName(g) === label);
+    if (!target) {
+      target = _bundleGroupEl(label, true);
+      const addBtn = dropdown.querySelector(".funpairdl-bundle-add-group");
+      if (addBtn) addBtn.before(target); else dropdown.appendChild(target);
+      changed = true;
+    }
+    if (row.parentNode !== target) { target.appendChild(row); changed = true; }
+  });
+  if (changed) {
+    // Backend-made groups emptied by the plan disappear; user-made stay.
+    dropdown.querySelectorAll(".funpairdl-bundle-group").forEach((g) => {
+      if (!g.dataset.user && !g.querySelector(".funpairdl-bundle-file")) g.remove();
+    });
+    _refreshBundleGroupCounts(dropdown);
+  }
+  return changed;
+}
+
+function _renderBundleGroups(panel, dropdown, groups) {
+  if (!panel._bundlePlan) panel._bundlePlan = {};
+  const rows = new Map();
+  dropdown.querySelectorAll(".funpairdl-bundle-file[data-file-url]").forEach((row) => {
+    rows.set(row.dataset.fileUrl, row);
+    const grip = row.querySelector(".funpairdl-bundle-grip");
+    if (grip) grip.hidden = false;
+  });
+
+  const hint = document.createElement("div");
+  hint.className = "funpairdl-bundle-plan-hint";
+  hint.textContent = `這個 bundle 會拆成 ${groups.length} 組(每組一個資料夾);可拖曳檔案調整、改名或新增子組`;
+  dropdown.appendChild(hint);
+
+  const placed = new Set();
+  groups.forEach((g, i) => {
+    const el = _bundleGroupEl(g.name || `Group ${i + 1}`, false, g.basis || "");
+    for (const url of [...(g.videos || []), ...(g.scripts || [])]) {
+      const row = rows.get(url);
+      if (row && !placed.has(url)) { el.appendChild(row); placed.add(url); }
+    }
+    dropdown.appendChild(el);
+  });
+  // Anything the plan did not mention rides with the first group.
+  const first = dropdown.querySelector(".funpairdl-bundle-group");
+  for (const [url, row] of rows) if (!placed.has(url) && first) first.appendChild(row);
+
+  const addBtn = document.createElement("button");
+  addBtn.type = "button";
+  addBtn.className = "funpairdl-add-alt-btn funpairdl-bundle-add-group";
+  addBtn.textContent = "+ 新增子組";
+  dropdown.appendChild(addBtn);
+
+  // A plan restored from the batch card (or set by an earlier render) wins
+  // over the backend's suggestion for the files it names.
+  _applyBundlePlanToDom(dropdown, panel._bundlePlan);
+  _syncBundlePlanFromDom(panel, dropdown);
+  _refreshBundleGroupCounts(dropdown);
+  _wireBundleGroups(panel, dropdown);
+}
+
+function _wireBundleGroups(panel, dropdown) {
+  const touched = () => {
+    _syncBundlePlanFromDom(panel, dropdown);
+    _refreshBundleGroupCounts(dropdown);
+    panel.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+
+  dropdown.addEventListener("input", (e) => {
+    if (e.target.classList && e.target.classList.contains("funpairdl-bundle-group-name")) touched();
+  });
+  dropdown.addEventListener("click", (e) => {
+    const rm = e.target.closest && e.target.closest(".funpairdl-bundle-group-remove");
+    if (rm) {
+      e.preventDefault(); e.stopPropagation();
+      const g = rm.closest(".funpairdl-bundle-group");
+      const groups = [...dropdown.querySelectorAll(".funpairdl-bundle-group")];
+      if (!g || groups.length <= 1) return;
+      const dest = groups.find((x) => x !== g);
+      g.querySelectorAll(".funpairdl-bundle-file").forEach((row) => dest.appendChild(row));
+      g.remove();
+      touched();
+      return;
+    }
+    const add = e.target.closest && e.target.closest(".funpairdl-bundle-add-group");
+    if (add) {
+      e.preventDefault(); e.stopPropagation();
+      const n = dropdown.querySelectorAll(".funpairdl-bundle-group").length + 1;
+      const g = _bundleGroupEl(`新子組 ${n}`, true);
+      add.before(g);
+      touched();
+      const inp = g.querySelector(".funpairdl-bundle-group-name");
+      if (inp) { inp.focus(); inp.select(); }
+      return;
+    }
+    // Typing in the name field must not toggle checkboxes or fold sections.
+    if (e.target.classList && e.target.classList.contains("funpairdl-bundle-group-name")) {
+      e.stopPropagation();
+    }
+  });
+
+  let dragged = null;
+  dropdown.addEventListener("dragstart", (e) => {
+    const grip = e.target.closest && e.target.closest(".funpairdl-bundle-grip");
+    if (!grip) return;
+    e.stopPropagation();  // not a section/group row — keep the panel handlers out
+    dragged = grip.closest(".funpairdl-bundle-file");
+    if (!dragged) return;
+    dragged.classList.add("funpairdl-dragging");
+    e.dataTransfer.effectAllowed = "move";
+    try { e.dataTransfer.setData("text/plain", dragged.dataset.fileUrl || ""); } catch (_) {}
+  });
+  dropdown.addEventListener("dragover", (e) => {
+    if (!dragged) return;
+    const g = e.target.closest && e.target.closest(".funpairdl-bundle-group");
+    if (!g) return;
+    e.preventDefault(); e.stopPropagation();
+    e.dataTransfer.dropEffect = "move";
+    dropdown.querySelectorAll(".funpairdl-bundle-group.funpairdl-drag-over")
+      .forEach((x) => { if (x !== g) x.classList.remove("funpairdl-drag-over"); });
+    g.classList.add("funpairdl-drag-over");
+  });
+  dropdown.addEventListener("drop", (e) => {
+    if (!dragged) return;
+    const g = e.target.closest && e.target.closest(".funpairdl-bundle-group");
+    if (!g) return;
+    e.preventDefault(); e.stopPropagation();
+    if (dragged.parentNode !== g) { g.appendChild(dragged); touched(); }
+  });
+  dropdown.addEventListener("dragend", () => {
+    if (dragged) dragged.classList.remove("funpairdl-dragging");
+    dragged = null;
+    dropdown.querySelectorAll(".funpairdl-drag-over").forEach((x) => x.classList.remove("funpairdl-drag-over"));
+  });
+}
+
+// ─── Media hints: thumbnail + scene tags on a video row ───
+//
+// e621 posts in one topic often share a title, so the row text alone can't
+// say which scene a video is. The probe returns the post's thumbnail and
+// tags; the row gets a 🖼 that shows the thumbnail on hover and a short
+// scene-tag line, so the user can tell the videos apart and check the
+// pairing preview against them.
+
+// Whole-word scene vocabulary (tags are matched with underscores as
+// spaces, so "blowjob_face" hits "blowjob" but "bedroom_eyes" is not "bed").
+const _SCENE_TAG_RE = /\b(position|sex|oral|fellatio|blowjob|shower|kneel\w*|stand\w*|sitting|lying|behind|front|cowgirl|missionary|doggy\w*|riding|handjob|footjob|titjob|anal|vaginal|masturbat\w*|69|facesit\w*|dominant|submissive|pov|outdoors?|indoors?|sofa|pool|bath\w*|loop|animated)\b/i;
+
+function _sceneTags(tags, limit) {
+  const uniq = [...new Set((tags || []).map((t) => String(t).trim().replace(/_/g, " ")).filter(Boolean))];
+  const isScene = (t) => _SCENE_TAG_RE.test(t);
+  const scene = uniq.filter(isScene);
+  const rest = uniq.filter((t) => !isScene(t));
+  return [...scene, ...rest].slice(0, limit);
+}
+
+let _thumbPop = null;
+function _showThumbPop(src, x, y) {
+  if (!_thumbPop) {
+    _thumbPop = document.createElement("div");
+    _thumbPop.className = "funpairdl-thumb-pop";
+    _thumbPop.innerHTML = `<img alt="">`;
+    document.body.appendChild(_thumbPop);
+  }
+  const img = _thumbPop.querySelector("img");
+  if (img.getAttribute("src") !== src) img.setAttribute("src", src);
+  _thumbPop.style.left = `${Math.max(8, x - 260)}px`;
+  _thumbPop.style.top = `${Math.max(8, y - 20)}px`;
+  _thumbPop.hidden = false;
+}
+function _hideThumbPop() { if (_thumbPop) _thumbPop.hidden = true; }
+
+function _attachMediaHints(item, info) {
+  if (!item || !info) return;
+  const tags = Array.isArray(info.tags) ? info.tags : [];
+  const thumb = info.thumbnail || "";
+  if (!tags.length && !thumb) return;
+  if (item.querySelector(".funpairdl-media-hints")) return;
+  const wrap = document.createElement("span");
+  wrap.className = "funpairdl-media-hints";
+  if (thumb) {
+    const icon = document.createElement("span");
+    icon.className = "funpairdl-thumb-icon";
+    icon.textContent = "🖼";
+    icon.title = "懸停預覽縮圖";
+    icon.addEventListener("mouseenter", (e) => _showThumbPop(thumb, e.clientX, e.clientY));
+    icon.addEventListener("mousemove", (e) => _showThumbPop(thumb, e.clientX, e.clientY));
+    icon.addEventListener("mouseleave", _hideThumbPop);
+    icon.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); });
+    wrap.appendChild(icon);
+  }
+  if (tags.length) {
+    const line = document.createElement("span");
+    line.className = "funpairdl-scene-tags";
+    line.textContent = _sceneTags(tags, 5).join(" · ");
+    line.title = _sceneTags(tags, 40).join(", ");
+    wrap.appendChild(line);
+  }
+  const size = item.querySelector(".funpairdl-size");
+  if (size) size.before(wrap); else item.appendChild(wrap);
+}
+
+// ─── Single mode: pairing preview for the Main group ───
+//
+// Main often holds several videos — mirrors of one work on different hosts,
+// or genuinely different works — plus a pile of scripts, and nothing said
+// which script belongs to which video, or whether the videos are the same
+// work at all. The backend decides that at download time (one folder per
+// work). Ask it up front, show the answer under Main as "work groups", tag
+// each row with its group, and let the user drag rows onto a group (or a new
+// one) to correct it. Corrections travel as bundle_plan (row url → label).
+
+const WORK_PLAN_DEBOUNCE_MS = 700;
+const _WORK_COLORS = ["#4a90d9", "#2e9e6a", "#c2842a", "#8b5cf6", "#d9534f", "#0ea5b7"];
+
+function _scheduleWorkPlan(panel, parsed) {
+  if (!parsed || parsed.mode !== "single") return;
+  if (panel._workPlanTimer) clearTimeout(panel._workPlanTimer);
+  panel._workPlanTimer = setTimeout(() => { _refreshWorkPlan(panel, parsed); }, WORK_PLAN_DEBOUNCE_MS);
+}
+
+// Plain (non-bundle) rows currently in Main, with the best name we have.
+function _mainWorkRows(panel, parsed) {
+  const body = panel.querySelector('.funpairdl-group-body[data-group="Main"]');
+  const videos = [];
+  const scripts = [];
+  if (!body) return { videos, scripts };
+  body.querySelectorAll(".funpairdl-item[data-key]").forEach((row) => {
+    const idx = parseInt(row.dataset.index);
+    if (row.dataset.kind === "video") {
+      const v = parsed.videos[idx];
+      if (!v) return;
+      // A bundle row is planned inside its own dropdown.
+      if (panel.querySelector(`.funpairdl-bundle-cb[data-probe-key="${row.dataset.key}"]`)) return;
+      videos.push({
+        url: v.url, name: v.probedFilename || "", row,
+        hints: (v.probedTags || []).join(" "),
+        duration: v.probedDuration || 0,
+      });
+    } else if (row.dataset.kind === "script") {
+      const s = parsed.scripts[idx];
+      if (s) scripts.push({
+        url: s.url, name: s.filename || "", row,
+        duration: s.probedDuration || 0, link: s.probedLink || "",
+      });
+    }
+  });
+  return { videos, scripts };
+}
+
+// Pure: display groups from the rows' labels — plan order first, then
+// user-added empty groups, then an implicit "auto" bucket for unlabelled
+// rows. Each group: { name, user, videos: [row entries], scripts: [...] }.
+function _workPlanGroups(rows, plan, extraNames, order) {
+  const groups = [];
+  const byName = new Map();
+  const get = (name, user) => {
+    if (!byName.has(name)) {
+      const g = { name, user: !!user, videos: [], scripts: [] };
+      byName.set(name, g);
+      groups.push(g);
+    }
+    return byName.get(name);
+  };
+  for (const n of order || []) get(n, false);
+  for (const n of extraNames || []) get(n, true);
+  const auto = { name: "", user: false, videos: [], scripts: [] };
+  for (const r of rows.videos) (plan[r.url] ? get(plan[r.url], false) : auto).videos.push(r);
+  for (const r of rows.scripts) (plan[r.url] ? get(plan[r.url], false) : auto).scripts.push(r);
+  if (auto.videos.length || auto.scripts.length) groups.push(auto);
+  return groups;
+}
+
+function _workPlanBlock(panel) {
+  const main = panel.querySelector('.funpairdl-group-block[data-group="Main"]');
+  if (!main) return null;
+  let block = main.querySelector(".funpairdl-work-plan");
+  if (!block) {
+    block = document.createElement("div");
+    block.className = "funpairdl-work-plan";
+    const body = main.querySelector(".funpairdl-group-body");
+    if (body) body.after(block); else main.appendChild(block);
+  }
+  return block;
+}
+
+function _setWorkBadge(row, idx, color) {
+  let badge = row.querySelector(".funpairdl-tag-work");
+  if (idx == null) { if (badge) badge.remove(); return; }
+  if (!badge) {
+    badge = document.createElement("span");
+    badge.className = "funpairdl-tag-work";
+    const size = row.querySelector(".funpairdl-size");
+    if (size) size.before(badge); else row.appendChild(badge);
+  }
+  badge.textContent = `組${idx + 1}`;
+  badge.style.background = color;
+}
+
+async function _refreshWorkPlan(panel, parsed) {
+  if (!panel._bundlePlan) panel._bundlePlan = {};
+  if (!panel._workGroupsExtra) panel._workGroupsExtra = [];
+  const block = _workPlanBlock(panel);
+  if (!block) return;
+  const rows = _mainWorkRows(panel, parsed);
+  const all = [...rows.videos, ...rows.scripts];
+  if (rows.videos.length < 2 && panel._workGroupsExtra.length === 0) {
+    block.hidden = true;
+    for (const r of all) _setWorkBadge(r.row, null);
+    return;
+  }
+  block.hidden = false;
+
+  // Ask the backend once per distinct row set; drags and renames only
+  // re-render.
+  const key = JSON.stringify([
+    rows.videos.map((r) => [r.url, r.name, r.hints || "", r.duration || 0]),
+    rows.scripts.map((r) => [r.url, r.name, r.duration || 0, r.link || ""]),
+  ]);
+  if (panel._workPlanKey !== key) {
+    const seq = (panel._workPlanSeq = (panel._workPlanSeq || 0) + 1);
+    let plan = null;
+    try {
+      plan = await _sendMsg("bundle-plan", {
+        name: parsed.title || "",
+        videos: rows.videos.map((r) => ({
+          url: r.url, name: r.name, hints: r.hints || "", duration: r.duration || null,
+        })),
+        scripts: rows.scripts.map((r) => ({
+          url: r.url, name: r.name, duration: r.duration || null, link: r.link || "",
+        })),
+      });
+    } catch (e) { plan = null; }
+    if (seq !== panel._workPlanSeq) return;   // a newer request superseded this one
+    panel._workPlanKey = key;
+    panel._workPlanSplit = !!(plan && plan.split);
+    panel._workPlanOrder = [];
+    // Labels the backend seeded last time — a row still carrying its seeded
+    // label was never touched by the user, so a fresh plan (names change as
+    // probes reveal real filenames) may overwrite it. Labels that differ
+    // from their seed are the user's and stay.
+    const seeded = panel._workPlanSeeded || {};
+    const nextSeeded = {};
+    panel._workScriptBasis = {};
+    if (plan && plan.split && Array.isArray(plan.groups)) {
+      for (const g of plan.groups) {
+        const name = g.name || "";
+        if (!name) continue;
+        panel._workPlanOrder.push(name);
+        for (const u of [...(g.videos || []), ...(g.scripts || [])]) {
+          const cur = panel._bundlePlan[u];
+          if (!cur || cur === seeded[u]) panel._bundlePlan[u] = name;
+          nextSeeded[u] = name;
+        }
+        for (const [u, b] of Object.entries(g.script_basis || {})) panel._workScriptBasis[u] = b;
+      }
+    } else {
+      // Mirrors / one work: drop labels that were only ever seeded.
+      for (const [u, name] of Object.entries(seeded)) {
+        if (panel._bundlePlan[u] === name) delete panel._bundlePlan[u];
+      }
+    }
+    panel._workPlanSeeded = nextSeeded;
+  }
+  _renderWorkPlan(panel, parsed);
+}
+
+function _renderWorkPlan(panel, parsed) {
+  const block = _workPlanBlock(panel);
+  if (!block) return;
+  const rows = _mainWorkRows(panel, parsed);
+  const groups = _workPlanGroups(rows, panel._bundlePlan || {}, panel._workGroupsExtra || [], panel._workPlanOrder || []);
+  const labelled = groups.filter((g) => g.name);
+  const nVideos = rows.videos.length;
+  const nScripts = rows.scripts.length;
+
+  let head;
+  if (labelled.length === 0) {
+    head = `✔ 送出後是同一部作品:${nVideos} 個影片互為鏡像(只會下載勾選的),${nScripts} 支腳本都屬於它。`;
+  } else {
+    head = `送出後會拆成 ${labelled.length} 個作品(每個一個資料夾);每組標籤是配對依據,橘色的「順序(猜測)」請自行核對;拖曳列到組上可調整,組名即資料夾名。`;
+  }
+  const seeded = panel._workPlanSeeded || {};
+  const scriptBasis = panel._workScriptBasis || {};
+  let html = `<div class="funpairdl-work-plan-head">${escapeAttr(head)}</div>`;
+  groups.forEach((g, i) => {
+    const color = _WORK_COLORS[i % _WORK_COLORS.length];
+    const title = g.name
+      ? `<input type="text" class="funpairdl-alt-name-input funpairdl-work-group-name" data-old="${escapeAttr(g.name)}" value="${escapeAttr(g.name)}" placeholder="作品名稱(資料夾名)">`
+      : `<span class="funpairdl-work-group-auto">其餘(依名稱自動配對)</span>`;
+    // A script the user dragged (label differs from the backend's seed) is
+    // "plan"; otherwise what the backend reported for it.
+    const basisOf = (r) => {
+      const lb = (panel._bundlePlan || {})[r.url];
+      if (lb && seeded[r.url] && lb !== seeded[r.url]) return "plan";
+      if (lb && !seeded[r.url]) return "plan";
+      return scriptBasis[r.url] || "";
+    };
+    const members = [
+      ...g.videos.map((r) => {
+        const label = (r.row.querySelector(".funpairdl-label") || {}).textContent || r.name || r.url;
+        const scene = _sceneTags(r.hints ? r.hints.split(" ") : [], 4).join(", ");
+        const dur = formatDuration(r.duration);
+        return `<span class="funpairdl-work-member funpairdl-work-member-v">🎬 ${escapeAttr(label)}${dur ? ` <b>${dur}</b>` : ""}${scene ? ` <i>(${escapeAttr(scene)})</i>` : ""}</span>`;
+      }),
+      ...g.scripts.map((r) => {
+        const dur = formatDuration(r.duration);
+        return `<span class="funpairdl-work-member">📜 ${escapeAttr(r.name || r.url)}${dur ? ` <b>${dur}</b>` : ""}</span>`;
+      }),
+    ].join("");
+    const gBasis = g.name ? _weakestBasis(g.scripts.map(basisOf)) : "";
+    const remove = g.name && g.user && g.videos.length === 0 && g.scripts.length === 0
+      ? `<button class="funpairdl-group-remove funpairdl-work-group-remove" type="button" data-name="${escapeAttr(g.name)}" title="移除空的作品組">✕</button>` : "";
+    html += `<div class="funpairdl-work-group" data-name="${escapeAttr(g.name)}" style="border-left-color:${color}">
+      <div class="funpairdl-work-group-header"><span class="funpairdl-tag-work" style="background:${color}">組${i + 1}</span>${title}
+        ${_basisTagHTML(gBasis)}<span class="funpairdl-work-group-count">${g.videos.length}V + ${g.scripts.length}S</span>${remove}</div>
+      <div class="funpairdl-work-members">${members || '<span class="funpairdl-work-empty">拖曳列到這裡</span>'}</div>
+    </div>`;
+    for (const r of [...g.videos, ...g.scripts]) _setWorkBadge(r.row, groups.length > 1 ? i : null, color);
+  });
+  html += `<button type="button" class="funpairdl-add-alt-btn funpairdl-work-add">+ 新增作品組</button>`;
+  block.innerHTML = html;
+  if (!block._wired) { _wireWorkPlan(panel, parsed, block); block._wired = true; }
+}
+
+function _wireWorkPlan(panel, parsed, block) {
+  const touched = () => {
+    _renderWorkPlan(panel, parsed);
+    panel.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+  block.addEventListener("click", (e) => {
+    const add = e.target.closest && e.target.closest(".funpairdl-work-add");
+    if (add) {
+      e.preventDefault(); e.stopPropagation();
+      let n = 1;
+      const taken = new Set([...(panel._workPlanOrder || []), ...(panel._workGroupsExtra || []), ...Object.values(panel._bundlePlan || {})]);
+      while (taken.has(`作品 ${n}`)) n++;
+      panel._workGroupsExtra.push(`作品 ${n}`);
+      touched();
+      return;
+    }
+    const rm = e.target.closest && e.target.closest(".funpairdl-work-group-remove");
+    if (rm) {
+      e.preventDefault(); e.stopPropagation();
+      panel._workGroupsExtra = (panel._workGroupsExtra || []).filter((n) => n !== rm.dataset.name);
+      touched();
+      return;
+    }
+    if (e.target.classList && e.target.classList.contains("funpairdl-work-group-name")) e.stopPropagation();
+  });
+  block.addEventListener("change", (e) => {
+    const inp = e.target;
+    if (!inp.classList || !inp.classList.contains("funpairdl-work-group-name")) return;
+    e.stopPropagation();
+    const oldName = inp.dataset.old;
+    const newName = inp.value.trim();
+    if (!newName || newName === oldName) { inp.value = oldName; return; }
+    for (const [u, lb] of Object.entries(panel._bundlePlan || {})) if (lb === oldName) panel._bundlePlan[u] = newName;
+    panel._workPlanOrder = (panel._workPlanOrder || []).map((n) => (n === oldName ? newName : n));
+    panel._workGroupsExtra = (panel._workGroupsExtra || []).map((n) => (n === oldName ? newName : n));
+    touched();
+  });
+}
+
+// Drop handling for work groups (called from _enableDragToGroup).
+function _dropRowsOnWorkGroup(panel, parsed, keys, groupEl) {
+  const name = groupEl.dataset.name || "";
+  if (!panel._bundlePlan) panel._bundlePlan = {};
+  for (const key of keys) {
+    const row = panel.querySelector(`.funpairdl-item[data-key="${key}"]`);
+    if (!row) continue;
+    const idx = parseInt(row.dataset.index);
+    const obj = row.dataset.kind === "video" ? parsed.videos[idx] : parsed.scripts[idx];
+    if (!obj) continue;
+    if ((parsed.groupState.itemGroup[key] || "Main") !== "Main") _moveItemToGroup(panel, parsed, row, "Main");
+    if (name) panel._bundlePlan[obj.url] = name; else delete panel._bundlePlan[obj.url];
+  }
+  _renderWorkPlan(panel, parsed);
+  panel.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+// ─── Collection mode: drag rows between sections ───
+
+function _syncSectionCheckbox(group) {
+  if (!group) return;
+  const cb = group.querySelector(".funpairdl-section-cb");
+  const body = group.querySelector(".funpairdl-section-body");
+  if (!cb || !body) return;
+  cb.checked = body.querySelector('.funpairdl-item input[type="checkbox"]:checked') !== null;
+}
+
+// Recount the "2V + 1S" badges from what each section body holds now.
+function _refreshSectionCounts(panel) {
+  panel.querySelectorAll(".funpairdl-section-group").forEach((group) => {
+    const badge = group.querySelector(".funpairdl-section-count");
+    const body = group.querySelector(".funpairdl-section-body");
+    if (!badge || !body) return;
+    const v = body.querySelectorAll('.funpairdl-item[data-kind="video"]').length;
+    const s = body.querySelectorAll('.funpairdl-item[data-kind="script"]').length;
+    badge.textContent = [v ? `${v}V` : "", s ? `${s}S` : ""].filter(Boolean).join(" + ") || "empty";
+  });
+}
+
+/**
+ * Move a collection row (and its bundle dropdown) into another section.
+ * The row keeps its checkbox name/value — probe results, bundle files and
+ * the saved-selection keys all hang off those — and the move is recorded in
+ * parsed.sectionOverride, which handleCollectionSend honours. A dropped row
+ * is checked so it counts toward its new section right away.
+ * Returns true when the row actually changed section.
+ */
+function _moveItemToSection(panel, parsed, item, target) {
+  if (!item) return false;
+  const group = panel.querySelector(`.funpairdl-section-group[data-section="${target}"]`);
+  const body = group && group.querySelector(".funpairdl-section-body");
+  if (!body) return false;
+  const from = item.closest(".funpairdl-section-group");
+  if (from === group) return false;
+
+  // "home" = the section the row was rendered in; a move back there clears
+  // the override instead of recording one.
+  if (!item.dataset.home && from) item.dataset.home = from.dataset.section;
+  const cb = item.querySelector('input[type="checkbox"][name]');
+  if (!parsed.sectionOverride) parsed.sectionOverride = {};
+  if (item.dataset.home === String(target)) delete parsed.sectionOverride[item.dataset.key];
+  else parsed.sectionOverride[item.dataset.key] = String(target);
+
+  const dropdown = _itemBundleDropdown(item);
+  body.appendChild(item);
+  if (dropdown) body.appendChild(dropdown);
+  if (cb && !cb.checked) cb.checked = true;
+  // Show the landing spot; the section starts collapsed.
+  if (body.style.display === "none") {
+    body.style.display = "block";
+    const toggle = group.querySelector(".funpairdl-section-toggle");
+    if (toggle) toggle.textContent = "▾";
+  }
+  _syncSectionCheckbox(from);
+  _syncSectionCheckbox(group);
+  _refreshSectionCounts(panel);
+  return true;
+}
+
+function _enableDragToSection(panel, parsed) {
+  let draggedKeys = [];
+
+  // Remember where every row started so a move back home clears its
+  // override and a removed user group can return its rows.
+  panel.querySelectorAll(".funpairdl-item[data-key]").forEach((row) => {
+    const g = row.closest(".funpairdl-section-group");
+    if (g && !row.dataset.home) row.dataset.home = g.dataset.section;
+  });
+
+  // Plain drag moves the one row under the grip. Everything is checked by
+  // default in collection mode, so "checked rows travel together" would drag
+  // the whole panel — that needs Ctrl/Shift held when the drag starts.
+  function _itemsToMove(item, multi) {
+    if (!multi) return [item];
+    const checked = [...panel.querySelectorAll(".funpairdl-item[data-key]")].filter((it) => {
+      const c = it.querySelector('input[type="checkbox"]');
+      return c && c.checked;
+    });
+    return checked.length > 1 ? checked : [item];
+  }
+
+  function _clearHighlights() {
+    panel.querySelectorAll(".funpairdl-section-group.funpairdl-drag-over")
+      .forEach((g) => g.classList.remove("funpairdl-drag-over"));
+  }
+
+  panel.addEventListener("dragstart", (e) => {
+    const handle = e.target.closest && e.target.closest(".funpairdl-drag-handle");
+    if (!handle) return;
+    const item = handle.closest(".funpairdl-item[data-key]");
+    if (!item) return;
+    const moving = _itemsToMove(item, e.ctrlKey || e.shiftKey || e.metaKey);
+    draggedKeys = moving.map((it) => it.dataset.key);
+    moving.forEach((it) => it.classList.add("funpairdl-dragging"));
+    e.dataTransfer.effectAllowed = "move";
+    try { e.dataTransfer.setData("text/plain", draggedKeys.join(",")); } catch (_) {}
+  });
+
+  panel.addEventListener("dragover", (e) => {
+    if (draggedKeys.length === 0) return;
+    const group = e.target.closest && e.target.closest(".funpairdl-section-group");
+    if (!group) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    if (!group.classList.contains("funpairdl-drag-over")) {
+      _clearHighlights();
+      group.classList.add("funpairdl-drag-over");
+    }
+  });
+
+  panel.addEventListener("drop", (e) => {
+    if (draggedKeys.length === 0) return;
+    const group = e.target.closest && e.target.closest(".funpairdl-section-group");
+    if (!group) return;
+    e.preventDefault();
+    const target = group.dataset.section;
+    let moved = false;
+    for (const key of draggedKeys) {
+      const item = panel.querySelector(`.funpairdl-item[data-key="${key}"]`);
+      if (item && _moveItemToSection(panel, parsed, item, target)) moved = true;
+    }
+    if (moved) {
+      updateSendButton(panel, parsed);
+      // Let the batch card autosave pick the move up.
+      panel.dispatchEvent(new Event("change", { bubbles: true }));
+    }
   });
 
   panel.addEventListener("dragend", () => {
@@ -3004,9 +4315,8 @@ function _enableDragToGroup(panel, parsed) {
     draggedKeys = [];
   });
 
-  // A bare click on the grip would otherwise toggle the row's checkbox (it
-  // lives inside the <label>). Swallow it in the capture phase so grabbing
-  // the handle never flips the selection.
+  // A click on the grip must not toggle the row's checkbox (see
+  // _enableDragToGroup).
   panel.addEventListener("click", (e) => {
     if (e.target.closest && e.target.closest(".funpairdl-drag-handle")) {
       e.preventDefault();
@@ -3114,10 +4424,13 @@ function injectButton() {
     // Collection mode events
     if (freshParsed.mode === "collection") {
       setupCollectionEvents(panel, freshParsed);
+      // Grip-handle drag to move rows between sections.
+      _enableDragToSection(panel, freshParsed);
     } else {
       _setupSingleSelectAll(panel);
       // Grip-handle drag to move items (and checked selections) between groups.
       _enableDragToGroup(panel, freshParsed);
+      _scheduleWorkPlan(panel, freshParsed);
     }
 
     // Drag across checkboxes to (un)check a range at once (both modes).

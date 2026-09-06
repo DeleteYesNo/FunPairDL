@@ -201,6 +201,19 @@
   flex-shrink: 0;
 }
 
+.funpairdl-tag-source {
+  font-size: 10px;
+  background: #2f3b52;
+  color: #b8c4d6;
+  padding: 1px 5px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .funpairdl-tag-bundle {
   font-size: 10px;
   background: #e0a800;
@@ -261,6 +274,148 @@
   color: #4a90d9;
   font-weight: 600;
   flex-shrink: 0;
+}
+
+/* Media hints on a video row: thumbnail hover icon + scene tags. */
+.funpairdl-media-hints {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 220px;
+}
+.funpairdl-thumb-icon { cursor: zoom-in; font-size: 12px; flex-shrink: 0; }
+.funpairdl-scene-tags {
+  font-size: 10px;
+  color: #9aa5b1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.funpairdl-thumb-pop {
+  position: fixed;
+  z-index: 2147483647;
+  padding: 4px;
+  background: #0f1424;
+  border: 1px solid #4a90d9;
+  border-radius: 6px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+.funpairdl-thumb-pop img { display: block; max-width: 240px; max-height: 240px; border-radius: 4px; }
+
+/* Single mode: pairing preview under Main (which rows form which work). */
+.funpairdl-work-plan {
+  margin: 4px 6px 6px;
+  padding: 6px 8px;
+  border: 1px dashed #2f3b52;
+  border-radius: 6px;
+  background: #12192e;
+  font-size: 12px;
+}
+.funpairdl-work-plan-head { color: #b8c4d6; margin-bottom: 4px; }
+.funpairdl-work-group {
+  border-left: 3px solid #4a90d9;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.02);
+  padding: 4px 6px;
+  margin: 4px 0;
+}
+.funpairdl-work-group.funpairdl-drag-over {
+  outline: 2px solid #4a90d9;
+  outline-offset: -2px;
+  background: rgba(74, 144, 217, 0.1);
+}
+.funpairdl-work-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.funpairdl-work-group-name { flex: 1; min-width: 0; font-size: 12px; }
+.funpairdl-work-group-auto { flex: 1; color: #9aa5b1; font-style: italic; }
+.funpairdl-work-group-count {
+  font-size: 10px;
+  color: #888;
+  background: rgba(255,255,255,0.08);
+  padding: 1px 5px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.funpairdl-work-members {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 3px 0 0 2px;
+  color: #ccc;
+  font-size: 11px;
+}
+.funpairdl-work-member { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.funpairdl-work-empty { color: #667; font-style: italic; }
+.funpairdl-tag-work {
+  font-size: 10px;
+  color: #fff;
+  padding: 1px 5px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  font-weight: 700;
+}
+.funpairdl-work-add { width: auto; margin: 4px 0 0; padding: 3px 10px; font-size: 11px; }
+.funpairdl-tag-basis {
+  font-size: 10px;
+  color: #fff;
+  padding: 1px 6px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.funpairdl-work-member b { color: #4a90d9; font-weight: 600; }
+
+/* Bundle sub-groups: the planned split of a multi-work bundle. */
+.funpairdl-bundle-plan-hint {
+  font-size: 11px;
+  color: #9aa5b1;
+  padding: 2px 0 6px;
+}
+.funpairdl-bundle-group {
+  border: 1px solid #2a2a3e;
+  border-radius: 5px;
+  margin: 4px 0;
+  padding: 2px 4px 4px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.funpairdl-bundle-group.funpairdl-drag-over {
+  outline: 2px solid #4a90d9;
+  outline-offset: -2px;
+  background: rgba(74, 144, 217, 0.08);
+}
+.funpairdl-bundle-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0 4px;
+}
+.funpairdl-bundle-group-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+}
+.funpairdl-bundle-group-count {
+  font-size: 10px;
+  color: #888;
+  background: rgba(255,255,255,0.08);
+  padding: 1px 5px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.funpairdl-bundle-group-remove { flex-shrink: 0; }
+.funpairdl-bundle-grip { font-size: 12px; padding: 0 2px 0 0; }
+.funpairdl-bundle-file.funpairdl-dragging { opacity: 0.45; }
+.funpairdl-bundle-add-group {
+  width: auto;
+  margin: 4px 0 0;
+  padding: 3px 10px;
+  font-size: 11px;
 }
 
 .funpairdl-panel-footer {
@@ -593,6 +748,43 @@
   border-radius: 6px;
 }
 
+/* Collection mode: toolbar with the add-group button, user-group name
+   field, comment-group post label. */
+.funpairdl-collection-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.funpairdl-collection-toolbar .funpairdl-select-all { flex: 1; }
+.funpairdl-collection-toolbar .funpairdl-add-section-btn {
+  width: auto;
+  margin: 0;
+  padding: 4px 10px;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.funpairdl-section-name-input {
+  flex: 1;
+  min-width: 0;
+}
+.funpairdl-section-sub {
+  font-size: 10px;
+  color: #888;
+  flex-shrink: 0;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.funpairdl-section-remove { flex-shrink: 0; }
+
+/* Collection mode: the section the cursor is over while dragging a row. */
+.funpairdl-section-group.funpairdl-drag-over {
+  outline: 2px solid #4a90d9;
+  outline-offset: -2px;
+  background: rgba(74, 144, 217, 0.08);
+}
+
 .funpairdl-inherit-preview {
   padding: 2px 12px 6px 12px;
   font-size: 11px;
@@ -606,6 +798,9 @@
 
 .funpairdl-item-group-select {
   flex-shrink: 0;
+  /* Sized to its longest option it ate 220px of a 442px side-panel row and
+     squeezed the filename to nothing; the dropdown popup is unaffected. */
+  max-width: 120px;
   font-size: 11px;
   background: #16213e;
   color: #e0e0e0;

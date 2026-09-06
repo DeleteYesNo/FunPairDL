@@ -569,6 +569,17 @@ class BridgeCore:
                     respond(callback_id, resp)
                 return
 
+            if msg_type == "bundle-plan":
+                # Preview of how a bundle's files split into pairs (see
+                # /bundle/plan); the panel renders it as draggable sub-groups.
+                s = self._get_session()
+                async with s.post(
+                    f"{API_URL}/bundle/plan", json=data or {},
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as r:
+                    respond(callback_id, await r.json())
+                return
+
             if msg_type == "get-config":
                 s = self._get_session()
                 async with s.get(

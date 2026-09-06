@@ -267,6 +267,7 @@ class QueueManager:
         groups: list[dict] | None = None,
         filenames: dict[str, str] | None = None,
         sizes: dict | None = None,
+        bundle_plan: dict[str, str] | None = None,
     ) -> Pair:
         """Add a Pair to the queue.
 
@@ -403,6 +404,15 @@ class QueueManager:
                     group=grp_name,
                 )
                 pair.items.append(item)
+
+        # Bundle arrangement from the panel (per group and/or top level).
+        for grp in groups:
+            for u, lb in (grp.get("bundle_plan") or {}).items():
+                if u and (lb or "").strip():
+                    pair.bundle_plan[u] = lb.strip()
+        for u, lb in (bundle_plan or {}).items():
+            if u and (lb or "").strip():
+                pair.bundle_plan[u] = lb.strip()
 
         with self._pairs_lock:
             self.pairs.append(pair)
@@ -1604,6 +1614,47 @@ class QueueManager:
             logger.error("Download task error: %s", e)
             raise
 
+    @classmethod
+    def _video_identity(cls, v: PairItem) -> str:
+        """The most reliable name for a video: a descriptive URL slug
+        (rule34video's /video/<id>/beta-samplekit/, iwara's
+        /video/<id>/work-title) — stable, and what script authors name their
+        files after — else the filename (the real resolved name on file
+        hosts whose slug is an opaque token)."""
+        slug = Path(cls._guess_filename(v.url, "video")).stem
+        # Route words (hanime1's /watch, /view, /embed…) and bare ids are
+        # not names — one split once produced a folder literally called
+        # "watch".
+        descriptive = (("-" in slug or " " in slug)
+                       and slug.lower() not in cls._NON_NAME_SLUGS)
+        return slug if descriptive else Path(v.filename).stem
+
+    _NON_NAME_SLUGS = frozenset({
+        "video", "videos", "index", "watch", "view", "embed", "player",
+        "post", "posts", "file", "files", "download", "d", "u", "f",
+    })
+
+    @classmethod
+    def _mirror_key(cls, name: str) -> str:
+        """Key on which two videos count as the same work: drops a site
+        prefix ("Iwara - ", "Source: "), bracketed tags ("[id] [Source]",
+        "(1080p)"), resolution/fps/watermark tokens, then collapses to
+        alphanumerics. "Iwara - Work Title [abc123] [Source]" and the slug
+        "work-title" both become "worktitle"."""
+        import re
+        s = name or ""
+        if "." in s and not s.endswith("."):
+            s = Path(s).stem
+        s = re.sub(r"^\s*(?:iwara|source(?:\s*video)?|mirror|video)\s*[-—–:]\s*", "", s, flags=re.IGNORECASE)
+        # A leading bracket is an author/release tag that tells works apart
+        # ("[Gweda] Shenhe" vs "[Teamboobs] Shenhe" — see pairing.normalize);
+        # brackets after the title are technical tags and go.
+        m = re.match(r"^\s*([\[\(【][^\]\)】]*[\]\)】])", s)
+        lead = m.group(1) if m else ""
+        rest = s[m.end():] if m else s
+        rest = re.sub(r"[\[\(【][^\]\)】]*[\]\)】]", " ", rest)
+        return cls._match_key(f"{lead} {rest}")
+
     @staticmethod
     def _clean_title(title: str) -> str:
         """Clean article title: remove common prefixes/tags that aren't part of the name."""
@@ -1673,39 +1724,108 @@ class QueueManager:
             canonical = cls._ERODECK_AXIS_MAP.get(part.lower())
             if canonical:
                 return canonical, part
+        # Second pass: a known axis word with a qualifier glued on
+        # (".suckManual", ".twist_v2"). Treating these as the main axis
+        # renamed a suction script to "<base>.funscript" and shoved the real
+        # stroke script into an .alt folder. The whole component is kept as
+        # the display suffix so the scripter's naming survives the rename.
+        for part in reversed(parts):
+            canonical = cls._axis_from_prefixed(part)
+            if canonical:
+                return canonical, part
         # No known axis found → main axis (L0)
         return "L0", ""
 
-    def _auto_split_bundle_pair(self, pair: Pair) -> list[Pair] | None:
-        """If a resolved bundle produced multiple videos, split into separate
-        pairs by matching each video to its scripts via filename stem.
+    @classmethod
+    def _axis_from_prefixed(cls, part: str) -> str:
+        """Canonical axis for a component like ``suckManual`` / ``roll-v2``:
+        a known *word* axis (3+ letters, not the L0/R1 codes) followed by a
+        qualifier that starts with an uppercase letter, digit or separator.
+        ``rolling`` / ``pitcher`` do not qualify; returns "" when no match."""
+        low = part.lower()
+        for word, canonical in cls._ERODECK_AXIS_MAP.items():
+            if len(word) < 3 or not word.isalpha():
+                continue
+            if len(low) > len(word) and low.startswith(word):
+                rest = part[len(word):]
+                if rest[0].isupper() or rest[0].isdigit() or rest[0] in "-_ ":
+                    return canonical
+        return ""
 
-        Returns new pairs if split occurred, or None if no split needed.
+    def plan_bundle_split(
+        self,
+        items: list[PairItem],
+        plan: dict[str, str] | None = None,
+        pair_name: str = "",
+        alt_group_config: dict[str, dict] | None = None,
+        hints: dict[str, str] | None = None,
+        durations: dict[str, float] | None = None,
+        links: dict[str, str] | None = None,
+    ) -> list[dict] | None:
+        """Decide how a multi-work bundle splits into pairs — without touching
+        the queue. Returns None when no split is due (one video, or a mirror
+        set where every video reduces to the same name), else the groups in
+        output order:
+
+            {"name": folder name, "label": user label or "",
+             "videos": [PairItem], "scripts": [PairItem], "others": [PairItem]}
+
+        `plan` (item url → group label) is what the user arranged in the
+        panel: planned items go to their labelled group and the name-based
+        heuristic only places what is left. The /bundle/plan endpoint calls
+        this with no plan so the panel can show the heuristic's outcome
+        before sending — the preview and the real split are one code path.
         """
-        videos = [i for i in pair.items if i.file_type == FileType.VIDEO]
-        if len(videos) <= 1:
+        alt_group_config = alt_group_config or {}
+        hints = hints or {}
+        durations = {k: float(v) for k, v in (durations or {}).items() if v}
+        links = {k: v for k, v in (links or {}).items() if v}
+        plan = {k: (v or "").strip() for k, v in (plan or {}).items() if (v or "").strip()}
+        videos = [i for i in items if i.file_type == FileType.VIDEO]
+        scripts = [i for i in items if i.file_type == FileType.FUNSCRIPT]
+        others = [i for i in items if i.file_type == FileType.OTHER]
+
+        def _label(it: PairItem) -> str:
+            return plan.get(it.url) or plan.get(it.resolved_url or "") or ""
+
+        labels: list[str] = []
+        for it in videos + scripts:
+            lb = _label(it)
+            if lb and lb not in labels:
+                labels.append(lb)
+
+        if len(videos) <= 1 and len(labels) <= 1:
             return None
 
         # Don't split a mirror set: when every video reduces to the same
-        # normalized name they're the same work on different hosts (or the
-        # same file picked twice) — keep them in one pair. Only split when
-        # there are genuinely distinct works (e.g. a 5-pack folder of
-        # separate scenes, whether bundle-expanded or sent pre-expanded).
-        def _norm_stem(fn: str) -> str:
-            return "".join(c for c in Path(fn).stem.lower() if c.isalnum())
-        distinct_stems = {_norm_stem(v.filename) for v in videos if v.filename}
-        if len(distinct_stems) <= 1:
+        # work name they're the same work on different hosts (or the same
+        # file picked twice) — keep them in one pair. Only split when there
+        # are genuinely distinct works (e.g. a 5-pack folder of separate
+        # scenes, whether bundle-expanded or sent pre-expanded). A user plan
+        # with two or more labels overrides that judgement.
+        #
+        # "Same work" is judged on the mirror key — a pixeldrain re-upload
+        # named "Iwara - Work Title [id] [Source].mp4" and the iwara page
+        # itself (slug "work-title") must compare equal, so the site prefix,
+        # bracketed tags and resolution noise are dropped first.
+        distinct_stems = set(self._work_keys(videos).values())
+        distinct_stems.discard("")
+        if len(distinct_stems) <= 1 and len(labels) <= 1:
             return None
 
-        scripts = [i for i in pair.items if i.file_type == FileType.FUNSCRIPT]
-        others = [i for i in pair.items if i.file_type == FileType.OTHER]
+        # The heuristic only places what the user did not place.
+        h_videos = [v for v in videos if not _label(v)]
+        h_scripts = [s for s in scripts if not _label(s)]
 
         def _strip_axis(name: str) -> str:
             base = name
             if base.lower().endswith(".funscript"):
                 base = base[: -len(".funscript")]
             parts = base.rsplit(".", 1)
-            if len(parts) == 2 and parts[1].lower() in self._ERODECK_AXIS_MAP:
+            if len(parts) == 2 and (
+                parts[1].lower() in self._ERODECK_AXIS_MAP
+                or self._axis_from_prefixed(parts[1])
+            ):
                 base = parts[0]
             return base
 
@@ -1723,16 +1843,12 @@ class QueueManager:
         # authors name their files after, so prefer it. Opaque slugs (a
         # pixeldrain /d/<id> file token) aren't descriptive — fall back to the
         # filename, which for those hosts is the real resolved name.
-        def _identity(v: PairItem) -> str:
-            slug = Path(self._guess_filename(v.url, "video")).stem
-            descriptive = (("-" in slug or " " in slug)
-                           and slug.lower() not in ("video", "index"))
-            return slug if descriptive else Path(v.filename).stem
+        _identity = self._video_identity
 
         # (video, identity stem for naming, match key) — longest key first so
         # the most specific video wins a containment match.
         video_info: list[tuple[PairItem, str, str]] = []
-        for v in videos:
+        for v in h_videos:
             real = _identity(v)
             video_info.append((v, real, _key(real)))
         video_info.sort(key=lambda x: len(x[2]), reverse=True)
@@ -1767,7 +1883,15 @@ class QueueManager:
             )
             return {t for t in _re.split(r"[^a-z0-9]+", s) if len(t) >= 3}
 
-        video_tokens = [(v, _tokens(real)) for v, real, _ in video_info]
+        # Descriptive hints (an e621 post's scene tags) join the video's own
+        # name tokens: a script called "fox shower" then finds the post
+        # tagged "shower_sex" even though no title says so. Hints are
+        # weighted by rarity like any token, so tags every post shares
+        # ("sex", "oral") decide nothing.
+        video_tokens = [
+            (v, _tokens(real) | _tokens(hints.get(v.url, "")))
+            for v, real, _ in video_info
+        ]
         _df: dict[str, int] = {}
         for _, toks in video_tokens:
             for t in toks:
@@ -1775,30 +1899,83 @@ class QueueManager:
 
         def _find_video_by_tokens(name: str):
             stoks = _tokens(name)
-            best, best_score = None, 0.0
+            best, best_score, second_score = None, 0.0, 0.0
             for v, vtoks in video_tokens:
                 shared = stoks & vtoks
                 if not shared:
                     continue
                 score = sum(1.0 / _df[t] for t in shared)
                 if score > best_score:
-                    best_score, best = score, v
+                    second_score, best_score, best = best_score, score, v
+                elif score > second_score:
+                    second_score = score
             # Require at least one reasonably distinctive shared token
             # (df<=2 → score>=0.5). A lone generic token won't clear this.
-            return best if best_score >= 0.5 else None
+            # A dead heat between two videos (both share only the series
+            # name) is no match either — the document-order rescue below
+            # places such a script on the video still without one, which
+            # beats handing it to whichever video happened to come first.
+            if best_score < 0.5 or best_score == second_score:
+                return None
+            return best
 
         matched: dict[int, list[PairItem]] = {id(v): [] for v, _, _ in video_info}
         unmatched_scripts: list[PairItem] = []
+        # How each script found its video: "plan" | "name" | "link" |
+        # "tokens" | "duration" | "order" | "none" — surfaced to the panel
+        # so a guessed pairing is visibly a guess.
+        basis: dict[int, str] = {}
 
-        for s in scripts:
+        # A script's metadata.video_url names its video outright.
+        def _find_video_by_link(s: PairItem):
+            target = (links.get(s.url) or "").strip().lower().rstrip("/")
+            if not target:
+                return None
+            for v, _, _ in video_info:
+                for cand in (v.url, v.resolved_url or ""):
+                    if cand and cand.lower().rstrip("/") == target:
+                        return v
+            return None
+
+        # Duration: the one video whose length is within tolerance of the
+        # script's (2 % or 3 s, whichever is larger). Two videos in range →
+        # no decision, on purpose.
+        def _find_video_by_duration(s: PairItem):
+            ds = durations.get(s.url)
+            if not ds:
+                return None
+            hits = []
+            for v, _, _ in video_info:
+                dv = durations.get(v.url) or durations.get(v.resolved_url or "")
+                if not dv:
+                    continue
+                if abs(dv - ds) <= max(3.0, 0.02 * dv):
+                    hits.append(v)
+            return hits[0] if len(hits) == 1 else None
+
+        for s in h_scripts:
             base = _strip_axis(s.filename)
+            how = ""
             v = _find_video(_key(base))
             if v is None:
                 v = _find_video(_key(base, strip_prefix=True))
+            if v is not None:
+                how = "name"
+            if v is None:
+                v = _find_video_by_link(s)
+                if v is not None:
+                    how = "link"
             if v is None:
                 v = _find_video_by_tokens(base)
+                if v is not None:
+                    how = "tokens"
+            if v is None:
+                v = _find_video_by_duration(s)
+                if v is not None:
+                    how = "duration"
             if v is not None:
                 matched[id(v)].append(s)
+                basis[id(s)] = how
             else:
                 unmatched_scripts.append(s)
 
@@ -1814,8 +1991,8 @@ class QueueManager:
         # disturbed — this only places true orphans, and only onto videos that
         # found no script of their own.
         if unmatched_scripts:
-            vrank = {id(v): r for r, v in enumerate(videos)}
-            srank = {id(s): r for r, s in enumerate(scripts)}
+            vrank = {id(v): r for r, v in enumerate(h_videos)}
+            srank = {id(s): r for r, s in enumerate(h_scripts)}
             still_unmatched: list[PairItem] = []
             for s in unmatched_scripts:
                 rs = srank.get(id(s), 0)
@@ -1828,51 +2005,137 @@ class QueueManager:
                     0 if vrank.get(id(v), 0) <= rs else 1,
                 ))
                 matched[id(cand[0])].append(s)
+                basis[id(s)] = "order"
             unmatched_scripts = still_unmatched
 
-        # Create new pairs — each split pair becomes its own folder, so
-        # whatever group label items carried from the bundle source is no
-        # longer meaningful; reset to Main so organize treats them flatly.
-        #
-        # Naming: prefer a human title over the video's own stem. The stem is
-        # `_identity()`'s pick — chosen for script *matching*, so it's often a
-        # URL slug (iwara/rule34video "/video/<id>/demo-game-mock-battle-2")
-        # that makes a poor folder name. An Alt group carries the real title in
-        # `alt_group_config[group].display_name`; the lone OP (Main) video
-        # inherits the post/bundle title. Fall back to the stem only when
-        # neither is available (e.g. a plain multi-file folder, no alts).
+        # Group naming: prefer a human title over the video's own stem. The
+        # stem is `_identity()`'s pick — chosen for script *matching*, so it's
+        # often a URL slug (iwara/rule34video "/video/<id>/demo-game-mock-
+        # battle-2") that makes a poor folder name. An Alt group carries the
+        # real title in `alt_group_config[group].display_name`; the lone OP
+        # (Main) video inherits the post/bundle title. Fall back to the stem
+        # only when neither is available (a plain multi-file folder, no alts).
         main_video_count = sum(
             1 for vi, _, _ in video_info if (vi.group or "Main") == "Main"
         )
-        new_pairs: list[Pair] = []
+        groups: list[dict] = []
         for video_item, real_stem, _ in video_info:
             grp = video_item.group or "Main"
-            display = (pair.alt_group_config.get(grp, {}).get("display_name") or "").strip()
+            display = (alt_group_config.get(grp, {}).get("display_name") or "").strip()
             if display:
                 title_src = display
-            elif grp == "Main" and main_video_count == 1:
-                title_src = pair.name
+            elif grp == "Main" and main_video_count == 1 and pair_name:
+                title_src = pair_name
             else:
                 title_src = real_stem
             name = sanitize_filename(self._clean_title(title_src))
             if not name:  # title cleaned away to nothing — fall back to the stem
                 name = sanitize_filename(self._clean_title(real_stem))
-            new_pair = Pair(name=name, preferred_resolution=pair.preferred_resolution)
-            new_pair.output_dir = str(self.download_dir / name)
-            new_pair.items = [video_item] + matched[id(video_item)]
+            g_scripts = list(matched[id(video_item)])
+            groups.append({
+                "name": name, "label": "",
+                "videos": [video_item], "scripts": g_scripts,
+                "others": [],
+                "script_basis": {s.url: basis.get(id(s), "") for s in g_scripts},
+            })
+
+        # User-labelled groups, in the order the labels first appear.
+        for lb in labels:
+            name = sanitize_filename(self._clean_title(lb)) or sanitize_filename(lb) or lb
+            g_scripts = [s for s in scripts if _label(s) == lb]
+            groups.append({
+                "name": name, "label": lb,
+                "videos": [v for v in videos if _label(v) == lb],
+                "scripts": g_scripts,
+                "others": [],
+                "script_basis": {s.url: "plan" for s in g_scripts},
+            })
+
+        if not groups:
+            return None
+
+        # Scripts nobody claimed (likely shared/generic) and "other" files go
+        # with the first group.
+        if unmatched_scripts:
+            groups[0]["scripts"].extend(unmatched_scripts)
+            for s in unmatched_scripts:
+                groups[0]["script_basis"][s.url] = "none"
+        if others:
+            groups[0]["others"].extend(others)
+
+        # Group confidence = its weakest script: a group holding one guessed
+        # ("order") script is a guess as a whole.
+        rank = {"none": 0, "order": 1, "duration": 2, "tokens": 3, "link": 4, "name": 5, "plan": 6}
+        for g in groups:
+            kinds = list(g["script_basis"].values())
+            g["basis"] = min(kinds, key=lambda k: rank.get(k, 0)) if kinds else ""
+
+        # Two works with the same title (two booru posts named alike) must
+        # not share a folder: the later ones get the video's own id/slug, or
+        # a counter, appended.
+        seen: dict[str, int] = {}
+        for g in groups:
+            base = g["name"]
+            n = seen.get(base, 0) + 1
+            seen[base] = n
+            if n == 1:
+                continue
+            tag = ""
+            if g["videos"]:
+                slug = Path(self._guess_filename(g["videos"][0].url, "video")).stem
+                if slug and slug.lower() not in ("video", "index") and 0 < len(slug) <= 24:
+                    tag = slug
+            g["name"] = sanitize_filename(f"{base} [{tag}]" if tag else f"{base} ({n})")
+        return groups
+
+    @classmethod
+    def _work_keys(cls, videos: list[PairItem]) -> dict[int, str]:
+        """id(video) → work key. Videos with the same mirror key are one work
+        (mirrors on different hosts) — unless they sit on the SAME host under
+        different URLs: two e621 posts titled alike are two works, so those
+        keep distinct keys (the key plus the URL)."""
+        from urllib.parse import urlparse
+        by_key: dict[str, list[PairItem]] = {}
+        for v in videos:
+            by_key.setdefault(cls._mirror_key(cls._video_identity(v)), []).append(v)
+        out: dict[int, str] = {}
+        for key, group in by_key.items():
+            hosts: dict[str, set[str]] = {}
+            for v in group:
+                host = (urlparse(v.url).hostname or "").lower().removeprefix("www.")
+                hosts.setdefault(host, set()).add(v.url)
+            # Only a real host counts; bare/relative URLs (tests, local
+            # files) have none and stay mirrors.
+            same_host_dupes = any(len(urls) > 1 for host, urls in hosts.items() if host)
+            for v in group:
+                out[id(v)] = f"{key}#{v.url}" if (same_host_dupes and key) else key
+        return out
+
+    def _auto_split_bundle_pair(self, pair: Pair) -> list[Pair] | None:
+        """If a resolved bundle produced multiple videos, split into separate
+        pairs by matching each video to its scripts via filename stem — or by
+        the user's panel arrangement when the pair carries a bundle_plan.
+
+        Returns new pairs if split occurred, or None if no split needed.
+        """
+        groups = self.plan_bundle_split(
+            pair.items, pair.bundle_plan, pair.name, pair.alt_group_config)
+        if not groups:
+            return None
+
+        # Each split pair becomes its own folder, so whatever group label
+        # items carried from the bundle source is no longer meaningful; reset
+        # to Main so organize treats them flatly.
+        new_pairs: list[Pair] = []
+        for g in groups:
+            new_pair = Pair(name=g["name"], preferred_resolution=pair.preferred_resolution)
+            new_pair.output_dir = str(self.download_dir / g["name"])
+            new_pair.items = list(g["videos"]) + list(g["scripts"]) + list(g["others"])
             for it in new_pair.items:
                 it.group = "Main"
             new_pairs.append(new_pair)
 
-        # Distribute unmatched scripts to all pairs (likely shared/generic)
-        if unmatched_scripts:
-            for s in unmatched_scripts:
-                new_pairs[0].items.append(s)
-
-        # Distribute "other" files to first pair
-        if others:
-            new_pairs[0].items.extend(others)
-
+        videos = [i for i in pair.items if i.file_type == FileType.VIDEO]
         logger.info(
             "Auto-split bundle pair '%s' (%d videos) into %d pairs: %s",
             pair.name, len(videos), len(new_pairs),
@@ -2120,6 +2383,17 @@ class QueueManager:
             if len(wkey) < 2:
                 return False
             own = out_dir.resolve()
+            # Folders another queued/active pair is still writing are not
+            # "the library copy" — a sibling from the same auto-split (two
+            # booru posts titled alike, differing only by "[id]") was merged
+            # into here before its own video had even landed.
+            busy: set[Path] = set()
+            with self._pairs_lock:
+                for other in self.pairs:
+                    if other is pair or not other.output_dir:
+                        continue
+                    if other.state in (PairState.QUEUED, PairState.DOWNLOADING, PairState.PAUSED):
+                        busy.add(_rp(Path(other.output_dir)))
             for lib in self._library_dirs():
                 try:
                     entries = list(lib.iterdir())
@@ -2130,6 +2404,8 @@ class QueueManager:
                         continue
                     if self._match_key(d.name) != wkey:
                         continue
+                    if _rp(d) in busy:
+                        continue
                     dest = d
                     dest_video = next((d / f.name for f in d.iterdir()
                                        if f.is_file() and f.suffix.lower() in self._VIDEO_EXTS), None)
@@ -2138,6 +2414,12 @@ class QueueManager:
                 if dest:
                     break
         if dest is None:
+            return False
+
+        # A video+script download only merges into a folder that has a video
+        # to compare against; with nothing to compare, "same work" is a
+        # guess — and the wrong guess strips a work of its script.
+        if src_video is not None and dest_video is None:
             return False
 
         # Same-media guard: only meaningful when BOTH sides have a video.

@@ -23,6 +23,162 @@ def _completed_pair(name):
     return pair
 
 
+class TestPlanBundleSplit:
+    """plan_bundle_split is the preview the panel shows AND the split the
+    queue performs; a user plan (url → label) overrides the name heuristic."""
+
+    def _items(self):
+        items = []
+        for n in ["Alpha", "Beta", "Gamma"]:
+            items.append(_vi(n + ".mp4", FileType.VIDEO))
+            items.append(_vi(n + ".funscript", FileType.FUNSCRIPT))
+        return items
+
+    def test_preview_without_plan_matches_heuristic_split(self):
+        qm = QueueManager()
+        groups = qm.plan_bundle_split(self._items(), None, "Pack")
+        assert groups is not None and len(groups) == 3
+        assert all(len(g["videos"]) == 1 and len(g["scripts"]) == 1 for g in groups)
+        assert all(g["label"] == "" for g in groups)
+        split = qm._auto_split_bundle_pair(Pair(name="Pack", items=self._items()))
+        assert [p.name for p in split] == [g["name"] for g in groups]
+
+    def test_plan_moves_files_into_labelled_groups(self):
+        items = self._items()
+        # The user says Gamma's script really belongs with Beta's video, and
+        # names that group; Alpha is left to the heuristic.
+        plan = {"u/Beta.mp4": "Beta Special", "u/Gamma.funscript": "Beta Special",
+                "u/Gamma.mp4": "Gamma solo"}
+        groups = QueueManager().plan_bundle_split(items, plan, "Pack")
+        by_label = {g["label"]: g for g in groups}
+        assert set(by_label) == {"", "Beta Special", "Gamma solo"}
+        assert [i.filename for i in by_label["Beta Special"]["videos"]] == ["Beta.mp4"]
+        assert [i.filename for i in by_label["Beta Special"]["scripts"]] == ["Gamma.funscript"]
+        assert by_label["Beta Special"]["name"] == "Beta Special"
+        assert [i.filename for i in by_label["Gamma solo"]["videos"]] == ["Gamma.mp4"]
+        # Alpha: heuristic pair. Beta's own script lost its video to the plan
+        # and, being unmatched, rides along with the first group.
+        alpha = by_label[""]
+        assert [i.filename for i in alpha["videos"]] == ["Alpha.mp4"]
+        assert sorted(i.filename for i in alpha["scripts"]) == ["Alpha.funscript", "Beta.funscript"]
+
+    def test_mirror_on_a_file_host_is_not_split_from_the_source_page(self):
+        # The same work: the iwara page (descriptive slug) and a pixeldrain
+        # re-upload whose filename carries a site prefix and bracket tags.
+        iwara = PairItem(url="https://www.iwara.tv/video/abc123def/work-title-part-4",
+                         filename="Work Title Part 4", file_type=FileType.VIDEO)
+        pd = PairItem(url="https://pixeldrain.com/u/6qYDBQUm",
+                      filename="Iwara - Work Title Part 4 [abc123def] [Source].mp4",
+                      file_type=FileType.VIDEO)
+        scripts = [_vi("Iwara - Work Title Part 4 abc123def Source.funscript", FileType.FUNSCRIPT),
+                   _vi("Iwara - Work Title Part 4 abc123def Source.pitch.funscript", FileType.FUNSCRIPT)]
+        assert QueueManager()._mirror_key(pd.filename) == QueueManager()._mirror_key("work-title-part-4")
+        assert QueueManager().plan_bundle_split([iwara, pd, *scripts], None, "T") is None
+        # A genuinely different part is still split.
+        other = PairItem(url="https://www.iwara.tv/video/zzz/work-title-part-5",
+                         filename="Work Title Part 5", file_type=FileType.VIDEO)
+        assert QueueManager().plan_bundle_split([iwara, pd, other], None, "T") is not None
+
+    def test_hints_pair_scene_named_scripts_with_tagged_posts(self):
+        # Four booru posts whose titles are alike (two even identical), and
+        # scripts named after the scene. Only the posts' tags can tell.
+        def vid(n, url):
+            return PairItem(url=url, filename=n, file_type=FileType.VIDEO)
+        videos = [
+            vid("alpha and beta (game) created by author", "https://e621.net/posts/1"),
+            vid("alpha and beta (game) created by author", "https://e621.net/posts/2"),
+            vid("gamma fox (game) created by author", "https://e621.net/posts/3"),
+            vid("gamma fox (game) created by author", "https://e621.net/posts/4"),
+        ]
+        scripts = [
+            _vi("author - fox dom blowjob.funscript", FileType.FUNSCRIPT),
+            _vi("author - fox kneeling blowjob.funscript", FileType.FUNSCRIPT),
+            _vi("author - fox reverse cowgirl.funscript", FileType.FUNSCRIPT),
+            _vi("author - fox shower.funscript", FileType.FUNSCRIPT),
+        ]
+        hints = {
+            "https://e621.net/posts/1": "fellatio dominant_female sofa_sex sex",
+            "https://e621.net/posts/2": "fellatio kneeling_oral_position standing sex",
+            "https://e621.net/posts/3": "reverse_cowgirl_position dominant_female sex",
+            "https://e621.net/posts/4": "shower shower_sex from_behind_position sex",
+        }
+        groups = QueueManager().plan_bundle_split(videos + scripts, None, "T", hints=hints)
+        assert groups is not None and len(groups) == 4
+        # Same-titled posts on the same host are distinct works, and their
+        # folders must not collide: the second of each pair carries its id.
+        names = [g["name"] for g in groups]
+        assert len(set(names)) == 4
+        assert any(n.endswith("[2]") for n in names) and any(n.endswith("[4]") for n in names)
+        by_video = {g["videos"][0].url: [s.filename for s in g["scripts"]] for g in groups}
+        assert by_video["https://e621.net/posts/4"] == ["author - fox shower.funscript"]
+        assert by_video["https://e621.net/posts/3"] == ["author - fox reverse cowgirl.funscript"]
+        assert by_video["https://e621.net/posts/2"] == ["author - fox kneeling blowjob.funscript"]
+        assert by_video["https://e621.net/posts/1"] == ["author - fox dom blowjob.funscript"]
+
+    def test_duration_decides_when_names_and_tags_tie(self):
+        # Two HMVs with tag-soup names that share every word; the scripts'
+        # lengths pick them apart. A third video in range of nothing stays
+        # unpaired → order rescue, flagged as a guess.
+        v1 = PairItem(url="https://host.example/v/1", filename="hmv tags mix a.mp4", file_type=FileType.VIDEO)
+        v2 = PairItem(url="https://host.example/v/2", filename="hmv tags mix b.mp4", file_type=FileType.VIDEO)
+        v3 = PairItem(url="https://host.example/v/3", filename="hmv tags mix c.mp4", file_type=FileType.VIDEO)
+        s1 = _vi("edit one.funscript", FileType.FUNSCRIPT)
+        s2 = _vi("edit two.funscript", FileType.FUNSCRIPT)
+        s3 = _vi("edit three.funscript", FileType.FUNSCRIPT)
+        durations = {v1.url: 201.0, v2.url: 154.0, v3.url: 300.0,
+                     s1.url: 199.5, s2.url: 153.2, s3.url: 240.0}
+        groups = QueueManager().plan_bundle_split([v1, v2, v3, s1, s2, s3], None, "T", durations=durations)
+        by_video = {g["videos"][0].url: g for g in groups}
+        assert [s.filename for s in by_video[v1.url]["scripts"]] == ["edit one.funscript"]
+        assert by_video[v1.url]["basis"] == "duration"
+        assert [s.filename for s in by_video[v2.url]["scripts"]] == ["edit two.funscript"]
+        assert [s.filename for s in by_video[v3.url]["scripts"]] == ["edit three.funscript"]
+        assert by_video[v3.url]["basis"] == "order"
+        assert by_video[v3.url]["script_basis"][s3.url] == "order"
+
+    def test_duration_declines_when_two_videos_are_in_range(self):
+        v1 = PairItem(url="https://host.example/v/1", filename="loop a.mp4", file_type=FileType.VIDEO)
+        v2 = PairItem(url="https://host.example/v/2", filename="loop b.mp4", file_type=FileType.VIDEO)
+        s = _vi("thing.funscript", FileType.FUNSCRIPT)
+        durations = {v1.url: 30.0, v2.url: 31.0, s.url: 30.5}
+        groups = QueueManager().plan_bundle_split([v1, v2, s], None, "T", durations=durations)
+        # Undecidable by duration → placed by document order and marked so.
+        g = next(g for g in groups if g["scripts"])
+        assert g["basis"] == "order"
+
+    def test_script_metadata_link_names_its_video(self):
+        v1 = PairItem(url="https://host.example/v/1", filename="x.mp4", file_type=FileType.VIDEO)
+        v2 = PairItem(url="https://host.example/v/2", filename="y.mp4", file_type=FileType.VIDEO)
+        s = _vi("unrelated name.funscript", FileType.FUNSCRIPT)
+        groups = QueueManager().plan_bundle_split(
+            [v1, v2, s], None, "T", links={s.url: "https://host.example/v/2/"})
+        g = next(g for g in groups if g["scripts"])
+        assert g["videos"][0] is v2 and g["basis"] == "link"
+
+    def test_name_match_reports_name_basis(self):
+        groups = QueueManager().plan_bundle_split(self._items(), None, "Pack")
+        assert all(g["basis"] == "name" for g in groups)
+
+    def test_plan_with_two_labels_splits_even_a_mirror_set(self):
+        # Same-named videos are normally kept as one pair (mirrors); an
+        # explicit two-label plan says they are distinct works.
+        items = [_vi("Clip.mp4", FileType.VIDEO), _vi("Clip.mp4", FileType.VIDEO)]
+        items[1].url = "u/other/Clip.mp4"
+        assert QueueManager().plan_bundle_split(items, None, "P") is None
+        plan = {"u/Clip.mp4": "One", "u/other/Clip.mp4": "Two"}
+        groups = QueueManager().plan_bundle_split(items, plan, "P")
+        assert [g["label"] for g in groups] == ["One", "Two"]
+
+    def test_pair_bundle_plan_round_trips_and_drives_the_split(self):
+        pair = Pair(name="Pack", items=self._items())
+        pair.bundle_plan = {"u/Alpha.mp4": "Custom", "u/Alpha.funscript": "Custom"}
+        assert Pair.from_dict(pair.to_dict()).bundle_plan == pair.bundle_plan
+        split = QueueManager()._auto_split_bundle_pair(pair)
+        assert "Custom" in [p.name for p in split]
+        custom = next(p for p in split if p.name == "Custom")
+        assert sorted(i.filename for i in custom.items) == ["Alpha.funscript", "Alpha.mp4"]
+
+
 class TestAutoSplitBundlePair:
     def test_splits_distinct_works(self):
         # A folder of distinct scenes (each video + its script) must split

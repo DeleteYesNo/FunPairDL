@@ -19,6 +19,8 @@ def detect_provider(url: str) -> str:
         "discuss.eroscripts.com": "eroscripts",
         "hmvmania.com": "hmvmania",
         "socigames.com": "socigames",
+        "e621.net": "e621",
+        "e926.net": "e621",
     }
 
     for domain, provider in provider_map.items():
@@ -57,6 +59,44 @@ def extract_pixeldrain_id(url: str) -> str | None:
     if len(parts) >= 3 and parts[0] == "api" and parts[1] == "file":
         return parts[2]
     return None
+
+
+# Friendly names for the queue's "Source" column. Providers that cover one
+# site get a brand name; the catch-alls (ytdlp/direct) fall back to the host.
+_PROVIDER_LABELS = {
+    "pixeldrain": "Pixeldrain",
+    "mega": "MEGA",
+    "gofile": "GoFile",
+    "iwara": "Iwara",
+    "eroscripts": "EroScripts",
+    "hmvmania": "HMV Mania",
+    "socigames": "SociGames",
+    "e621": "e621",
+}
+
+
+def source_label(provider_name: str, url: str) -> str:
+    """Short human-readable source for a queue item.
+
+    ``provider_name`` is what the item was tagged with when queued; it is
+    re-derived from the URL when it is a catch-all ("direct"/"ytdlp") so
+    items queued before a site gained its own provider still get the brand
+    name. Otherwise the bare host is shown (``rule34video.com``), with the
+    forum's upload CDN folded into "EroScripts".
+    """
+    name = (provider_name or "").strip().lower()
+    if name not in _PROVIDER_LABELS:
+        name = detect_provider(url)
+    label = _PROVIDER_LABELS.get(name)
+    if label:
+        return label
+    try:
+        host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    except Exception:
+        host = ""
+    if host.endswith("eroscripts.com"):
+        return "EroScripts"
+    return host
 
 
 # Match Pixeldrain file or list URLs in arbitrary text

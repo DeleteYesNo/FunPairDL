@@ -55,6 +55,24 @@ check("x.com /status/ tweet is a video", ctx.isNonVideoPath("https://x.com/u/sta
 check("pixeldrain file is a video path", ctx.isNonVideoPath("https://pixeldrain.com/u/abc123"), false);
 check("pornhub model page is non-video", ctx.isNonVideoPath("https://pornhub.com/model/foo"), true);
 
+// ── detectAxis: only known axes are axes; other dot-words belong to the name ──
+check("axis: raw suffix is the main script", ctx.detectAxis("Title ver.!!.raw.funscript"), "main");
+check("axis: raw + pitch → pitch", ctx.detectAxis("Title ver.!!.raw.pitch.funscript"), "pitch");
+check("axis: raw + surge → surge", ctx.detectAxis("Title ver.!!.raw.surge.funscript"), "surge");
+check("axis: plain name is main", ctx.detectAxis("Title.funscript"), "main");
+check("axis: known axis, any case", ctx.detectAxis("Title.Roll.funscript"), "roll");
+check("axis: erodeck code", ctx.detectAxis("Title.R2.funscript"), "r2");
+check("axis: L0 is main", ctx.detectAxis("Title.L0.funscript"), "main");
+check("axis: L0 with a trailing qualifier is main", ctx.detectAxis("Title.L0.max.funscript"), "main");
+check("axis: stroke is main", ctx.detectAxis("Title.stroke.funscript"), "main");
+check("axis: word axis with glued qualifier keeps its spelling", ctx.detectAxis("Title.suckManual.funscript"), "suckManual");
+check("axis: word axis with separator qualifier", ctx.detectAxis("Title.twist_v2.funscript"), "twist_v2");
+check("axis: stroke with qualifier is still main", ctx.detectAxis("Title.strokeSoft.funscript"), "main");
+check("axis: a plain word that merely starts with an axis is not one", ctx.detectAxis("Title.rolling.funscript"), "main");
+check("axis: unrelated word is main", ctx.detectAxis("Title.manual.funscript"), "main");
+// ".v2" is the erodeck valve axis code, which the backend maps the same way.
+check("axis: erodeck v2 code is the valve axis", ctx.detectAxis("Title.v2.funscript"), "v2");
+
 // ── _isScriptFilename ──
 check("funscript ext", ctx._isScriptFilename("Script Sub 64_2026.funscript"), true);
 check("funscript ext (mixed case)", ctx._isScriptFilename("X.FunScript"), true);
@@ -263,6 +281,168 @@ check("ttl: stale size entry reads 0",
   ttlCtx._probedSizeFor("https://example.com/ttl", "https://example.com/ttl"), 0);
 await ttlCtx.probeUrl("https://example.com/ttl");
 check("ttl: stale cache triggers re-probe", ttlProbeCalls, 2);
+
+// ── e621 post pages are known video hosts (label + priority) ──
+check("e621 label", ctx.getVideoLabel("https://e621.net/posts/1234567?q=someartist"), "e621");
+check("e926 label", ctx.getVideoLabel("https://e926.net/posts/1"), "e621");
+check("e621 priority is a known-host tier", ctx.getVideoPriority("https://e621.net/posts/1234567", false), 7);
+check("e621 comment priority", ctx.getVideoPriority("https://e621.net/posts/1234567", true), 7.5);
+check("e621 post is not a non-video path", ctx.isNonVideoPath("https://e621.net/posts/1234567"), false);
+
+// ── _distributeOrphanScripts: generic "Script" section feeds work sections ──
+{
+  const sec = (name, videos, scripts) => ({
+    name,
+    videos: videos.map((u) => ({ url: u, label: "e621", source: "OP", priority: 7 })),
+    scripts: scripts.map((f) => ({ url: `https://forum.example/${f}`, filename: f, source: "OP", axis: "main" })),
+  });
+  const parsedSecs = ctx._distributeOrphanScripts([
+    sec("Alpha’s training / Alpha’s chill training", ["https://e621.net/posts/1"], []),
+    sec("Alpha invites you over / AlphaVR", ["https://e621.net/posts/2"], []),
+    sec("Alpha’s training the trainer. / AlphaDoggy", ["https://e621.net/posts/3"], []),
+    sec("Script", [], [
+      "Alpha’s_Chill_TrainingVR(8K-H265@60fps).funscript",
+      "AlphaVR(8K-HEVC@60fps).funscript",
+      "AlphaDoggyVR(8K-H265@60fps).funscript",
+      "Alpha_longer.funscript",
+      "AlphaDoggy_longer.funscript",
+    ]),
+  ]);
+  const names = (s) => s.scripts.map((x) => x.filename);
+  check("orphan: section 1 gets its VR script", names(parsedSecs[0])[0], "Alpha’s_Chill_TrainingVR(8K-H265@60fps).funscript");
+  check("orphan: section 2 gets the exact-name script", names(parsedSecs[1]).join("|"), "AlphaVR(8K-HEVC@60fps).funscript");
+  check("orphan: section 3 gets both of its scripts", names(parsedSecs[2]).join("|"),
+    "AlphaDoggyVR(8K-H265@60fps).funscript|AlphaDoggy_longer.funscript");
+  check("orphan: series-name-only script stays behind", names(parsedSecs[3]).join("|"), "Alpha_longer.funscript");
+  check("orphan: donor keeps its name", parsedSecs[3].name, "Script");
+
+  // A donor that empties out disappears.
+  const emptied = ctx._distributeOrphanScripts([
+    sec("Delta [AuthX]", ["https://e621.net/posts/4"], []),
+    sec("Gamma [AuthX]", ["https://e621.net/posts/5"], []),
+    sec("Downloads", [], ["Delta_multi.funscript", "gamma.roll.funscript"]),
+  ]);
+  check("orphan: word match routes by unique heading word", emptied.length, 2);
+  check("orphan: Delta script under Delta", names(emptied[0]).join("|"), "Delta_multi.funscript");
+  check("orphan: axis-suffixed Gamma script under Gamma", names(emptied[1]).join("|"), "gamma.roll.funscript");
+
+  // Never touch: one video section (single mode anyway), a named
+  // script-only section (its own work), or an ambiguous script.
+  const untouched = ctx._distributeOrphanScripts([
+    sec("Alpha Part 1", ["https://e621.net/posts/6"], []),
+    sec("Alpha Part 2", ["https://e621.net/posts/7"], []),
+    sec("Bonus work", [], ["Alpha_Part_1.funscript"]),
+    sec("Scripts", [], ["Alpha.funscript"]),
+  ]);
+  check("orphan: named script section is left alone", names(untouched[2]).join("|"), "Alpha_Part_1.funscript");
+  check("orphan: ambiguous script (shared words only) stays", names(untouched[3]).join("|"), "Alpha.funscript");
+  check("orphan: single video section → no-op",
+    ctx._distributeOrphanScripts([sec("Only", ["https://e621.net/posts/8"], []), sec("Script", [], ["Only.funscript"])])[1].scripts.length, 1);
+}
+
+// ── _bucketCollectionInputs: drag moves decide the send-time section ──
+{
+  const b = ctx._bucketCollectionInputs([
+    { name: "sv-0", value: "0" }, { name: "ss-3", value: "1" }, { name: "ss-3", value: "2" },
+    { name: "cs", value: "0" }, { name: "video", value: "0" },
+  ], { "ss-3-1": "0", "cs-0": "2" });
+  check("bucket: video stays in its own section", b["0"].videos.map((x) => x.key).join(), "sv-0-0");
+  check("bucket: moved script lands in section 0", b["0"].scripts.map((x) => x.key).join(), "ss-3-1");
+  check("bucket: unmoved script stays in section 3", b["3"].scripts.map((x) => x.key).join(), "ss-3-2");
+  check("bucket: comment script moved into section 2", b["2"].scripts.map((x) => x.key).join(), "cs-0");
+  check("bucket: single-mode names are ignored", Object.keys(b).sort().join(), "0,2,3");
+  check("bucket: origin parse", JSON.stringify(ctx._collectionItemOrigin("cv")), '{"kind":"video","section":"comments"}');
+
+  // Comment rows render inside per-post groups: the DOM section wins over
+  // the parsed origin, and an explicit move wins over both.
+  const c = ctx._bucketCollectionInputs([
+    { name: "cv", value: "0", section: "c1" }, { name: "cs", value: "0", section: "c1" },
+    { name: "cs", value: "1", section: "c1" }, { name: "ss-0", value: "0", section: "x1" },
+  ], { "cs-1": "x1" });
+  check("bucket: comment rows land in their post group", c["c1"].videos.length + c["c1"].scripts.length, 2);
+  check("bucket: user group collects a dragged OP script and a moved comment script",
+    c["x1"].scripts.map((x) => x.key).sort().join(), "cs-1,ss-0-0");
+}
+
+// ── comment groups & work names from headings ──
+check("video-file heading counts as a video heading", ctx._isVideoLinkHeadingText("Alpha_longer.mp4"), true);
+check("plain heading is not a video heading", ctx._isVideoLinkHeadingText("Notes"), false);
+check("work name drops the video extension", ctx._cleanWorkName("Alpha_longer.mp4"), "Alpha_longer");
+check("generic heading yields no work name", ctx._cleanWorkName("Video link"), "");
+check("download heading yields no work name", ctx._cleanWorkName("Downloads"), "");
+{
+  const cv = [{ url: "https://host.example/f/1" }, { url: "https://host.example/f/2" }];
+  const cs = [{ url: "https://forum.example/a.funscript" }, { url: "https://forum.example/b.funscript" },
+              { url: "https://forum.example/c.funscript" }];
+  const groups = ctx._buildCommentGroups([
+    { isOP: true, postNumber: 1, subGroups: [{ name: "", videos: [], scripts: [] }] },
+    { isOP: false, postNumber: 7, username: "poster", subGroups: [
+      { name: "Alpha_longer", videos: [cv[0]], scripts: [cs[0]] },
+      { name: "Beta_longer", videos: [cv[1]], scripts: [cs[1]] },
+    ] },
+    // Same script posted again in a later comment → not listed twice.
+    { isOP: false, postNumber: 9, username: "", subGroups: [{ name: "", videos: [], scripts: [cs[1], cs[2]] }] },
+  ], cv, cs);
+  check("comment groups: one per in-post pairing plus the leftover", groups.length, 3);
+  check("comment groups: ids", groups.map((g) => g.id).join(), "c0,c1,c2");
+  check("comment groups: named after the work heading", groups[0].name, "Alpha_longer");
+  check("comment groups: labelled by post", groups[0].label, "#7 @poster");
+  check("comment groups: indices into flat arrays", `${groups[1].videos}|${groups[1].scripts}`, "1|1");
+  check("comment groups: duplicate script not repeated", `${groups[2].scripts}`, "2");
+  check("comment groups: unnamed post label", groups[2].label, "#9");
+
+  const parsed = {
+    title: "Topic Title", sections: [{ name: "Video link" }, { name: "Real Work" }],
+    commentGroups: groups, extraSections: [{ id: "x1", name: " " }, { id: "x2", name: "Custom" }],
+  };
+  check("pair name: generic OP heading → topic title", ctx._collectionPairName(parsed, "0"), "Topic Title");
+  check("pair name: real OP heading kept", ctx._collectionPairName(parsed, "1"), "Real Work");
+  check("pair name: comment group uses its work name", ctx._collectionPairName(parsed, "c0"), "Alpha_longer");
+  check("pair name: unnamed comment group → topic title", ctx._collectionPairName(parsed, "c2"), "Topic Title");
+  check("pair name: blank user group → topic title", ctx._collectionPairName(parsed, "x1"), "Topic Title");
+  check("pair name: named user group", ctx._collectionPairName(parsed, "x2"), "Custom");
+}
+
+// ── formatDuration / basis helpers ──
+check("duration m:ss", ctx.formatDuration(201.4), "3:21");
+check("duration h:mm:ss", ctx.formatDuration(3725), "1:02:05");
+check("duration unknown", ctx.formatDuration(0), "");
+check("weakest basis is the guess", ctx._weakestBasis(["name", "order", "duration"]), "order");
+check("weakest basis ignores blanks", ctx._weakestBasis(["", "tokens"]), "tokens");
+check("basis tag renders the label", ctx._basisTagHTML("order").includes("順序(猜測)"), true);
+check("unknown basis renders nothing", ctx._basisTagHTML(""), "");
+
+// ── _workPlanGroups: rows grouped by their labels, plan order first ──
+{
+  const r = (url, name) => ({ url, name, row: null });
+  const rows = {
+    videos: [r("v1", "Alpha.mp4"), r("v2", "Alpha mirror.mp4"), r("v3", "Beta.mp4")],
+    scripts: [r("s1", "Alpha.funscript"), r("s2", "Beta.funscript"), r("s3", "Loose.funscript")],
+  };
+  const g = ctx._workPlanGroups(rows, { v1: "Alpha", v2: "Alpha", s1: "Alpha", v3: "Beta", s2: "Beta" }, ["Custom"], ["Alpha", "Beta"]);
+  check("work plan: order = plan groups, user group, auto bucket", g.map((x) => x.name).join("|"), "Alpha|Beta|Custom|");
+  check("work plan: mirrors share a group", g[0].videos.map((x) => x.url).join(), "v1,v2");
+  check("work plan: user group is flagged and empty", g[2].user && g[2].videos.length === 0, true);
+  check("work plan: unlabelled script falls into the auto bucket", g[3].scripts.map((x) => x.url).join(), "s3");
+  check("work plan: no labels → one auto bucket only", ctx._workPlanGroups(rows, {}, [], []).length, 1);
+}
+
+// ── source tag survives the probe swapping the row text for a filename ──
+const vidRow = ctx.renderVideoItem(
+  { url: "https://e621.net/posts/1234567", label: "e621", source: "OP", priority: 7 }, 0, "v", true);
+check("video row carries a source tag", vidRow.includes('<span class="funpairdl-tag-source">e621</span>'), true);
+check("source tag sits after the size slot",
+  vidRow.indexOf("funpairdl-tag-source") > vidRow.indexOf("funpairdl-size"), true);
+const unkRow = ctx.renderVideoItem(
+  { url: "https://artist-example.com/work/1", label: "", source: "OP", priority: 11 }, 0, "v", true);
+check("unknown host tag falls back to hostname",
+  unkRow.includes('<span class="funpairdl-tag-source">artist-example.com</span>'), true);
+const scrRow = ctx.renderScriptItem(
+  { url: "https://discuss.eroscripts.com/uploads/short-url/x.funscript", filename: "x.funscript", source: "OP" }, 0, "s", true);
+check("uploaded script row has no source tag", scrRow.includes("funpairdl-tag-source"), false);
+const extRow = ctx.renderScriptItem(
+  { url: "https://pixeldrain.com/u/abc", filename: "[External] scripts", source: "OP", isExternal: true }, 0, "s", true);
+check("external script row shows its host", extRow.includes('<span class="funpairdl-tag-source">Pixeldrain</span>'), true);
 
 if (failures) {
   console.error(`\n${failures} assertion(s) failed`);

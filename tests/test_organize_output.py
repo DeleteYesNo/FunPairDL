@@ -52,6 +52,22 @@ class TestParseAxis:
     def test_suck(self):
         assert QueueManager._parse_axis("video.suck.funscript") == ("L3", "suck")
 
+    def test_word_axis_with_glued_qualifier(self):
+        # A scripter's ".suckManual" is the suction axis with a qualifier —
+        # filing it as L0 renamed it over the stroke script's name.
+        assert QueueManager._parse_axis("video.suckManual.funscript") == ("L3", "suckManual")
+        assert QueueManager._parse_axis("video.twist_v2.funscript") == ("R0", "twist_v2")
+        assert QueueManager._parse_axis("video.roll-soft.funscript") == ("R1", "roll-soft")
+        assert QueueManager._parse_axis("video.strokeSoft.funscript") == ("L0", "strokeSoft")
+
+    def test_plain_words_starting_with_an_axis_are_not_axes(self):
+        assert QueueManager._parse_axis("video.rolling.funscript") == ("L0", "")
+        assert QueueManager._parse_axis("video.manual.funscript") == ("L0", "")
+        assert QueueManager._parse_axis("video.raw.funscript") == ("L0", "")
+
+    def test_exact_axis_wins_over_prefixed_component(self):
+        assert QueueManager._parse_axis("video.suckManual.pitch.funscript") == ("R2", "pitch")
+
     def test_vibe_aliases(self):
         assert QueueManager._parse_axis("video.vibe.funscript") == ("V0", "vibe")
         assert QueueManager._parse_axis("video.vibration.funscript") == ("V0", "vibration")
@@ -71,9 +87,11 @@ class TestParseAxis:
             result = QueueManager._parse_axis(f"x.{suffix}.funscript")
             assert result[0] == canon, f"{suffix} → expected {canon}, got {result[0]}"
 
-    def test_suckManual_unknown(self):
-        # suckManual is not in erodeck's known list → L0
-        assert QueueManager._parse_axis("video.suckManual.funscript") == ("L0", "")
+    def test_suckManual_is_the_suction_axis(self):
+        # Not in erodeck's exact list, but "suck" + a qualifier is still L3.
+        # Filing it as L0 used to rename the suction script over the stroke
+        # script's name and push the real stroke script into an .alt folder.
+        assert QueueManager._parse_axis("video.suckManual.funscript") == ("L3", "suckManual")
 
 
 class TestOrganizeOutputFlat:

@@ -75,6 +75,8 @@ VIDEO_HOSTS = [
     "hanime1.me",
     "hmvmania.com",
     "socigames.com",
+    "e621.net",
+    "e926.net",
 ]
 
 # Known script extensions

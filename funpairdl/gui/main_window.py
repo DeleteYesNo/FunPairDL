@@ -34,6 +34,7 @@ from funpairdl.gui.pair_dialog import AddPairDialog
 from funpairdl.gui.pixeldrain_picker_dialog import PixeldrainPickerDialog
 from funpairdl.persistence.settings import Settings
 from funpairdl.utils.clipboard_watcher import ClipboardWatcher
+from funpairdl.utils.url_parser import source_label
 
 logger = logging.getLogger("funpairdl.gui.main_window")
 
@@ -155,9 +156,9 @@ class MainWindow(QMainWindow):
         # Queue tree
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels([
-            "Name", "Status", "Progress", "Size", "Speed", "ETA",
+            "Name", "Source", "Status", "Progress", "Size", "Speed", "ETA",
         ])
-        self.tree.setColumnCount(6)
+        self.tree.setColumnCount(7)
         self.tree.setRootIsDecorated(True)
         self.tree.setAlternatingRowColors(True)
         self.tree.setUniformRowHeights(True)
@@ -171,15 +172,17 @@ class MainWindow(QMainWindow):
         header = self.tree.header()
         header.setSectionResizeMode(0, QHeaderView.Stretch)
         header.setSectionResizeMode(1, QHeaderView.Interactive)
-        header.setSectionResizeMode(2, QHeaderView.Fixed)
-        header.setSectionResizeMode(3, QHeaderView.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.Interactive)
+        header.setSectionResizeMode(3, QHeaderView.Fixed)
         header.setSectionResizeMode(4, QHeaderView.Interactive)
         header.setSectionResizeMode(5, QHeaderView.Interactive)
-        header.resizeSection(1, 110)  # Status
-        header.resizeSection(2, 150)  # Progress
-        header.resizeSection(3, 90)   # Size
-        header.resizeSection(4, 90)   # Speed
-        header.resizeSection(5, 70)   # ETA
+        header.setSectionResizeMode(6, QHeaderView.Interactive)
+        header.resizeSection(1, 110)  # Source
+        header.resizeSection(2, 110)  # Status
+        header.resizeSection(3, 150)  # Progress
+        header.resizeSection(4, 90)   # Size
+        header.resizeSection(5, 90)   # Speed
+        header.resizeSection(6, 70)   # ETA
 
         dl_layout.addWidget(self.tree)
 
@@ -423,21 +426,22 @@ class MainWindow(QMainWindow):
 
         # Update pair row
         tree_item.setText(0, pair.name)
-        tree_item.setText(1, pair.state.value.upper())
+        tree_item.setText(1, "")  # Source is per item
+        tree_item.setText(2, pair.state.value.upper())
         if pair.total_bytes > 0:
-            tree_item.setText(2, f"{pair.progress:.1f}%")
-            tree_item.setText(3, format_size(pair.total_bytes))
+            tree_item.setText(3, f"{pair.progress:.1f}%")
+            tree_item.setText(4, format_size(pair.total_bytes))
             remaining = pair.total_bytes - pair.downloaded_bytes
-            tree_item.setText(5, format_eta(remaining, pair.speed_bps))
+            tree_item.setText(6, format_eta(remaining, pair.speed_bps))
         elif pair.downloaded_bytes > 0:
-            tree_item.setText(2, format_size(pair.downloaded_bytes))
-            tree_item.setText(3, "??")
-            tree_item.setText(5, "--")
+            tree_item.setText(3, format_size(pair.downloaded_bytes))
+            tree_item.setText(4, "??")
+            tree_item.setText(6, "--")
         else:
-            tree_item.setText(2, "")
             tree_item.setText(3, "")
-            tree_item.setText(5, "")
-        tree_item.setText(4, format_speed(pair.speed_bps) if pair.speed_bps else "")
+            tree_item.setText(4, "")
+            tree_item.setText(6, "")
+        tree_item.setText(5, format_speed(pair.speed_bps) if pair.speed_bps else "")
 
         # Color by state
         from PySide6.QtGui import QColor
@@ -449,7 +453,7 @@ class MainWindow(QMainWindow):
             PairState.FAILED: "#dc3545",
         }
         color = state_colors.get(pair.state, "#888")
-        for col in range(6):
+        for col in range(7):
             tree_item.setForeground(col, QColor(color))
 
         # Update children and build lookup index
@@ -479,21 +483,25 @@ class MainWindow(QMainWindow):
     def _update_item_row(self, tree_item: QTreeWidgetItem, item: PairItem):
         type_icon = "V" if item.file_type == FileType.VIDEO else "S"
         tree_item.setText(0, f"[{type_icon}] {item.filename}")
-        tree_item.setText(1, item.state.value)
+        # Source: brand name (Pixeldrain / e621 / ...) or bare host; the
+        # full URL sits in the tooltip so an item is traceable at a glance.
+        tree_item.setText(1, source_label(item.provider_name, item.url))
+        tree_item.setToolTip(1, item.url)
+        tree_item.setText(2, item.state.value)
         if item.total_bytes > 0:
-            tree_item.setText(2, f"{item.progress:.1f}%")
-            tree_item.setText(3, format_size(item.total_bytes))
+            tree_item.setText(3, f"{item.progress:.1f}%")
+            tree_item.setText(4, format_size(item.total_bytes))
             remaining = item.total_bytes - item.downloaded_bytes
-            tree_item.setText(5, format_eta(remaining, item.speed_bps))
+            tree_item.setText(6, format_eta(remaining, item.speed_bps))
         elif item.downloaded_bytes > 0:
-            tree_item.setText(2, format_size(item.downloaded_bytes))
-            tree_item.setText(3, "??")
-            tree_item.setText(5, "--")
+            tree_item.setText(3, format_size(item.downloaded_bytes))
+            tree_item.setText(4, "??")
+            tree_item.setText(6, "--")
         else:
-            tree_item.setText(2, "")
             tree_item.setText(3, "")
-            tree_item.setText(5, "")
-        tree_item.setText(4, format_speed(item.speed_bps) if item.speed_bps else "")
+            tree_item.setText(4, "")
+            tree_item.setText(6, "")
+        tree_item.setText(5, format_speed(item.speed_bps) if item.speed_bps else "")
 
     @Slot()
     def _refresh_all(self):

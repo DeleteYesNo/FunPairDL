@@ -195,6 +195,43 @@ def test_cjk_name_matches_separate_folder(tmp_path, monkeypatch):
     assert (work / f"{base}.surge.funscript").read_text() == "SURGE"
 
 
+def test_video_download_never_merges_into_a_videoless_folder(tmp_path, monkeypatch):
+    """With no video on the library side there is nothing to prove it is the
+    same work — merging on the name alone once moved a sibling work's only
+    script into a stranger's .alt folder."""
+    _stub_settings(monkeypatch, reconcile_on_redownload=True)
+    qm = QueueManager(download_dir=tmp_path)
+    lib = tmp_path / "Work"
+    lib.mkdir()
+    (lib / "Work.funscript").write_text("OTHER")
+    pair, temp = _redownload_pair(tmp_path, "Work", b"VIDEO", {"Work.funscript": "MINE"})
+
+    assert qm._reconcile_with_library(pair) is False
+    assert (lib / "Work.funscript").read_text() == "OTHER"
+    assert not (lib / "Work.alt").exists()
+    assert (temp / "Work.funscript").read_text() == "MINE"
+
+
+def test_folder_of_an_active_sibling_pair_is_not_the_library_copy(tmp_path, monkeypatch):
+    """Two auto-split siblings titled alike: one must not be absorbed into
+    the other's folder while that one is still downloading."""
+    from funpairdl.core.pair import PairState
+    _stub_settings(monkeypatch, reconcile_on_redownload=True)
+    qm = QueueManager(download_dir=tmp_path)
+    work = _existing_work(tmp_path, "Work", b"VIDEO", {"Work.funscript": "SIBLING"})
+    sibling = Pair(name="Work", items=[])
+    sibling.output_dir = str(work)
+    sibling.state = PairState.DOWNLOADING
+    qm.pairs.append(sibling)
+    pair, temp = _redownload_pair(tmp_path, "Work", b"VIDEO", {"Work.funscript": "MINE"})
+
+    assert qm._reconcile_with_library(pair) is False
+    assert (temp / "Work.funscript").read_text() == "MINE"
+    # Once the sibling is done, an identical re-download reconciles as before.
+    sibling.state = PairState.COMPLETED
+    assert qm._reconcile_with_library(pair) is True
+
+
 def test_toggle_off_skips_reconcile(tmp_path, monkeypatch):
     _stub_settings(monkeypatch, reconcile_on_redownload=False)
     qm = QueueManager(download_dir=tmp_path)
