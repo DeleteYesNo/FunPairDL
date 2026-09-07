@@ -3916,15 +3916,29 @@ function _scheduleWorkPlan(panel, parsed) {
   if (!parsed || parsed.mode !== "single") return;
   if (panel._workPlanTimer) clearTimeout(panel._workPlanTimer);
   panel._workPlanTimer = setTimeout(() => { _refreshWorkPlan(panel, parsed); }, WORK_PLAN_DEBOUNCE_MS);
+  // Re-plan whenever a row is (un)checked — wired once per panel.
+  if (!panel._workPlanWatch) {
+    panel._workPlanWatch = true;
+    panel.addEventListener("change", (e) => {
+      const t = e.target;
+      if (t && t.matches && t.matches('.funpairdl-item input[type="checkbox"][name="video"], .funpairdl-item input[type="checkbox"][name="script"]')) {
+        _scheduleWorkPlan(panel, parsed);
+      }
+    });
+  }
 }
 
-// Plain (non-bundle) rows currently in Main, with the best name we have.
+// Plain (non-bundle) rows currently in Main AND checked — the set that will
+// actually be sent. Unchecking a video changes the answer (one video left
+// can only be one work), so the preview follows the checkboxes.
 function _mainWorkRows(panel, parsed) {
   const body = panel.querySelector('.funpairdl-group-body[data-group="Main"]');
   const videos = [];
   const scripts = [];
   if (!body) return { videos, scripts };
   body.querySelectorAll(".funpairdl-item[data-key]").forEach((row) => {
+    const cb = row.querySelector('input[type="checkbox"][name]');
+    if (cb && !cb.checked) { _setWorkBadge(row, null); return; }
     const idx = parseInt(row.dataset.index);
     if (row.dataset.kind === "video") {
       const v = parsed.videos[idx];

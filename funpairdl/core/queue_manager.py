@@ -1794,7 +1794,10 @@ class QueueManager:
             if lb and lb not in labels:
                 labels.append(lb)
 
-        if len(videos) <= 1 and len(labels) <= 1:
+        # One video is one work, whatever labels say: labels seeded by a
+        # preview of a larger selection (the user then unchecked a video)
+        # must not split the lone video from its scripts.
+        if len(videos) <= 1:
             return None
 
         # Don't split a mirror set: when every video reduces to the same
@@ -1808,7 +1811,7 @@ class QueueManager:
         # named "Iwara - Work Title [id] [Source].mp4" and the iwara page
         # itself (slug "work-title") must compare equal, so the site prefix,
         # bracketed tags and resolution noise are dropped first.
-        distinct_stems = set(self._work_keys(videos).values())
+        distinct_stems = set(self._work_keys(videos, durations).values())
         distinct_stems.discard("")
         if len(distinct_stems) <= 1 and len(labels) <= 1:
             return None
@@ -2089,15 +2092,37 @@ class QueueManager:
         return groups
 
     @classmethod
-    def _work_keys(cls, videos: list[PairItem]) -> dict[int, str]:
+    def _work_keys(cls, videos: list[PairItem],
+                   durations: dict[str, float] | None = None) -> dict[int, str]:
         """id(video) → work key. Videos with the same mirror key are one work
         (mirrors on different hosts) — unless they sit on the SAME host under
         different URLs: two e621 posts titled alike are two works, so those
-        keep distinct keys (the key plus the URL)."""
+        keep distinct keys (the key plus the URL).
+
+        Two encodes of one work ("Show.mkv" and "Show-P4-RF35.mkv") share a
+        name prefix and a length: when one key starts with the other and the
+        durations agree within 1.5 s, they are the same work too."""
         from urllib.parse import urlparse
+        durations = durations or {}
+        keys = {id(v): cls._mirror_key(cls._video_identity(v)) for v in videos}
+
+        def _dur(v: PairItem) -> float:
+            return durations.get(v.url) or durations.get(v.resolved_url or "") or 0.0
+
+        # Fold prefix-related keys with matching durations onto the shorter key.
+        for a in videos:
+            for b in videos:
+                ka, kb = keys[id(a)], keys[id(b)]
+                if a is b or not ka or not kb or ka == kb:
+                    continue
+                if len(ka) < len(kb) and kb.startswith(ka) and len(ka) >= 6:
+                    da, db = _dur(a), _dur(b)
+                    if da and db and abs(da - db) <= 1.5:
+                        keys[id(b)] = ka
+
         by_key: dict[str, list[PairItem]] = {}
         for v in videos:
-            by_key.setdefault(cls._mirror_key(cls._video_identity(v)), []).append(v)
+            by_key.setdefault(keys[id(v)], []).append(v)
         out: dict[int, str] = {}
         for key, group in by_key.items():
             hosts: dict[str, set[str]] = {}
@@ -2107,6 +2132,13 @@ class QueueManager:
             # Only a real host counts; bare/relative URLs (tests, local
             # files) have none and stay mirrors.
             same_host_dupes = any(len(urls) > 1 for host, urls in hosts.items() if host)
+            # Same host, different URLs, but every length known and equal →
+            # two encodes/uploads of one video (a pixeldrain 4K + 1080p pair),
+            # not two works. Distinct works of one title differ in length.
+            if same_host_dupes:
+                ds = [_dur(v) for v in group]
+                if all(ds) and max(ds) - min(ds) <= 1.5:
+                    same_host_dupes = False
             for v in group:
                 out[id(v)] = f"{key}#{v.url}" if (same_host_dupes and key) else key
         return out
@@ -2247,8 +2279,11 @@ class QueueManager:
         s = name.lower()
         if strip_prefix:
             s = re.sub(r"^(\s*[\(\[（][^\)\]）]*[\)\]）]\s*)+", "", s)
+        # Resolution / frame rate / watermark / codec / rate-factor tokens
+        # describe an encode, not the work ("Show-P4-RF35.mkv" is "Show").
         s = re.sub(
-            r"(?<![a-z0-9])(?:\d{3,4}p|[248]k|\d{1,3}fps|no[-_ ]?wm|wm)(?![a-z0-9])",
+            r"(?<![a-z0-9])(?:\d{3,4}p|[248]k|\d{1,3}fps|no[-_ ]?wm|wm"
+            r"|x26[45]|h\.?26[45]|hevc|av1|avc|c?rf\d{1,2}|10bit|8bit|hdr)(?![a-z0-9])",
             " ", s,
         )
         # Keep alphanumerics of ANY script (CJK included) — only drop
