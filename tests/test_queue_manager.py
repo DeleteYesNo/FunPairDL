@@ -159,6 +159,26 @@ class TestPlanBundleSplit:
         groups = QueueManager().plan_bundle_split(self._items(), None, "Pack")
         assert all(g["basis"] == "name" for g in groups)
 
+    def test_single_video_is_never_split_by_stale_labels(self):
+        # The preview saw two encodes and labelled every row; the user then
+        # unchecked one video. One video + its script must stay one work.
+        v = PairItem(url="https://pixeldrain.com/u/abc", filename="Show-P4-RF35.mkv", file_type=FileType.VIDEO)
+        s = _vi("Show.funscript", FileType.FUNSCRIPT)
+        plan = {v.url: "Show-P4-RF35", s.url: "Show"}
+        assert QueueManager().plan_bundle_split([v, s], plan, "Show") is None
+
+    def test_two_encodes_of_one_work_are_mirrors(self):
+        # Same title, one carrying encode tags, same length → one work, not two.
+        a = PairItem(url="https://pixeldrain.com/u/aaa", filename="[Author] Show.mkv", file_type=FileType.VIDEO)
+        b = PairItem(url="https://pixeldrain.com/u/bbb", filename="[Author] Show-P4-RF35.mkv", file_type=FileType.VIDEO)
+        s = _vi("[Author] Show.funscript", FileType.FUNSCRIPT)
+        qm = QueueManager()
+        assert qm.plan_bundle_split([a, b, s], None, "T", durations={a.url: 183.7, b.url: 183.6}) is None
+        # Different lengths → genuinely different videos → split.
+        assert qm.plan_bundle_split([a, b, s], None, "T", durations={a.url: 183.7, b.url: 240.0}) is not None
+        # Codec / rate-factor tokens alone never distinguish works.
+        assert qm._match_key("Show x265 RF35 10bit") == qm._match_key("Show")
+
     def test_plan_with_two_labels_splits_even_a_mirror_set(self):
         # Same-named videos are normally kept as one pair (mirrors); an
         # explicit two-label plan says they are distinct works.
