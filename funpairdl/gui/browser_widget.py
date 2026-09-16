@@ -619,6 +619,18 @@ class BridgeCore:
                 respond(callback_id, {"success": True})
                 return
 
+            if msg_type in ("topic-status", "topic-visited"):
+                # Topic-list badges: what was opened / sent from each topic.
+                path = "topics/status" if msg_type == "topic-status" else "topics/visited"
+                s = self._get_session()
+                async with s.post(
+                    f"{API_URL}/{path}", json=data or {},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as r:
+                    resp = await r.json()
+                    respond(callback_id, {"success": True, **resp})
+                return
+
             if msg_type == "storage-get":
                 respond(callback_id, dict(self._storage))
                 return
@@ -717,6 +729,9 @@ class BrowserWidget(QWidget):
     # Emitted from the worker loop when the saved MEGA sid turns out dead
     # and a hidden-page login is actually needed (queued to the GUI thread).
     sig_mega_login_needed = Signal()
+    # A registered topic has pair(s) that failed for good: (title, body) for
+    # a tray notification. The tab itself stays open and is marked.
+    sig_topic_download_failed = Signal(str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -736,6 +751,10 @@ class BrowserWidget(QWidget):
         self._qm = None
         self._autoclose: dict = {}
         self._autoclose_timer = None
+        # Tabs flagged for a failed download: view → summary text. The tab
+        # title carries a "⚠ " prefix (kept across title changes) and the
+        # page shows a banner, until the failed pairs are gone or complete.
+        self._failed_tabs: dict = {}
         self._load_autoclose_registrations()
         self._bridge_core._dispatcher.autocloseRequested.connect(
             self._on_autoclose_registered)
@@ -1178,6 +1197,7 @@ class BrowserWidget(QWidget):
         widget = self._tabs.widget(index)
         # Drop any never-activated deferred load for this tab
         self._pending_tab_loads.pop(widget, None)
+        self._failed_tabs.pop(widget, None)
         # Unregister this tab's bridge BEFORE the view is destroyed so a late
         # worker-loop reply is dropped instead of routed to a dying QObject
         # (finding B — the dispatcher looks it up on the GUI thread).
@@ -1419,21 +1439,106 @@ class BrowserWidget(QWidget):
             return
         from funpairdl.core.pair import PairState
         by_id = {p.id: p for p in self._qm.pairs}
+        failed = []
         for pid in entry["pair_ids"]:
             pair = by_id.get(pid)
             if pair is None:
                 continue  # deleted or cleared — counts as settled
-            if pair.state != PairState.COMPLETED:
-                return  # still downloading (or failed) → keep the tab
+            if pair.state == PairState.FAILED:
+                failed.append(pair)
+            elif pair.state != PairState.COMPLETED:
+                return  # still downloading → no verdict yet
+        if failed:
+            # Failed for good (retries exhausted): the tab stays open so the
+            # user can find another source, and says so.
+            self._mark_topic_failed(tid, entry, failed)
+            return
+        self._clear_topic_failed(tid)
+        closed = self._close_topic_tabs(tid)
+        if self._topic_views(tid):
+            # The only tab left is the one being looked at (the ⬇All overlay
+            # runs in the current tab, so that topic always ends up here).
+            # Keep the registration: the next sweep / tab switch closes it
+            # once the user has moved on — dropping it here left such tabs
+            # open for good.
+            if not entry.get("_settled"):
+                entry["_settled"] = True
+                logger.info("Auto-close: topic %s fully downloaded — its tab is "
+                            "current, closing once you leave it", tid)
+            return
         del self._autoclose[tid]
         self._persist_autoclose()
-        closed = self._close_topic_tabs(tid)
         logger.info(
             "Auto-close: topic %s fully downloaded — closed %d tab(s)", tid, closed)
 
-    def _close_topic_tabs(self, tid: str) -> int:
-        closed = 0
-        current = self._current_view()
+    # ─── Failed-download hint on a registered topic's tab(s) ───
+
+    @staticmethod
+    def _failed_summary(failed: list) -> str:
+        parts = []
+        for pair in failed:
+            err = ""
+            for it in pair.items:
+                if it.error_message:
+                    err = it.error_message
+                    break
+            err = (err or pair.error_message or "").strip()
+            if len(err) > 120:
+                err = err[:117] + "…"
+            parts.append(pair.name + (f":{err}" if err else ""))
+        return "、".join(parts)
+
+    def _mark_topic_failed(self, tid: str, entry: dict, failed: list):
+        ids = frozenset(p.id for p in failed)
+        if entry.get("_failed_ids") == ids:
+            return  # already shown for exactly this set
+        entry["_failed_ids"] = ids
+        summary = self._failed_summary(failed)
+        msg = f"⚠ FunPairDL:此帖有 {len(failed)} 組下載失敗,分頁已保留 — {summary}"
+        for _idx, view in self._topic_views(tid):
+            self._failed_tabs[view] = summary
+            self._apply_tab_title(view, view.title())
+            try:
+                view.page().runJavaScript(self._failed_banner_js(msg))
+            except RuntimeError:
+                pass
+        logger.warning("Auto-close: topic %s has %d failed pair(s), keeping tab: %s",
+                       tid, len(failed), summary)
+        self.sig_topic_download_failed.emit(
+            f"下載失敗:{len(failed)} 組(分頁已保留)", summary)
+
+    def _clear_topic_failed(self, tid: str):
+        for _idx, view in self._topic_views(tid):
+            if self._failed_tabs.pop(view, None) is None:
+                continue
+            self._apply_tab_title(view, view.title())
+            try:
+                view.page().runJavaScript(
+                    "(function(){var b=document.getElementById('funpairdl-failed-banner');"
+                    "if(b)b.remove();})();")
+            except RuntimeError:
+                pass
+
+    @staticmethod
+    def _failed_banner_js(msg: str) -> str:
+        return (
+            "(function(){var id='funpairdl-failed-banner';"
+            "var old=document.getElementById(id);if(old)old.remove();"
+            "var d=document.createElement('div');d.id=id;"
+            "d.style.cssText='position:fixed;top:0;left:0;right:0;z-index:2147483647;"
+            "background:#b3261e;color:#fff;font:14px/1.4 system-ui,sans-serif;"
+            "padding:10px 44px 10px 14px;box-shadow:0 2px 8px rgba(0,0,0,.4)';"
+            "d.textContent=" + json.dumps(msg, ensure_ascii=False) + ";"
+            "var b=document.createElement('button');b.textContent='\u2715';"
+            "b.style.cssText='position:absolute;right:8px;top:6px;background:transparent;"
+            "border:0;color:#fff;font-size:18px;cursor:pointer';"
+            "b.onclick=function(){d.remove();};d.appendChild(b);"
+            "(document.body||document.documentElement).appendChild(d);})();"
+        )
+
+    def _topic_views(self, tid: str) -> list:
+        """(index, view) of every tab showing topic `tid`, highest index first."""
+        out = []
         for i in range(self._tabs.count() - 1, -1, -1):
             v = self._tabs.widget(i)
             if not isinstance(v, QWebEngineView):
@@ -1446,8 +1551,28 @@ class BrowserWidget(QWidget):
                     url = v.url().toString()
                 except RuntimeError:
                     continue
-            if _topic_id_from_url(url) != tid:
-                continue
+            if _topic_id_from_url(url) == tid:
+                out.append((i, v))
+        return out
+
+    def _apply_tab_title(self, view: QWebEngineView, title: str):
+        idx = self._tabs.indexOf(view)
+        if idx < 0:
+            return
+        display = title[:30] + "..." if len(title) > 30 else title
+        display = display or "Untitled"
+        tip = title
+        failed = self._failed_tabs.get(view)
+        if failed:
+            display = "⚠ " + display
+            tip = f"{title}\n下載失敗(分頁保留):{failed}"
+        self._tabs.setTabText(idx, display)
+        self._tabs.setTabToolTip(idx, tip)
+
+    def _close_topic_tabs(self, tid: str) -> int:
+        closed = 0
+        current = self._current_view()
+        for i, v in self._topic_views(tid):
             if v is current:
                 continue  # never yank the page the user is looking at
             self._close_tab(i)
@@ -1486,6 +1611,10 @@ class BrowserWidget(QWidget):
             self.url_bar.setText(view.url().toString())
             # Lazily-restored tab activated for the first time → load now
             self._load_pending(view)
+        # A finished topic whose tab was current is closed as soon as the
+        # user switches away (deferred so the switch itself completes first).
+        if any(e.get("_settled") for e in self._autoclose.values()):
+            QTimer.singleShot(0, self._autoclose_sweep)
         # Switching away hides the old widget, and Qt then marks its page
         # invisible — which would kill an active load boost mid-load.
         # Re-assert the boost for any still-loading (or settling) tab.
@@ -1582,13 +1711,8 @@ class BrowserWidget(QWidget):
             self.url_bar.setText(url.toString())
 
     def _on_title_changed(self, view: QWebEngineView, title: str):
-        """Update tab title."""
-        idx = self._tabs.indexOf(view)
-        if idx >= 0:
-            # Truncate long titles
-            display = title[:30] + "..." if len(title) > 30 else title
-            self._tabs.setTabText(idx, display or "Untitled")
-            self._tabs.setTabToolTip(idx, title)
+        """Update tab title (keeps the failed-download marker, if any)."""
+        self._apply_tab_title(view, title)
 
     # ─── Script injection (profile-level, applies to all tabs) ───
 

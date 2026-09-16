@@ -240,3 +240,37 @@ def test_toggle_off_skips_reconcile(tmp_path, monkeypatch):
 
     assert qm._reconcile_with_library(pair) is False
     assert temp.exists()
+
+
+def test_title_with_qualifier_tags_finds_existing_folder(tmp_path, monkeypatch):
+    """The post title gained "(Requested, HQ Script)" since the work was
+    first downloaded and the new video's file name is an opaque host id:
+    the qualifier-stripped title still finds the existing folder, and the
+    identical video proves it is the same work."""
+    _stub_settings(monkeypatch, reconcile_on_redownload=True)
+    qm = QueueManager(download_dir=tmp_path)
+    work = _existing_work(tmp_path, "Alpha Beta", b"VIDEO", {"Alpha Beta.funscript": "OLD"})
+    temp = tmp_path / "Alpha Beta (Requested, HQ Script)"
+    temp.mkdir()
+    (temp / "GJ7xQ2.mp4").write_bytes(b"VIDEO")
+    (temp / "Alpha Beta (Requested, HQ Script).funscript").write_text("NEW")
+    pair = Pair(name="Alpha Beta (Requested, HQ Script)", items=[
+        PairItem(url="u/v", filename="GJ7xQ2.mp4", file_type=FileType.VIDEO),
+        PairItem(url="u/s", filename="Alpha Beta (Requested, HQ Script).funscript",
+                 file_type=FileType.FUNSCRIPT),
+    ])
+    pair.output_dir = str(temp)
+
+    assert qm._reconcile_with_library(pair) is True
+    assert (work / "Alpha Beta.funscript").read_text() == "OLD"
+    assert (work / "Alpha Beta.alt" / "Alpha Beta.alt.funscript").read_text() == "NEW"
+    assert not temp.exists()
+
+
+def test_title_key_strips_only_qualifier_tags():
+    k = QueueManager._title_key
+    assert k("Alpha Beta (Requested, HQ Multi-Axis Script)") == k("Alpha Beta")
+    assert k("Alpha Beta [Multi-Axis]") == k("Alpha Beta")
+    assert k("Alpha Beta (Soft & Hardcore Scripts)") == k("Alpha Beta")
+    assert k("Alpha Beta (Dialogue)") != k("Alpha Beta")   # a real variant name stays
+    assert k("Alpha Beta ～Part 2～") == k("Alpha Beta ~Part 2~")  # punctuation width

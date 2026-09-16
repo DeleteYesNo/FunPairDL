@@ -285,6 +285,63 @@ class TestAxisCollision:
         assert alt_dir.is_dir()
         assert (alt_dir / "Mixed.alt.funscript").exists()
 
+    def test_axis_collision_alt_inherits_multiaxis(self, tmp_path):
+        """An auto-promoted L0 extra is another stroke take on the same
+        scene: its .alt folder gets Main's non-L0 axes hardlinked in, so
+        every take plays with the full axis set."""
+        _touch(tmp_path / "v.mp4")
+        _touch(tmp_path / "s.funscript")
+        _touch(tmp_path / "s.pitch.funscript")
+        _touch(tmp_path / "s.roll.funscript")
+        _touch(tmp_path / "s.max.funscript")
+
+        pair = _make_pair(str(tmp_path), "Mixed", [
+            PairItem(url="http://x/v.mp4", filename="v.mp4", file_type=FileType.VIDEO),
+            PairItem(url="http://x/s.funscript", filename="s.funscript", file_type=FileType.FUNSCRIPT),
+            PairItem(url="http://x/p.funscript", filename="s.pitch.funscript", file_type=FileType.FUNSCRIPT),
+            PairItem(url="http://x/r.funscript", filename="s.roll.funscript", file_type=FileType.FUNSCRIPT),
+            PairItem(url="http://x/m.funscript", filename="s.max.funscript", file_type=FileType.FUNSCRIPT),
+        ])
+
+        qm = QueueManager()
+        with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
+            mock_load.return_value.script_variant_mode = "flat"
+            qm._organize_output(pair)
+
+        assert pair.alt_group_config["Alt 1"]["inherit_multi_axis"] is True
+        alt_dir = tmp_path / "Mixed.alt"
+        assert (alt_dir / "Mixed.alt.funscript").exists()
+        for axis in ("pitch", "roll"):
+            linked = alt_dir / f"Mixed.alt.{axis}.funscript"
+            assert linked.exists()
+            assert os.stat(linked).st_nlink == 2   # hardlink, not a copy
+        content = (tmp_path / ".linkinfo").read_text(encoding="utf-8")
+        assert "Mixed.alt.pitch.funscript" in content
+        assert "Mixed.alt.roll.funscript" in content
+
+    def test_alt_whose_file_is_gone_makes_no_folder(self, tmp_path):
+        """A mirror bundle carried the same upload as the forum script: the
+        second item was skipped as already on disk and shares the first's
+        file. Once Main claims that file there is nothing left for the Alt
+        slot, so no .alt folder (with only a hardlinked video) is created."""
+        _touch(tmp_path / "v.mp4")
+        _touch(tmp_path / "Work.funscript")
+
+        pair = _make_pair(str(tmp_path), "Work", [
+            PairItem(url="http://x/v.mp4", filename="v.mp4", file_type=FileType.VIDEO),
+            PairItem(url="http://x/a.funscript", filename="Work.funscript", file_type=FileType.FUNSCRIPT),
+            PairItem(url="http://y/a.funscript", filename="Work.funscript", file_type=FileType.FUNSCRIPT),
+        ])
+
+        qm = QueueManager()
+        with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
+            mock_load.return_value.script_variant_mode = "flat"
+            qm._organize_output(pair)
+
+        assert (tmp_path / "Work.funscript").exists()
+        assert (tmp_path / "Work.mp4").exists()
+        assert not (tmp_path / "Work.alt").exists()
+
     def test_three_L0_variants(self, tmp_path):
         """Three L0 scripts → 1 primary + 2 alts (.alt, .alt1)."""
         _touch(tmp_path / "v.mp4")

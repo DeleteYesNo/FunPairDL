@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import re
 import threading
 from pathlib import Path
 from typing import Callable
@@ -268,6 +270,7 @@ class QueueManager:
         filenames: dict[str, str] | None = None,
         sizes: dict | None = None,
         bundle_plan: dict[str, str] | None = None,
+        source_url: str = "",
     ) -> Pair:
         """Add a Pair to the queue.
 
@@ -299,7 +302,8 @@ class QueueManager:
                 "inherit_multi_axis": False,
             }]
 
-        pair = Pair(name=name, preferred_resolution=preferred_resolution, auto_rename=auto_rename)
+        pair = Pair(name=name, preferred_resolution=preferred_resolution, auto_rename=auto_rename,
+                    source_url=(source_url or "").strip())
 
         folder_name = sanitize_filename(self._clean_title(name))
         # Caller-supplied override (e.g. Pixeldrain picker) lets a single
@@ -308,39 +312,17 @@ class QueueManager:
         root = Path(output_dir_override) if output_dir_override else self.download_dir
         target_dir = root / folder_name
 
-        # Check if this pair is already in the queue (prevent duplicate submissions)
+        # A pair for this folder that is still queued/downloading: don't add
+        # a second one. A FAILED one is re-queued below, with THIS
+        # submission's sources (the user re-sends after picking a working
+        # mirror; keeping the old URLs just failed again).
         existing = next(
             (p for p in self.pairs
              if p.output_dir == str(target_dir) and p.state != PairState.COMPLETED),
             None,
         )
-        if existing:
-            if existing.state == PairState.FAILED:
-                # Re-queue the failed pair instead of creating a duplicate.
-                # Apply this submission's prefs — a user who re-adds with a
-                # different preferred_resolution (e.g. "best" after a "format
-                # not available" failure) expects the new value to take effect,
-                # not silently keep the old one.
-                existing.preferred_resolution = preferred_resolution
-                existing.auto_rename = auto_rename
-                existing.state = PairState.QUEUED
-                for item in existing.items:
-                    if item.state == ItemState.FAILED:
-                        item.state = ItemState.PENDING
-                        item.error_message = ""
-                logger.info("Re-queuing failed pair: %s", name)
-                if self.on_pair_updated:
-                    self.on_pair_updated(existing)
-                # Persist the re-queue — a kill before the next unrelated
-                # save would otherwise silently revert it (and the new
-                # preferred_resolution) on restart.
-                if self.on_save_needed:
-                    self.on_save_needed()
-                self.request_metadata_probe(existing)
-                self._ensure_pump_alive()
-                self._wake_pump()
-            else:
-                logger.info("Pair '%s' already in queue, skipping", name)
+        if existing and existing.state != PairState.FAILED:
+            logger.info("Pair '%s' already in queue, skipping", name)
             return existing
 
         pair.output_dir = str(target_dir)
@@ -414,9 +396,15 @@ class QueueManager:
             if u and (lb or "").strip():
                 pair.bundle_plan[u] = lb.strip()
 
+        if existing:
+            self._requeue_failed_pair(existing, pair)
+            self._record_topic(existing)
+            return existing
+
         with self._pairs_lock:
             self.pairs.append(pair)
         logger.info("Added pair: %s (%d items)", name, len(pair.items))
+        self._record_topic(pair)
 
         if self.on_pair_added:
             self.on_pair_added(pair)
@@ -432,6 +420,60 @@ class QueueManager:
         self.request_metadata_probe(pair)
 
         return pair
+
+    def _requeue_failed_pair(self, existing: Pair, fresh: Pair) -> None:
+        """Re-queue a FAILED pair as the re-submission `fresh` describes it.
+        Items whose URL the user kept and that already finished stay
+        completed (their files are on disk); every other URL is taken from
+        the re-submission as a pending item — so a mirror picked after a
+        dead source actually gets downloaded. Prefs, groups and the bundle
+        plan follow the re-submission too."""
+        old_by_url = {it.url: it for it in existing.items}
+        merged: list[PairItem] = []
+        changed = 0
+        for it in fresh.items:
+            old = old_by_url.get(it.url)
+            if old is not None and old.state == ItemState.COMPLETED:
+                old.group = it.group
+                merged.append(old)
+            else:
+                if old is None:
+                    changed += 1
+                merged.append(it)
+        dropped = [u for u in old_by_url if u not in {i.url for i in fresh.items}]
+        existing.items = merged
+        existing.alt_group_config = dict(fresh.alt_group_config)
+        existing.bundle_plan = dict(fresh.bundle_plan)
+        existing.source_url = fresh.source_url or existing.source_url
+        existing.preferred_resolution = fresh.preferred_resolution
+        existing.auto_rename = fresh.auto_rename
+        existing.error_message = ""
+        existing.state = PairState.QUEUED
+        logger.info("Re-queuing failed pair: %s (%d new source(s), %d dropped)",
+                    existing.name, changed, len(dropped))
+        if self.on_pair_updated:
+            self.on_pair_updated(existing)
+        # Persist the re-queue — a kill before the next unrelated save would
+        # otherwise silently revert it on restart.
+        if self.on_save_needed:
+            self.on_save_needed()
+        self.request_metadata_probe(existing)
+        self._ensure_pump_alive()
+        self._wake_pump()
+
+    @staticmethod
+    def _record_topic(pair: Pair) -> None:
+        """Note in the topic index that this forum topic produced `pair`."""
+        if not pair.source_url:
+            return
+        m = re.search(r"/t/(?:[^/]+/)?(\d+)", pair.source_url)
+        if not m:
+            return
+        try:
+            from funpairdl.persistence.topic_index import get_topic_index
+            get_topic_index().record_pair(m.group(1), pair.source_url, pair.name, pair.id, pair.name)
+        except Exception as e:  # never let bookkeeping break a send
+            logger.debug("topic index update failed: %s", e)
 
     def _wake_pump(self) -> None:
         """Thread-safe pump wake — can be called from any thread."""
@@ -1018,6 +1060,36 @@ class QueueManager:
             )
         return self._registry
 
+    @staticmethod
+    def _dedupe_item_filenames(pair: Pair) -> None:
+        """Give every item of a pair a distinct on-disk name. Two attachments
+        of one post often resolve to the SAME name — the forum CDN serves the
+        author's original upload name, and a "new" and "legacy" take of one
+        script are both uploaded as "<Work>.funscript" — and identical names
+        in one output folder made the second download overwrite the first
+        (the surviving file was then filed as the .alt, the main was lost).
+        Later duplicates become "<stem> (2).ext", "(3)", …; organize still
+        parses their axis and files the extras as variants."""
+        seen: dict[str, PairItem] = {}
+        for item in pair.items:
+            if item.is_bundle or not item.filename:
+                continue
+            key = item.filename.lower()
+            if key not in seen:
+                seen[key] = item
+                continue
+            if item.state == ItemState.COMPLETED:
+                continue  # already on disk under this name — leave it be
+            stem, ext = os.path.splitext(item.filename)
+            n = 2
+            while f"{stem} ({n}){ext}".lower() in seen:
+                n += 1
+            new_name = f"{stem} ({n}){ext}"
+            logger.info("Duplicate filename in pair '%s': %s -> %s",
+                        pair.name, item.filename, new_name)
+            item.filename = new_name
+            seen[new_name.lower()] = item
+
     async def _resolve_item(self, item: PairItem, preferred_resolution: str = "best") -> ResolvedFile | None:
         """Resolve a PairItem's URL through the provider system."""
         try:
@@ -1080,7 +1152,7 @@ class QueueManager:
             # Skip if the output file already exists with the expected size
             if item.total_bytes > 0:
                 final = output_dir / item.filename
-                if final.exists() and final.stat().st_size >= item.total_bytes:
+                if self._already_on_disk(item, final):
                     item.downloaded_bytes = item.total_bytes
                     item.state = ItemState.COMPLETED
                     if self.on_item_updated:
@@ -1172,7 +1244,7 @@ class QueueManager:
             # Skip if the output file already exists with the expected size
             if item.total_bytes > 0:
                 final = output_dir / item.filename
-                if final.exists() and final.stat().st_size >= item.total_bytes:
+                if self._already_on_disk(item, final):
                     item.downloaded_bytes = item.total_bytes
                     item.state = ItemState.COMPLETED
                     if self.on_item_updated:
@@ -1371,7 +1443,7 @@ class QueueManager:
                 continue
             if item.total_bytes > 0:
                 final = output_dir / item.filename
-                if final.exists() and final.stat().st_size >= item.total_bytes:
+                if self._already_on_disk(item, final):
                     item.downloaded_bytes = item.total_bytes
                     item.state = ItemState.COMPLETED
                     item.error_message = ""
@@ -1392,6 +1464,7 @@ class QueueManager:
             *[_resolve_one(i) for i in items_to_resolve],
             return_exceptions=True,
         )
+        self._dedupe_item_filenames(pair)
 
         if self.on_pair_updated:
             self.on_pair_updated(pair)
@@ -1470,6 +1543,7 @@ class QueueManager:
                     *[_re_resolve(i) for i in failed_items if i.state == ItemState.PENDING],
                     return_exceptions=True,
                 )
+                self._dedupe_item_filenames(pair)
                 if self.on_pair_updated:
                     self.on_pair_updated(pair)
 
@@ -2160,12 +2234,14 @@ class QueueManager:
         # to Main so organize treats them flatly.
         new_pairs: list[Pair] = []
         for g in groups:
-            new_pair = Pair(name=g["name"], preferred_resolution=pair.preferred_resolution)
+            new_pair = Pair(name=g["name"], preferred_resolution=pair.preferred_resolution,
+                            source_url=pair.source_url)
             new_pair.output_dir = str(self.download_dir / g["name"])
             new_pair.items = list(g["videos"]) + list(g["scripts"]) + list(g["others"])
             for it in new_pair.items:
                 it.group = "Main"
             new_pairs.append(new_pair)
+            self._record_topic(new_pair)
 
         videos = [i for i in pair.items if i.file_type == FileType.VIDEO]
         logger.info(
@@ -2204,11 +2280,11 @@ class QueueManager:
         implicit Alt groups so legacy flat-list submissions keep
         producing the same `.alt` layout.
 
-        These auto-generated Alt groups use `inherit_multi_axis=False`
-        because the historical behavior only hardlinked the Main video
-        into alt folders — it never duplicated non-L0 funscripts. New
-        explicitly-grouped pairs (from the picker UI) opt in to axis
-        inheritance instead.
+        These auto-generated Alt groups inherit Main's multi-axis
+        scripts (`inherit_multi_axis=True`): a second L0 posted next to a
+        pitch/roll/... set is another stroke take on the same scene, and
+        every take is played with the full axis set. Only an explicit Alt
+        group from the picker UI can opt out.
         """
         from collections import OrderedDict
         from funpairdl.persistence.settings import Settings
@@ -2264,11 +2340,34 @@ class QueueManager:
         for _author, items in by_author.items():
             alt_name = f"Alt {next_n}"
             next_n += 1
-            pair.alt_group_config.setdefault(alt_name, {"inherit_multi_axis": False})
+            pair.alt_group_config.setdefault(alt_name, {"inherit_multi_axis": True})
             for it in items:
                 it.group = alt_name
 
     _VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".wmv", ".ts", ".flv"}
+
+    # Trailing bracket groups made only of post qualifiers: "(Requested, HQ
+    # Multi-Axis Script)", "[Multi-Axis]", "(Suggested)", "(Soft & Hardcore
+    # Scripts)". They describe the post, not the work.
+    _QUALIFIER_RE = re.compile(
+        r"\s*[\(\[（【]\s*(?:(?:requested|suggested|commissioned|hq|multi[- ]?axis|"
+        r"single[- ]?axis|free|paid|scripts?|music|action|based|soft|hard(?:core)?|"
+        r"simple|updated?|remake|&|and|\+|,|\s)+)\s*[\)\]）】]\s*$",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _title_key(cls, name: str) -> str:
+        """`_match_key` of a work title with its trailing qualifier tags
+        removed, so "Alpha Beta (Requested, HQ Script)" and "Alpha Beta"
+        compare equal."""
+        s = (name or "").strip()
+        while True:
+            t = cls._QUALIFIER_RE.sub("", s)
+            if t == s:
+                break
+            s = t
+        return cls._match_key(s)
 
     @staticmethod
     def _match_key(name: str, strip_prefix: bool = False) -> str:
@@ -2290,6 +2389,21 @@ class QueueManager:
         # punctuation/space. Using [a-z0-9] here would erase Chinese/Japanese
         # names entirely and make CJK works unmatchable.
         return "".join(c for c in s if c.isalnum())
+
+    @staticmethod
+    def _already_on_disk(item: PairItem, final: Path) -> bool:
+        """True when `final` already holds this item. A funscript's size is
+        exact (Content-Length of a static upload), so only the very same
+        size counts: a same-named file of another size is a different
+        script (a Filler variant an earlier run filed under the plain name)
+        and must not stand in for this one. Video sizes are often
+        estimates, so a video counts once the file is at least that big."""
+        if item.total_bytes <= 0 or not final.exists():
+            return False
+        size = final.stat().st_size
+        if item.file_type == FileType.FUNSCRIPT:
+            return size == item.total_bytes
+        return size >= item.total_bytes
 
     @staticmethod
     def _file_sha256(path: Path) -> str:
@@ -2410,12 +2524,16 @@ class QueueManager:
             dest_video = pre_video
             dest_base = pre_video.stem if pre_video else self._work_stem(pre_scripts[0].name)
 
-        # Case B: search other library folders by normalized name key.
+        # Case B: search other library folders by normalized name key — the
+        # video's own name, and the post title with its qualifier tags
+        # dropped ("(Requested, HQ Script)" comes and goes between posts of
+        # the same work). The sha256 guard below still decides "same work".
         if dest is None:
             key_name = (Path(videos[0].filename).stem if videos
                         else self._work_stem(scripts[0].filename))
             wkey = self._match_key(key_name)
-            if len(wkey) < 2:
+            wkeys = {k for k in (wkey, self._title_key(pair.name)) if len(k) >= 2}
+            if not wkeys:
                 return False
             own = out_dir.resolve()
             # Folders another queued/active pair is still writing are not
@@ -2437,7 +2555,7 @@ class QueueManager:
                 for d in entries:
                     if not d.is_dir() or d.resolve() == own:
                         continue
-                    if self._match_key(d.name) != wkey:
+                    if not wkeys & {self._match_key(d.name), self._title_key(d.name)}:
                         continue
                     if _rp(d) in busy:
                         continue
@@ -2715,11 +2833,24 @@ class QueueManager:
         for slot_idx, alt_name in enumerate(alt_names):
             alt_base = alt_bases[alt_name]
             alt_dir = output_dir / alt_base
-            alt_dir.mkdir(parents=True, exist_ok=True)
 
-            alt_items = group_items[alt_name]
+            # Only files that are this group's OWN: an item whose filename
+            # is a Main item's filename is the same file (a mirror bundle
+            # carried the same upload and was skipped as already on disk) —
+            # moving it would steal Main's script. With nothing of its own
+            # on disk, an .alt folder holding only a hardlinked video is
+            # junk, so none is made.
+            main_names = {i.filename.lower() for i in group_items.get("Main", [])}
+            alt_items = [i for i in group_items[alt_name]
+                         if i.filename.lower() not in main_names
+                         and (output_dir / i.filename).exists()]
+            if not alt_items:
+                logger.info("Alt group %s has no files of its own — no %s folder",
+                            alt_name, alt_base)
+                continue
             alt_videos = [i for i in alt_items if i.file_type == FileType.VIDEO]
             alt_scripts = [i for i in alt_items if i.file_type == FileType.FUNSCRIPT]
+            alt_dir.mkdir(parents=True, exist_ok=True)
 
             # Place Alt video. If the Alt group has its own video, move it
             # into the subfolder under the alt name. Otherwise hardlink

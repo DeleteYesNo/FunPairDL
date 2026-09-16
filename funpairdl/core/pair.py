@@ -139,6 +139,9 @@ class Pair:
     # user can group its files before sending; _auto_split_bundle_pair then
     # honours these labels instead of guessing by name.
     bundle_plan: dict[str, str] = field(default_factory=dict)
+    # The forum topic (or other page) this pair was sent from — lets the
+    # topic list show what has already been downloaded.
+    source_url: str = ""
 
     @property
     def total_bytes(self) -> int:
@@ -202,6 +205,7 @@ class Pair:
             "original_filenames": dict(self.original_filenames),
             "alt_group_config": {k: dict(v) for k, v in self.alt_group_config.items()},
             "bundle_plan": dict(self.bundle_plan),
+            "source_url": self.source_url,
             "error_message": self.error_message,
             "items": [i.to_dict() for i in self.items],
         }
@@ -220,6 +224,7 @@ class Pair:
             original_filenames=d.get("original_filenames", {}),
             alt_group_config=d.get("alt_group_config", {}),
             bundle_plan=dict(d.get("bundle_plan") or {}),
+            source_url=d.get("source_url", "") or "",
             error_message=d.get("error_message", ""),
         )
         pair.items = [PairItem.from_dict(i) for i in d.get("items", [])]
