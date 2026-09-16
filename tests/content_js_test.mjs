@@ -444,6 +444,74 @@ const extRow = ctx.renderScriptItem(
   { url: "https://pixeldrain.com/u/abc", filename: "[External] scripts", source: "OP", isExternal: true }, 0, "s", true);
 check("external script row shows its host", extRow.includes('<span class="funpairdl-tag-source">Pixeldrain</span>'), true);
 
+// ── handleSingleSend carries each forum script's real name in `filenames` ──
+// A short-url resolves to a CDN path whose basename is a content hash; the
+// backend's bundle split runs before download and can only match a script
+// to its video by the name the panel saw. External-host placeholders
+// ("[External] …") are not filenames and must stay out of the map.
+{
+  let payload = null;
+  ctx.window.funpairdlBridge.sendMessage = (type, data) => {
+    if (type === "send-pair") { payload = data; return Promise.resolve({ success: true }); }
+    return Promise.resolve({});
+  };
+  const parsed = {
+    title: "Work A + Work B", mode: "single",
+    videos: [],
+    scripts: [
+      { url: "https://cdn.example/0a1b2c3d.funscript", filename: "Work A_regular.funscript", author: "Clothed" },
+      { url: "https://pixeldrain.com/u/ext1", filename: "[External] scripts", isExternal: true },
+    ],
+  };
+  const panel = {
+    _bundlePlan: {},
+    querySelectorAll: (sel) => sel.includes('name="script"') ? [{ value: "0" }, { value: "1" }] : [],
+    classList: { add: noop, remove: noop }, parentNode: null,
+  };
+  const sendBtn = { ...fakeEl, classList: { add: noop, remove: noop } };
+  await ctx.handleSingleSend(panel, parsed, sendBtn, "best", true);
+  const g = payload && payload.groups && payload.groups[0];
+  check("send carries the forum script's real filename",
+    g && g.filenames["https://cdn.example/0a1b2c3d.funscript"], "Work A_regular.funscript");
+  check("send keeps the author map alongside",
+    g && g.script_authors["https://cdn.example/0a1b2c3d.funscript"], "Clothed");
+  check("external placeholder is not sent as a filename",
+    g && Object.prototype.hasOwnProperty.call(g.filenames, "https://pixeldrain.com/u/ext1"), false);
+  check("both script urls are still sent", g && g.script_urls.length, 2);
+}
+
+// ── Spoilered catalogues: headings inside <details> that hold real works ──
+// An OP that folds each year into a spoiler still lays every work out under
+// its own heading; the download line itself is often a heading too
+// ("Video: <a> Script: <a>") and must read as content, not a section title.
+{
+  const link = (href) => ({ href, getAttribute: (n) => (n === "href" ? href : null) });
+  const el = (links) => ({ querySelectorAll: () => links });
+  check("script-link heading is a download line",
+    ctx.isScriptLinkHeading(el([link("https://rule34video.com/video/1/alpha/"), link("/uploads/short-url/abc.funscript")])), true);
+  check("plain title heading is not a download line",
+    ctx.isScriptLinkHeading(el([link("#p-1-alpha")])), false);
+  check("details with a video and a script holds works",
+    ctx._detailsHoldsWorks(el([link("https://rule34video.com/video/1/alpha/"), link("/uploads/short-url/abc.funscript")])), true);
+  check("details with only a preview image link holds no works",
+    ctx._detailsHoldsWorks(el([link("https://cdn.example/preview.gif")])), false);
+  check("details with a script but no video holds no works",
+    ctx._detailsHoldsWorks(el([link("/uploads/short-url/abc.funscript"), link("https://discuss.eroscripts.com/t/other/2")])), false);
+}
+
+// ── Topic-list badges: status → badge ──
+{
+  const b = (st, v) => { const r = ctx._topicBadge(st, v); return r && `${r.cls}:${r.text}`; };
+  check("completed by recorded pair", b({ state: "completed", names: ["Work"] }, false), "completed:✓ 已下載");
+  check("completed by title match is outlined", b({ state: "completed", by_title: true }, false), "by-title:✓ 已下載(依標題)");
+  check("queued/downloading is active", b({ state: "queued" }, false), "active:⏳ 佇列中");
+  check("failed is red", b({ state: "failed" }, true), "failed:✗ 下載失敗");
+  check("opened but never sent", b({ state: "", visited_at: "2026-09-17T04:00:00" }, false), "visited:👁 已開啟");
+  check("only the forum's read mark", b({ state: "" }, true), "visited:👁 看過");
+  check("nothing known → no badge", b({ state: "" }, false), null);
+  check("no status at all → no badge", b(undefined, false), null);
+}
+
 if (failures) {
   console.error(`\n${failures} assertion(s) failed`);
   process.exit(1);

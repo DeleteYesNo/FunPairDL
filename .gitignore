@@ -40,3 +40,8 @@ Desktop.ini
 
 # ── Claude Code local settings (keep machine-specific perms private) ──
 .claude/settings.local.json
+
+# Topic index (personal browsing/download history) and the de-dup hash cache
+topic_index.json
+topic_index.json.tmp-*
+hash_cache.json

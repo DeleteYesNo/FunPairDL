@@ -71,6 +71,23 @@ class AddPairRequest(BaseModel):
     preferred_resolution: str = "best"
     auto_rename: bool = True  # Whether to rename files to pair name after download
     eroscripts_cookies: str = ""  # Sent by extension for authenticated downloads
+    source_url: str = ""  # the forum topic this was sent from (topic index)
+
+
+class TopicRef(BaseModel):
+    id: str
+    title: str = ""
+
+
+class TopicStatusRequest(BaseModel):
+    """Which of these topics were opened / sent to the queue?"""
+    topics: list[TopicRef] = []
+
+
+class TopicVisitedRequest(BaseModel):
+    id: str
+    url: str = ""
+    title: str = ""
 
 
 class AddLinkRequest(BaseModel):

@@ -15,6 +15,8 @@ from funpairdl.api.schemas import (
     QueueStatusResponse,
     ResolveRequest,
     StatusResponse,
+    TopicStatusRequest,
+    TopicVisitedRequest,
 )
 from funpairdl.core.pair import ItemState, PairState
 from funpairdl.core.queue_manager import QueueManager
@@ -103,6 +105,7 @@ async def add_pair(req: AddPairRequest) -> dict:
         filenames=req.filenames,
         sizes=req.sizes,
         bundle_plan=req.bundle_plan,
+        source_url=req.source_url,
     )
 
     logger.info("Pair added via API: %s (%d items)", pair.name, len(pair.items))
@@ -214,6 +217,29 @@ async def _sync_resolve_cookies(resp, original_cookie_str: str | None) -> None:
 
         # Locked read-modify-write — see /pair's cookie save.
         await asyncio.to_thread(Settings.update, _apply)
+
+
+@router.post("/topics/status")
+async def topics_status(req: TopicStatusRequest) -> dict:
+    """For a topic list: which topics were opened, and the download state of
+    what was sent from them (by recorded pair ids, else by title)."""
+    from funpairdl.persistence.topic_index import get_topic_index
+
+    qm = _get_qm()
+    topics = [{"id": t.id, "title": t.title} for t in req.topics][:300]
+    with qm._pairs_lock:
+        live = list(qm.pairs)
+    result = await asyncio.to_thread(
+        get_topic_index().status, topics, live, QueueManager._title_key)
+    return {"topics": result}
+
+
+@router.post("/topics/visited")
+async def topic_visited(req: TopicVisitedRequest) -> dict:
+    from funpairdl.persistence.topic_index import get_topic_index
+
+    await asyncio.to_thread(get_topic_index().record_visit, req.id, req.url, req.title)
+    return {"status": "ok"}
 
 
 @router.post("/bundle/plan")

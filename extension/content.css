@@ -835,3 +835,22 @@
   border-color: #4a90d9;
   color: #4a90d9;
 }
+
+/* === Topic-list badges: opened / downloaded === */
+.funpairdl-topic-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+  vertical-align: middle;
+  white-space: nowrap;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+.funpairdl-topic-badge--completed { background: #2e9e6a; color: #fff; }
+.funpairdl-topic-badge--by-title { background: transparent; color: #2e9e6a; border: 1px solid #2e9e6a; }
+.funpairdl-topic-badge--active { background: #4a90d9; color: #fff; }
+.funpairdl-topic-badge--failed { background: #d9534f; color: #fff; }
+.funpairdl-topic-badge--visited { background: transparent; color: #888; border: 1px solid #aaa; }

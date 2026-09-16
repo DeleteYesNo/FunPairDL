@@ -616,24 +616,72 @@ function isVideoLinkHeading(heading) {
   return false;
 }
 
+// A heading whose links include a funscript attachment is a download line
+// styled as a heading, not a section title.
+function isScriptLinkHeading(heading) {
+  const links = heading.querySelectorAll("a[href]:not(.anchor)");
+  for (const link of links) {
+    if (/\.funscript$/i.test(link.getAttribute("href") || "")) return true;
+  }
+  return false;
+}
+
 /**
  * Split the OP's .cooked element into heading-delimited sections.
  * Uses DOM position to associate links with their preceding heading,
  * regardless of nesting depth. Returns array of { name, videos[], scripts[] }.
  */
+// True when a <details> block holds real downloads — at least one video
+// link and one funscript link — rather than a preview, heatmap or changelog.
+function _detailsHoldsWorks(detailsEl) {
+  let hasScript = false;
+  let hasVideo = false;
+  detailsEl.querySelectorAll("a[href]").forEach((link) => {
+    const href = link.getAttribute("href") || "";
+    if (!href || href.startsWith("#") || href.startsWith("blob:")) return;
+    if (/\.funscript$/i.test(href)) { hasScript = true; return; }
+    if (href.includes("discuss.eroscripts.com")) return;
+    try {
+      const host = new URL(href).hostname.toLowerCase().replace("www.", "");
+      if (VIDEO_DOMAINS.some((d) => host.includes(d)) && !isNonVideoPath(href)) hasVideo = true;
+    } catch (e) {}
+  });
+  return hasScript && hasVideo;
+}
+
 function parseOPSections(cookedEl) {
-  // 1. Find all headings at any depth (skip those inside details/table/aside)
+  // 1. Find all headings at any depth (skip those inside table/aside/
+  //    blockquote). Headings inside <details> are decorative as a rule
+  //    (spoilered previews, heatmaps, changelogs) — except when the OP
+  //    folds its whole catalogue into spoilers ("2018 (3 scripts)" …) and
+  //    lays each work out under its own heading inside. Those headings
+  //    count when two or more sit in details blocks that hold real
+  //    downloads; a single spoilered work stays part of the section
+  //    around it.
   const headings = [];
+  const spoilered = [];
   const walker = document.createTreeWalker(cookedEl, NodeFilter.SHOW_ELEMENT);
   let node;
   while ((node = walker.nextNode())) {
     if (/^H[1-4]$/i.test(node.tagName)) {
       const nested = node.closest("details, table, aside, blockquote");
-      if (nested && cookedEl.contains(nested) && nested !== cookedEl) continue;
-      // Skip headings that are just formatted video links (e.g. MEGA links as H3)
-      if (isVideoLinkHeading(node)) continue;
+      const isNested = nested && cookedEl.contains(nested) && nested !== cookedEl;
+      if (isNested && nested.tagName !== "DETAILS") continue;
+      // Skip headings that are just formatted video links (e.g. MEGA links
+      // as H3) — and headings that carry the work's download links inline
+      // ("Video: <a> Script: <a>"): those are content, not a title.
+      if (isVideoLinkHeading(node) || isScriptLinkHeading(node)) continue;
+      if (isNested) {
+        if (_detailsHoldsWorks(nested)) spoilered.push(node);
+        continue;
+      }
       headings.push(node);
     }
+  }
+  if (spoilered.length >= 2) {
+    headings.push(...spoilered);
+    headings.sort((a, b) =>
+      (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1);
   }
 
   if (headings.length < 2) return [];
@@ -1521,6 +1569,9 @@ async function sendPairToServer(data) {
     preferred_resolution: data.preferredResolution || "best",
     auto_rename: data.autoRename !== false,
   };
+  // Where this was sent from — the backend's topic index turns it into the
+  // "已下載" badge on the forum's topic lists.
+  if (data.sourceUrl) payload.source_url = data.sourceUrl;
   if (data.groups && data.groups.length > 0) {
     // New grouped payload — backend uses this to lay out Main/Alt folders
     payload.groups = data.groups.map((g) => ({
@@ -2655,6 +2706,14 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
     const b = _bucket(gname);
     b.scriptUrls.push(script.url);
     if (script.author) b.scriptAuthorMap[script.url] = script.author;
+    // Carry the script's real name (the attachment's link text). A forum
+    // short-url resolves to a CDN path whose basename is a content hash, so
+    // without this the backend files the item as "0a1b2c3d….funscript" until
+    // download time — and the bundle split, which runs before that, can't
+    // match "Work A_regular.funscript" to video "Work A" by name and falls
+    // back to guessing by document order. External-host rows carry a
+    // "[External] …" placeholder, not a filename; the probe names those.
+    if (script.filename && !script.isExternal) b.filenames[script.url] = script.filename;
     if (bundlePlan[script.url]) b.bundlePlan[script.url] = bundlePlan[script.url];
   });
 
@@ -2710,6 +2769,7 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
   const result = await sendPairToServer({
     title: parsed.title, groups,
     preferredResolution, autoRename,
+    sourceUrl: parsed.sourceUrl || location.href,
   });
 
   if (result.success) {
@@ -2840,6 +2900,8 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
       if (!script) continue;
       scriptUrls.push(script.url);
       if (script.author) scriptAuthorMap[script.url] = script.author;
+      // Real script name for the backend's split matching (see handleSingleSend).
+      if (script.filename && !script.isExternal) filenameMap[script.url] = script.filename;
     }
 
     if (videoUrls.length === 0 && scriptUrls.length === 0) continue;
@@ -2906,6 +2968,7 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
       filenames: resolvedFilenames,
       sizes: resolvedSizes,
       bundlePlan: p.bundlePlan || {},
+      sourceUrl: parsed.sourceUrl || location.href,
     });
 
     if (result.success) {
@@ -2996,6 +3059,7 @@ async function _parseTopicRemote(url) {
   if (!parsed) return { error: "no_links" };
   const { totalV, totalS } = _parsedTotals(parsed);
   if (totalV === 0 && totalS === 0) return { error: "no_links" };
+  parsed.sourceUrl = url;   // the topic this came from (topic-list badges)
   return { parsed };
 }
 
@@ -4554,6 +4618,117 @@ if (_funpairdlHostAllowed()) {
   });
 }
 
+// ─── Topic-list badges: opened / downloaded ───
+//
+// Every topic row on a list page (category, latest, search, "suggested
+// topics") gets a badge from the backend's topic index: what was sent from
+// that topic and how it went, or that it was merely opened. Topics sent
+// before the index existed are matched by title. A topic page records a
+// visit once per load.
+
+const _TOPIC_MARK_DEBOUNCE_MS = 400;
+const _TOPIC_MARK_BATCH = 200;
+const _visitedNoted = new Set();
+let _topicMarkTimer = null;
+let _topicMarkBusy = false;
+
+// Pure: badge for a topic's status. `rowVisited` is Discourse's own
+// "visited" row class — a weaker "seen before" signal used when the index
+// knows nothing.
+function _topicBadge(st, rowVisited) {
+  const state = (st && st.state) || "";
+  if (state === "completed") {
+    return st.by_title
+      ? { text: "✓ 已下載(依標題)", cls: "by-title", title: "佇列或封存中有同名作品" }
+      : { text: "✓ 已下載", cls: "completed", title: (st.names || []).join("\n") };
+  }
+  if (state === "downloading" || state === "queued" || state === "paused") {
+    return { text: "⏳ 佇列中", cls: "active", title: (st.names || []).join("\n") };
+  }
+  if (state === "failed") {
+    return { text: "✗ 下載失敗", cls: "failed", title: (st.names || []).join("\n") };
+  }
+  if (st && st.visited_at) {
+    return { text: "👁 已開啟", cls: "visited", title: `開啟於 ${st.visited_at}` };
+  }
+  if (rowVisited) return { text: "👁 看過", cls: "visited", title: "論壇記錄為已讀" };
+  return null;
+}
+
+function _topicRowTitleEl(row) {
+  return row.querySelector(".main-link .title, a.title.raw-link, a.title");
+}
+
+function _applyTopicBadge(row, badge) {
+  const old = row.querySelector(".funpairdl-topic-badge");
+  if (old) old.remove();
+  if (!badge) return;
+  const anchor = _topicRowTitleEl(row);
+  if (!anchor) return;
+  const span = document.createElement("span");
+  span.className = `funpairdl-topic-badge funpairdl-topic-badge--${badge.cls}`;
+  span.textContent = badge.text;
+  if (badge.title) span.title = badge.title;
+  anchor.after(span);
+}
+
+async function _annotateTopicRows() {
+  const rows = [...document.querySelectorAll("tr.topic-list-item[data-topic-id]")]
+    .filter((r) => !r.dataset.funpairdlMarked)
+    .slice(0, _TOPIC_MARK_BATCH);
+  if (rows.length === 0) return;
+  const topics = rows.map((r) => ({
+    id: String(r.dataset.topicId),
+    title: ((_topicRowTitleEl(r) || {}).textContent || "").trim(),
+  }));
+  rows.forEach((r) => { r.dataset.funpairdlMarked = "1"; });
+  let resp = null;
+  try { resp = await _sendMsg("topic-status", { topics }); } catch (e) { resp = null; }
+  const map = (resp && resp.topics) || {};
+  for (const row of rows) {
+    const st = map[String(row.dataset.topicId)];
+    _applyTopicBadge(row, _topicBadge(st, row.classList.contains("visited")));
+  }
+}
+
+function _noteTopicVisit() {
+  const tid = _currentTopicId();
+  if (!tid || _visitedNoted.has(tid)) return;
+  const title = getTopicTitle();
+  if (!title) return;   // header not rendered yet — a later tick will catch it
+  _visitedNoted.add(tid);
+  _sendMsg("topic-visited", { id: tid, url: location.href, title }).catch(() => {});
+}
+
+async function _runTopicMarks() {
+  if (_topicMarkBusy) return;
+  _topicMarkBusy = true;
+  try {
+    _noteTopicVisit();
+    if (document.querySelector("tr.topic-list-item[data-topic-id]")) await _annotateTopicRows();
+  } finally {
+    _topicMarkBusy = false;
+  }
+}
+
+function _scheduleTopicMarks() {
+  if (_topicMarkTimer) clearTimeout(_topicMarkTimer);
+  _topicMarkTimer = setTimeout(() => { _topicMarkTimer = null; _runTopicMarks(); }, _TOPIC_MARK_DEBOUNCE_MS);
+}
+
+// Discourse renders lists progressively (infinite scroll, SPA swaps), so
+// new rows keep arriving; one debounced observer covers them all.
+function _setupTopicMarks() {
+  new MutationObserver((muts) => {
+    for (const m of muts) {
+      if (m.addedNodes && m.addedNodes.length) { _scheduleTopicMarks(); return; }
+    }
+  }).observe(document.documentElement, { subtree: true, childList: true });
+  _scheduleTopicMarks();
+}
+
+if (_funpairdlHostAllowed()) _setupTopicMarks();
+
 // ─── Scroll position restoration for Discourse SPA navigation ───
 
 // Singleton URL watcher: registered exactly once at load (host-gated); SPA
@@ -4575,6 +4750,7 @@ function _setupSpaWatcher() {
       // Don't remove the sidebar panel on SPA navigation — it causes
       // the "sudden close" problem. The user can close it manually.
       waitForContent();
+      _scheduleTopicMarks();
 
       // Restore scroll position if returning to a previously visited page
       if (_scrollPositions[lastUrl] !== undefined) {

@@ -411,6 +411,76 @@ class TestBundleFilenames:
         assert Path(pair.output_dir).resolve() in resolved.parents
 
 
+class TestAlreadyOnDisk:
+    """Phase 0 skip: a funscript counts as on disk only at the exact size —
+    a same-named file of another size is a different script (a Filler
+    variant an earlier run filed under the plain name). Video sizes are
+    estimates, so a video counts once the file is at least that big."""
+
+    def test_funscript_needs_exact_size(self, tmp_path):
+        f = tmp_path / "Work.funscript"
+        f.write_bytes(b"x" * 120)
+        item = _vi("Work.funscript", FileType.FUNSCRIPT)
+        item.total_bytes = 100
+        assert QueueManager._already_on_disk(item, f) is False
+        item.total_bytes = 120
+        assert QueueManager._already_on_disk(item, f) is True
+
+    def test_video_accepts_at_least_expected_size(self, tmp_path):
+        f = tmp_path / "Work.mp4"
+        f.write_bytes(b"x" * 120)
+        item = _vi("Work.mp4", FileType.VIDEO)
+        item.total_bytes = 100
+        assert QueueManager._already_on_disk(item, f) is True
+        item.total_bytes = 200
+        assert QueueManager._already_on_disk(item, f) is False
+
+    def test_unknown_size_or_missing_file_is_not_on_disk(self, tmp_path):
+        item = _vi("Work.funscript", FileType.FUNSCRIPT)
+        assert QueueManager._already_on_disk(item, tmp_path / "Work.funscript") is False
+        item.total_bytes = 10
+        assert QueueManager._already_on_disk(item, tmp_path / "missing.funscript") is False
+
+
+class TestDedupeItemFilenames:
+    """Two attachments of one post resolve to the same original upload name
+    (the forum CDN serves the author's filename); in one folder the second
+    would overwrite the first, so later duplicates get a " (n)" suffix."""
+
+    def test_second_same_name_gets_suffix(self):
+        a = _vi("Work.funscript", FileType.FUNSCRIPT)
+        b = _vi("Work.funscript", FileType.FUNSCRIPT)
+        b.url = "u/other"
+        v = _vi("Work.mp4", FileType.VIDEO)
+        pair = Pair(name="Work", items=[v, a, b])
+        QueueManager._dedupe_item_filenames(pair)
+        assert a.filename == "Work.funscript"
+        assert b.filename == "Work (2).funscript"
+        assert v.filename == "Work.mp4"
+
+    def test_three_way_and_case_insensitive(self):
+        items = [_vi("Work.funscript", FileType.FUNSCRIPT),
+                 _vi("work.FUNSCRIPT", FileType.FUNSCRIPT),
+                 _vi("Work.funscript", FileType.FUNSCRIPT)]
+        QueueManager._dedupe_item_filenames(Pair(name="Work", items=items))
+        assert [i.filename for i in items] == ["Work.funscript", "work (2).FUNSCRIPT", "Work (3).funscript"]
+
+    def test_completed_item_keeps_its_name(self):
+        done = _vi("Work.funscript", FileType.FUNSCRIPT)
+        done.state = ItemState.COMPLETED
+        new = _vi("Work.funscript", FileType.FUNSCRIPT)
+        QueueManager._dedupe_item_filenames(Pair(name="Work", items=[new, done]))
+        assert new.filename == "Work.funscript"
+        assert done.filename == "Work.funscript"   # already on disk; never renamed here
+        # …but the pending one that collides with a completed one is suffixed
+        # when the completed one is seen first
+        done2 = _vi("Other.funscript", FileType.FUNSCRIPT)
+        done2.state = ItemState.COMPLETED
+        new2 = _vi("Other.funscript", FileType.FUNSCRIPT)
+        QueueManager._dedupe_item_filenames(Pair(name="Other", items=[done2, new2]))
+        assert new2.filename == "Other (2).funscript"
+
+
 class TestRequeueFailedPair:
     def test_requeue_failed_applies_new_resolution(self):
         # Re-adding a failed work must adopt the new submission's
@@ -436,6 +506,37 @@ class TestRequeueFailedPair:
         assert p1.preferred_resolution == "best"   # new pref applied
         assert p1.state == PairState.QUEUED
         assert all(i.state == ItemState.PENDING for i in p1.items)
+
+
+    def test_requeue_failed_adopts_new_sources(self):
+        # The source 404'd; the user picks a mirror in the panel and re-sends.
+        # The re-queued pair must download the mirror, keep the script that
+        # already finished, and drop the dead URL.
+        qm = QueueManager()
+        p1 = qm.add_pair(
+            name="Work",
+            video_urls=["https://dead.example/v/1"],
+            script_urls=["https://cdn.example/s.funscript"],
+        )
+        p1.state = PairState.FAILED
+        vid, scr = p1.items
+        vid.state = ItemState.FAILED
+        vid.error_message = "404"
+        scr.state = ItemState.COMPLETED
+
+        p2 = qm.add_pair(
+            name="Work",
+            video_urls=["https://mirror.example/u/abc"],
+            script_urls=["https://cdn.example/s.funscript"],
+        )
+        assert p2 is p1
+        assert p1.state == PairState.QUEUED
+        urls = [i.url for i in p1.items]
+        assert "https://mirror.example/u/abc" in urls
+        assert "https://dead.example/v/1" not in urls
+        assert scr in p1.items and scr.state == ItemState.COMPLETED   # kept, not re-downloaded
+        new_vid = next(i for i in p1.items if i.url == "https://mirror.example/u/abc")
+        assert new_vid.state == ItemState.PENDING
 
 
 class TestAddPairAuthors:

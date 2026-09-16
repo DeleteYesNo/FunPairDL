@@ -83,6 +83,7 @@ class MainWindow(QMainWindow):
         if self.browser is not None:
             self.browser.attach_queue_manager(self.qm)
             self.sig_pair_updated.connect(self.browser.on_pair_update_for_autoclose)
+            self.browser.sig_topic_download_failed.connect(self._on_topic_download_failed)
 
         # Populate tree with any pairs already loaded from queue store
         if self.qm.pairs:
@@ -616,6 +617,14 @@ class MainWindow(QMainWindow):
         # to avoid the watcher being silently useless.
         if not self.settings.clipboard_notify_tray and not self.settings.clipboard_notify_flash:
             self._open_pixeldrain_picker(initial_urls=urls)
+
+    @Slot(str, str)
+    def _on_topic_download_failed(self, title: str, body: str):
+        """A batch-sent topic has pair(s) that failed for good — its tab is
+        kept open and marked; say so in the tray as well."""
+        if not self.tray.isVisible():
+            return
+        self.tray.showMessage(title, body, QSystemTrayIcon.Warning, 8000)
 
     @Slot(list)
     def _on_clipboard_duplicates(self, urls: list):
