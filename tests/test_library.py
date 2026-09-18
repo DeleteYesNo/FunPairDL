@@ -132,6 +132,9 @@ def test_merge_sidecar_fills_only_blanks_and_replaces_variants():
                         {"label": "Soft", "files": {"L0": "s"}}]}
     m = lib.merge_sidecar(old, new)
     assert m["title"] == "T" and m["author"] == "A" and m["tags"] == ["a"]
+    # tags are unioned, never replaced: local tags survive a forum fill and vice versa
+    u = lib.merge_sidecar({"tags": ["len-2-5", "HMV"]}, {"tags": ["hmv", "riding"]})
+    assert u["tags"] == ["len-2-5", "HMV", "riding"]
     assert m["source"] == {"url": "u1", "topic_id": 5}
     assert m["posted_at"] == "2026-01-01T00:00:00Z"
     assert m["variants"][0]["files"] == {"L0": "new"}

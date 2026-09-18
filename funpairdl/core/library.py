@@ -341,12 +341,24 @@ def _empty(v) -> bool:
 
 def merge_sidecar(existing: dict | None, incoming: dict, overwrite: bool = False) -> dict:
     """Fill ``existing`` with ``incoming``: scalar fields only where the
-    existing value is empty (unless ``overwrite``); ``source`` / ``category``
-    merged key by key the same way; ``variants`` replaced when given, but
+    existing value is empty (unless ``overwrite``); ``tags`` unioned;
+    ``source`` / ``category`` merged key by key the same way; ``variants`` replaced when given, but
     each variant keeps its old ``inherit_axes`` if the new one has none."""
     out = dict(existing or {})
     for k, v in incoming.items():
         if k == "variants":
+            continue
+        if k == "tags" and isinstance(v, list):
+            # tags are a set: union, keeping order and the existing spelling
+            have = [str(t) for t in (out.get("tags") or []) if str(t)]
+            seen = {t.lower() for t in have}
+            for t in v:
+                t = str(t)
+                if t and t.lower() not in seen:
+                    have.append(t)
+                    seen.add(t.lower())
+            if have:
+                out["tags"] = have
             continue
         if isinstance(v, dict) and isinstance(out.get(k), dict):
             sub = dict(out[k])
