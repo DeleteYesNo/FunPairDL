@@ -39,7 +39,8 @@ def main() -> None:
     args = ap.parse_args()
 
     files = [f for f in os.listdir(LIB) if os.path.isfile(os.path.join(LIB, f))]
-    dirs = [d for d in os.listdir(LIB) if os.path.isdir(os.path.join(LIB, d))]
+    dirs = [d for d in os.listdir(LIB) if os.path.isdir(os.path.join(LIB, d))
+            and d.lower() != "_trash" and not d.startswith("_dup_quarantine")]  # FunLib's bin is invisible
 
     from collections import defaultdict
     groups = defaultdict(lambda: {"v": [], "s": []})

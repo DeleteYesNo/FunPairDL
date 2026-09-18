@@ -1,4 +1,5 @@
-"""Tests for QueueManager._organize_output (erodeck variant naming)."""
+"""Tests for QueueManager._organize_output (flat library layout + funlib.json)."""
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -19,6 +20,23 @@ def _touch(path: Path, size: int = 100):
     """Create a file with dummy content."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"x" * size)
+
+
+def _organize(pair, variant_mode="flat"):
+    qm = QueueManager()
+    with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
+        mock_load.return_value.script_variant_mode = variant_mode
+        mock_load.return_value.reconcile_on_redownload = False
+        qm._organize_output(pair)
+    return qm
+
+
+def _sidecar(folder: Path) -> dict:
+    return json.loads((folder / "funlib.json").read_text(encoding="utf-8"))
+
+
+def _variants(folder: Path) -> dict:
+    return {v["label"]: v for v in _sidecar(folder)["variants"]}
 
 
 class TestParseAxis:
@@ -107,10 +125,7 @@ class TestOrganizeOutputFlat:
             PairItem(url="http://x/s.funscript", filename="original_script.funscript", file_type=FileType.FUNSCRIPT, author="Alice"),
         ])
 
-        qm = QueueManager()
-        with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
-            mock_load.return_value.script_variant_mode = "flat"
-            qm._organize_output(pair)
+        _organize(pair)
 
         assert (tmp_path / "My Video Title.mp4").exists()
         assert (tmp_path / "My Video Title.funscript").exists()
@@ -126,10 +141,7 @@ class TestOrganizeOutputFlat:
             PairItem(url="http://x/s.funscript", filename="script.funscript", file_type=FileType.FUNSCRIPT),
         ])
 
-        qm = QueueManager()
-        with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
-            mock_load.return_value.script_variant_mode = "subfolder"
-            qm._organize_output(pair)
+        _organize(pair, "subfolder")
 
         assert (tmp_path / "Test.mp4").exists()
         assert (tmp_path / "Test.funscript").exists()
@@ -148,10 +160,7 @@ class TestOrganizeOutputFlat:
             PairItem(url="http://x/r.funscript", filename="something.roll.funscript", file_type=FileType.FUNSCRIPT),
         ])
 
-        qm = QueueManager()
-        with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
-            mock_load.return_value.script_variant_mode = "flat"
-            qm._organize_output(pair)
+        _organize(pair)
 
         assert (tmp_path / "Axis Test.mp4").exists()
         assert (tmp_path / "Axis Test.funscript").exists()
@@ -160,10 +169,10 @@ class TestOrganizeOutputFlat:
 
 
 class TestAxisCollision:
-    """Test axis collision detection → alt variant structure."""
+    """Axis collisions inside Main become flat "(Label)" variants."""
 
     def test_two_L0_variants_max_plus(self, tmp_path):
-        """Two scripts both mapping to L0 (unknown suffixes) → alt structure."""
+        """Two scripts both mapping to L0 (unknown suffixes) → second is a variant."""
         _touch(tmp_path / "v.mp4")
         _touch(tmp_path / "Wednesday.L0.max.funscript")
         _touch(tmp_path / "Wednesday.L0.plus.funscript")
@@ -173,23 +182,17 @@ class TestAxisCollision:
             PairItem(url="http://x/max.funscript", filename="Wednesday.L0.max.funscript", file_type=FileType.FUNSCRIPT),
             PairItem(url="http://x/plus.funscript", filename="Wednesday.L0.plus.funscript", file_type=FileType.FUNSCRIPT),
         ])
+        _organize(pair)
 
-        qm = QueueManager()
-        with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
-            mock_load.return_value.script_variant_mode = "flat"
-            qm._organize_output(pair)
-
-        # First L0 script → primary in root (with L0 suffix since _parse_axis returns "L0")
+        # First L0 script → primary (with L0 suffix since _parse_axis returns "L0")
         assert (tmp_path / "Wednesday.L0.funscript").exists()
-        # Second L0 script → alt subfolder
-        alt_dir = tmp_path / "Wednesday.alt"
-        assert alt_dir.is_dir()
-        assert (alt_dir / "Wednesday.alt.L0.funscript").exists()
-        # Hardlinked video
-        assert (tmp_path / "Wednesday.alt" / "Wednesday.alt.mp4").exists()
+        # Second L0 script → flat variant, no subfolder, no linked video
+        assert (tmp_path / "Wednesday (Alt).L0.funscript").exists()
+        assert not (tmp_path / "Wednesday.alt").exists()
+        assert not (tmp_path / ".linkinfo").exists()
+        assert [f.name for f in tmp_path.iterdir() if f.suffix.lower() == ".mp4"] == ["Wednesday.mp4"]
 
     def test_unknown_suffixes_collide_on_L0(self, tmp_path):
-        """Two unknown-suffix scripts → both map to L0 → collision → alt."""
         _touch(tmp_path / "v.mp4")
         _touch(tmp_path / "video.max.funscript")
         _touch(tmp_path / "video.plus.funscript")
@@ -199,43 +202,13 @@ class TestAxisCollision:
             PairItem(url="http://x/max.funscript", filename="video.max.funscript", file_type=FileType.FUNSCRIPT),
             PairItem(url="http://x/plus.funscript", filename="video.plus.funscript", file_type=FileType.FUNSCRIPT),
         ])
-
-        qm = QueueManager()
-        with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
-            mock_load.return_value.script_variant_mode = "flat"
-            qm._organize_output(pair)
-
-        # First → primary as main (no suffix since display_suffix is "")
-        assert (tmp_path / "Video.funscript").exists()
-        # Second → alt
-        alt_dir = tmp_path / "Video.alt"
-        assert alt_dir.is_dir()
-        assert (alt_dir / "Video.alt.funscript").exists()
-
-    def test_main_plus_unknown_collide(self, tmp_path):
-        """Plain .funscript + .max.funscript → both L0 → collision."""
-        _touch(tmp_path / "v.mp4")
-        _touch(tmp_path / "video.funscript")
-        _touch(tmp_path / "video.max.funscript")
-
-        pair = _make_pair(str(tmp_path), "Video", [
-            PairItem(url="http://x/v.mp4", filename="v.mp4", file_type=FileType.VIDEO),
-            PairItem(url="http://x/s1.funscript", filename="video.funscript", file_type=FileType.FUNSCRIPT),
-            PairItem(url="http://x/s2.funscript", filename="video.max.funscript", file_type=FileType.FUNSCRIPT),
-        ])
-
-        qm = QueueManager()
-        with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
-            mock_load.return_value.script_variant_mode = "flat"
-            qm._organize_output(pair)
+        _organize(pair)
 
         assert (tmp_path / "Video.funscript").exists()
-        alt_dir = tmp_path / "Video.alt"
-        assert alt_dir.is_dir()
-        assert (alt_dir / "Video.alt.funscript").exists()
+        assert (tmp_path / "Video (Alt).funscript").exists()
 
     def test_no_collision_different_axes(self, tmp_path):
-        """Different known axes → no collision → all stay in root."""
+        """Different known axes → no collision → all stay Main."""
         _touch(tmp_path / "v.mp4")
         _touch(tmp_path / "s.funscript")
         _touch(tmp_path / "s.pitch.funscript")
@@ -247,48 +220,20 @@ class TestAxisCollision:
             PairItem(url="http://x/p.funscript", filename="s.pitch.funscript", file_type=FileType.FUNSCRIPT),
             PairItem(url="http://x/su.funscript", filename="s.surge.funscript", file_type=FileType.FUNSCRIPT),
         ])
-
-        qm = QueueManager()
-        with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
-            mock_load.return_value.script_variant_mode = "flat"
-            qm._organize_output(pair)
+        _organize(pair)
 
         assert (tmp_path / "Multi.funscript").exists()
         assert (tmp_path / "Multi.pitch.funscript").exists()
         assert (tmp_path / "Multi.surge.funscript").exists()
-        assert not (tmp_path / "Multi.alt").exists()
+        v = _variants(tmp_path)
+        assert list(v) == ["Main"]
+        assert v["Main"]["files"] == {"L0": "Multi.funscript", "pitch": "Multi.pitch.funscript",
+                                      "surge": "Multi.surge.funscript"}
 
-    def test_axis_collision_with_multiaxis(self, tmp_path):
-        """Multi-axis + two L0 variants: non-L0 axes stay flat, L0 extras → alt."""
-        _touch(tmp_path / "v.mp4")
-        _touch(tmp_path / "s.funscript")
-        _touch(tmp_path / "s.pitch.funscript")
-        _touch(tmp_path / "s.max.funscript")  # unknown → L0 collision with main
-
-        pair = _make_pair(str(tmp_path), "Mixed", [
-            PairItem(url="http://x/v.mp4", filename="v.mp4", file_type=FileType.VIDEO),
-            PairItem(url="http://x/s.funscript", filename="s.funscript", file_type=FileType.FUNSCRIPT),
-            PairItem(url="http://x/p.funscript", filename="s.pitch.funscript", file_type=FileType.FUNSCRIPT),
-            PairItem(url="http://x/m.funscript", filename="s.max.funscript", file_type=FileType.FUNSCRIPT),
-        ])
-
-        qm = QueueManager()
-        with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
-            mock_load.return_value.script_variant_mode = "flat"
-            qm._organize_output(pair)
-
-        # Main L0 + pitch stay in root
-        assert (tmp_path / "Mixed.funscript").exists()
-        assert (tmp_path / "Mixed.pitch.funscript").exists()
-        # "max" collides with main L0 → alt
-        alt_dir = tmp_path / "Mixed.alt"
-        assert alt_dir.is_dir()
-        assert (alt_dir / "Mixed.alt.funscript").exists()
-
-    def test_axis_collision_alt_inherits_multiaxis(self, tmp_path):
+    def test_axis_collision_alt_inherits_multiaxis_at_play_time(self, tmp_path):
         """An auto-promoted L0 extra is another stroke take on the same
-        scene: its .alt folder gets Main's non-L0 axes hardlinked in, so
-        every take plays with the full axis set."""
+        scene: nothing is copied — the sidecar leaves inherit_axes on so
+        FunLib plays it with Main's pitch/roll."""
         _touch(tmp_path / "v.mp4")
         _touch(tmp_path / "s.funscript")
         _touch(tmp_path / "s.pitch.funscript")
@@ -302,28 +247,21 @@ class TestAxisCollision:
             PairItem(url="http://x/r.funscript", filename="s.roll.funscript", file_type=FileType.FUNSCRIPT),
             PairItem(url="http://x/m.funscript", filename="s.max.funscript", file_type=FileType.FUNSCRIPT),
         ])
-
-        qm = QueueManager()
-        with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
-            mock_load.return_value.script_variant_mode = "flat"
-            qm._organize_output(pair)
+        _organize(pair)
 
         assert pair.alt_group_config["Alt 1"]["inherit_multi_axis"] is True
-        alt_dir = tmp_path / "Mixed.alt"
-        assert (alt_dir / "Mixed.alt.funscript").exists()
-        for axis in ("pitch", "roll"):
-            linked = alt_dir / f"Mixed.alt.{axis}.funscript"
-            assert linked.exists()
-            assert os.stat(linked).st_nlink == 2   # hardlink, not a copy
-        content = (tmp_path / ".linkinfo").read_text(encoding="utf-8")
-        assert "Mixed.alt.pitch.funscript" in content
-        assert "Mixed.alt.roll.funscript" in content
+        assert pair.alt_group_config["Alt 1"]["label"] == "Alt"
+        assert (tmp_path / "Mixed (Alt).funscript").exists()
+        assert not (tmp_path / "Mixed (Alt).pitch.funscript").exists()
+        assert not (tmp_path / "Mixed.alt").exists()
+        v = _variants(tmp_path)
+        assert v["Alt"]["files"] == {"L0": "Mixed (Alt).funscript"}
+        assert "inherit_axes" not in v["Alt"]          # default true
 
-    def test_alt_whose_file_is_gone_makes_no_folder(self, tmp_path):
+    def test_alt_whose_file_is_gone_makes_nothing(self, tmp_path):
         """A mirror bundle carried the same upload as the forum script: the
         second item was skipped as already on disk and shares the first's
-        file. Once Main claims that file there is nothing left for the Alt
-        slot, so no .alt folder (with only a hardlinked video) is created."""
+        file. Once Main claims that file there is nothing left for the Alt."""
         _touch(tmp_path / "v.mp4")
         _touch(tmp_path / "Work.funscript")
 
@@ -332,18 +270,14 @@ class TestAxisCollision:
             PairItem(url="http://x/a.funscript", filename="Work.funscript", file_type=FileType.FUNSCRIPT),
             PairItem(url="http://y/a.funscript", filename="Work.funscript", file_type=FileType.FUNSCRIPT),
         ])
-
-        qm = QueueManager()
-        with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
-            mock_load.return_value.script_variant_mode = "flat"
-            qm._organize_output(pair)
+        _organize(pair)
 
         assert (tmp_path / "Work.funscript").exists()
         assert (tmp_path / "Work.mp4").exists()
-        assert not (tmp_path / "Work.alt").exists()
+        assert not (tmp_path / "Work (Alt).funscript").exists()
+        assert list(_variants(tmp_path)) == ["Main"]
 
-    def test_three_L0_variants(self, tmp_path):
-        """Three L0 scripts → 1 primary + 2 alts (.alt, .alt1)."""
+    def test_three_L0_variants_get_numbered_labels(self, tmp_path):
         _touch(tmp_path / "v.mp4")
         _touch(tmp_path / "s1.funscript")
         _touch(tmp_path / "s2.funscript")
@@ -355,45 +289,15 @@ class TestAxisCollision:
             PairItem(url="http://x/s2.funscript", filename="s2.funscript", file_type=FileType.FUNSCRIPT),
             PairItem(url="http://x/s3.funscript", filename="s3.funscript", file_type=FileType.FUNSCRIPT),
         ])
-
-        qm = QueueManager()
-        with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
-            mock_load.return_value.script_variant_mode = "flat"
-            qm._organize_output(pair)
+        _organize(pair)
 
         assert (tmp_path / "Three.funscript").exists()
-        assert (tmp_path / "Three.alt" / "Three.alt.funscript").exists()
-        assert (tmp_path / "Three.alt1" / "Three.alt1.funscript").exists()
+        assert (tmp_path / "Three (Alt).funscript").exists()
+        assert (tmp_path / "Three (Alt 2).funscript").exists()
+        assert set(_variants(tmp_path)) == {"Main", "Alt", "Alt 2"}
 
-    def test_linkinfo_written_for_axis_collision(self, tmp_path):
-        """Axis collision alt folders should generate .linkinfo."""
-        _touch(tmp_path / "v.mp4", size=200)
-        _touch(tmp_path / "s1.funscript")
-        _touch(tmp_path / "s2.funscript")
-
-        pair = _make_pair(str(tmp_path), "Link", [
-            PairItem(url="http://x/v.mp4", filename="v.mp4", file_type=FileType.VIDEO),
-            PairItem(url="http://x/s1.funscript", filename="s1.funscript", file_type=FileType.FUNSCRIPT),
-            PairItem(url="http://x/s2.funscript", filename="s2.funscript", file_type=FileType.FUNSCRIPT),
-        ])
-
-        qm = QueueManager()
-        with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
-            mock_load.return_value.script_variant_mode = "flat"
-            qm._organize_output(pair)
-
-        linkinfo = tmp_path / ".linkinfo"
-        assert linkinfo.exists()
-        content = linkinfo.read_text(encoding="utf-8")
-        assert "[hardlink]" in content
-        assert "Link.alt" in content
-
-
-class TestOrganizeOutputSubfolder:
-    """Test subfolder mode (multi-author erodeck variant structure)."""
-
-    def test_two_authors_alt_structure(self, tmp_path):
-        """2nd author → .alt subfolder with hardlinked video."""
+    def test_two_authors_become_author_labels(self, tmp_path):
+        """A second scripter's take is labelled by their name."""
         _touch(tmp_path / "v.mp4", size=200)
         _touch(tmp_path / "a_script.funscript")
         _touch(tmp_path / "b_script.funscript")
@@ -403,68 +307,16 @@ class TestOrganizeOutputSubfolder:
             PairItem(url="http://x/a.funscript", filename="a_script.funscript", file_type=FileType.FUNSCRIPT, author="Alice"),
             PairItem(url="http://x/b.funscript", filename="b_script.funscript", file_type=FileType.FUNSCRIPT, author="Bob"),
         ])
+        _organize(pair, "subfolder")
 
-        qm = QueueManager()
-        with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
-            mock_load.return_value.script_variant_mode = "subfolder"
-            qm._organize_output(pair)
-
-        # Primary author (Alice) in root
         assert (tmp_path / "TwoAuth.mp4").exists()
         assert (tmp_path / "TwoAuth.funscript").exists()
+        assert (tmp_path / "TwoAuth (Bob).funscript").exists()
+        assert not (tmp_path / "TwoAuth.alt").exists()
+        assert not (tmp_path / ".linkinfo").exists()
+        assert os.stat(tmp_path / "TwoAuth.mp4").st_nlink == 1
 
-        # Alt author (Bob) in .alt subfolder
-        alt_dir = tmp_path / "TwoAuth.alt"
-        assert alt_dir.is_dir()
-        assert (alt_dir / "TwoAuth.alt.funscript").exists()
-
-        # Hardlinked video
-        alt_video = alt_dir / "TwoAuth.alt.mp4"
-        assert alt_video.exists()
-        # Verify it's a hardlink (same inode)
-        assert os.path.samefile(str(tmp_path / "TwoAuth.mp4"), str(alt_video))
-
-        # .linkinfo file
-        linkinfo = tmp_path / ".linkinfo"
-        assert linkinfo.exists()
-        content = linkinfo.read_text(encoding="utf-8")
-        assert "[hardlink]" in content
-        assert "TwoAuth.alt" in content
-
-    def test_three_authors_alt1(self, tmp_path):
-        """3rd author → .alt1 subfolder."""
-        _touch(tmp_path / "v.mp4")
-        _touch(tmp_path / "s1.funscript")
-        _touch(tmp_path / "s2.funscript")
-        _touch(tmp_path / "s3.funscript")
-
-        pair = _make_pair(str(tmp_path), "ThreeAuth", [
-            PairItem(url="http://x/v.mp4", filename="v.mp4", file_type=FileType.VIDEO),
-            PairItem(url="http://x/s1.funscript", filename="s1.funscript", file_type=FileType.FUNSCRIPT, author="A"),
-            PairItem(url="http://x/s2.funscript", filename="s2.funscript", file_type=FileType.FUNSCRIPT, author="B"),
-            PairItem(url="http://x/s3.funscript", filename="s3.funscript", file_type=FileType.FUNSCRIPT, author="C"),
-        ])
-
-        qm = QueueManager()
-        with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
-            mock_load.return_value.script_variant_mode = "subfolder"
-            qm._organize_output(pair)
-
-        # Primary (A) in root
-        assert (tmp_path / "ThreeAuth.funscript").exists()
-        # B → .alt
-        assert (tmp_path / "ThreeAuth.alt" / "ThreeAuth.alt.funscript").exists()
-        assert (tmp_path / "ThreeAuth.alt" / "ThreeAuth.alt.mp4").exists()
-        # C → .alt1
-        assert (tmp_path / "ThreeAuth.alt1" / "ThreeAuth.alt1.funscript").exists()
-        assert (tmp_path / "ThreeAuth.alt1" / "ThreeAuth.alt1.mp4").exists()
-
-        # .linkinfo has 2 entries
-        content = (tmp_path / ".linkinfo").read_text(encoding="utf-8")
-        assert content.count("[hardlink]") == 2
-
-    def test_multiaxis_with_alt(self, tmp_path):
-        """Axis suffixes in alt subfolders: .alt.pitch.funscript"""
+    def test_multiaxis_second_author_keeps_own_axes(self, tmp_path):
         _touch(tmp_path / "v.mp4")
         _touch(tmp_path / "a_main.funscript")
         _touch(tmp_path / "a_main.pitch.funscript")
@@ -478,22 +330,17 @@ class TestOrganizeOutputSubfolder:
             PairItem(url="http://x/b.funscript", filename="b_main.funscript", file_type=FileType.FUNSCRIPT, author="B"),
             PairItem(url="http://x/bp.funscript", filename="b_main.pitch.funscript", file_type=FileType.FUNSCRIPT, author="B"),
         ])
+        _organize(pair, "subfolder")
 
-        qm = QueueManager()
-        with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
-            mock_load.return_value.script_variant_mode = "subfolder"
-            qm._organize_output(pair)
-
-        # Primary (A) in root
         assert (tmp_path / "MultiAx.funscript").exists()
         assert (tmp_path / "MultiAx.pitch.funscript").exists()
-        # Alt (B) in .alt with axis suffix
-        alt_dir = tmp_path / "MultiAx.alt"
-        assert (alt_dir / "MultiAx.alt.funscript").exists()
-        assert (alt_dir / "MultiAx.alt.pitch.funscript").exists()
+        assert (tmp_path / "MultiAx (B).funscript").exists()
+        assert (tmp_path / "MultiAx (B).pitch.funscript").exists()
+        v = _variants(tmp_path)
+        assert v["B"]["files"] == {"L0": "MultiAx (B).funscript", "pitch": "MultiAx (B).pitch.funscript"}
+        assert v["B"]["author"] == "B" and v["Main"]["author"] == "A"
 
     def test_subfolder_mode_but_single_author_stays_flat(self, tmp_path):
-        """Even with subfolder mode, single author + no collision → no alt folders."""
         _touch(tmp_path / "v.mp4")
         _touch(tmp_path / "s.funscript")
 
@@ -501,15 +348,10 @@ class TestOrganizeOutputSubfolder:
             PairItem(url="http://x/v.mp4", filename="v.mp4", file_type=FileType.VIDEO),
             PairItem(url="http://x/s.funscript", filename="s.funscript", file_type=FileType.FUNSCRIPT, author="OnlyOne"),
         ])
-
-        qm = QueueManager()
-        with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
-            mock_load.return_value.script_variant_mode = "subfolder"
-            qm._organize_output(pair)
+        _organize(pair, "subfolder")
 
         assert (tmp_path / "Single.funscript").exists()
-        assert not (tmp_path / "Single.alt").exists()
-        assert not (tmp_path / ".linkinfo").exists()
+        assert list(_variants(tmp_path)) == ["Main"]
 
 
 class TestCleanTitle:
@@ -525,17 +367,17 @@ class TestCleanTitle:
 
 class TestExplicitGroups:
     """Pairs with explicit `item.group` and Pair.alt_group_config — the
-    layout produced by the new EroScripts picker UI."""
+    layout produced by the EroScripts picker UI."""
 
-    def test_alt_with_own_video_and_inherit_axes(self, tmp_path):
-        """Comment with its own video + Main multi-axis → Alt folder
-        gets the comment's video + the comment's main script + Main's
-        non-L0 axes hardlinked in."""
-        _touch(tmp_path / "main.mp4")
+    def test_alt_with_same_video_becomes_flat_variant(self, tmp_path):
+        """Comment posted the same video again + its own script → the
+        duplicate video is dropped, the script is a (Label) variant, Main's
+        other axes are NOT copied (FunLib inherits them at play time)."""
+        _touch(tmp_path / "main.mp4", size=300)
         _touch(tmp_path / "main.funscript")
         _touch(tmp_path / "main.surge.funscript")
         _touch(tmp_path / "main.pitch.funscript")
-        _touch(tmp_path / "alt.mp4")
+        _touch(tmp_path / "alt.mp4", size=300)
         _touch(tmp_path / "alt.funscript")
 
         pair = _make_pair(str(tmp_path), "Topic", [
@@ -546,240 +388,127 @@ class TestExplicitGroups:
             PairItem(url="http://x/a.mp4", filename="alt.mp4", file_type=FileType.VIDEO, group="Alt 1"),
             PairItem(url="http://x/a.funscript", filename="alt.funscript", file_type=FileType.FUNSCRIPT, group="Alt 1"),
         ])
-        pair.alt_group_config = {"Alt 1": {"inherit_multi_axis": True}}
+        pair.alt_group_config = {"Alt 1": {"inherit_multi_axis": True, "display_name": "Remake"}}
+        _organize(pair)
 
-        qm = QueueManager()
-        with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
-            mock_load.return_value.script_variant_mode = "flat"
-            qm._organize_output(pair)
-
-        # Main in root
         assert (tmp_path / "Topic.mp4").exists()
         assert (tmp_path / "Topic.funscript").exists()
         assert (tmp_path / "Topic.surge.funscript").exists()
-        assert (tmp_path / "Topic.pitch.funscript").exists()
+        assert (tmp_path / "Topic (Remake).funscript").exists()
+        assert not (tmp_path / "alt.mp4").exists()
+        assert not (tmp_path / "Topic (Remake).surge.funscript").exists()
+        assert not (tmp_path / "Topic.alt").exists()
+        assert not (tmp_path / ".linkinfo").exists()
+        v = _variants(tmp_path)
+        assert v["Main"]["primary"] is True
+        assert v["Remake"]["files"] == {"L0": "Topic (Remake).funscript"}
+        assert "inherit_axes" not in v["Remake"]
 
-        # Alt in .alt/, with its OWN video (moved, not hardlinked from Main)
-        alt_dir = tmp_path / "Topic.alt"
-        assert (alt_dir / "Topic.alt.mp4").exists()
-        # Alt's own video is NOT a hardlink to Main video (they had different content)
-        assert not os.path.samefile(str(tmp_path / "Topic.mp4"), str(alt_dir / "Topic.alt.mp4"))
-
-        # Alt's own main funscript
-        assert (alt_dir / "Topic.alt.funscript").exists()
-        # Inherited Main multi-axis (hardlinks)
-        assert (alt_dir / "Topic.alt.surge.funscript").exists()
-        assert (alt_dir / "Topic.alt.pitch.funscript").exists()
-        assert os.path.samefile(
-            str(tmp_path / "Topic.surge.funscript"),
-            str(alt_dir / "Topic.alt.surge.funscript"),
-        )
-
-        # .linkinfo records the inherited hardlinks
-        content = (tmp_path / ".linkinfo").read_text(encoding="utf-8")
-        assert content.count("[hardlink]") == 2
-        assert "Topic.alt.surge.funscript" in content
-        assert "Topic.alt.pitch.funscript" in content
-
-    def test_alt_inherit_disabled(self, tmp_path):
-        """`inherit_multi_axis=False` → Alt gets its own video + main
-        script, but Main's other axes do NOT propagate."""
+    def test_alt_inherit_disabled_is_recorded_in_sidecar(self, tmp_path):
         _touch(tmp_path / "main.mp4")
         _touch(tmp_path / "main.funscript")
         _touch(tmp_path / "main.surge.funscript")
-        _touch(tmp_path / "alt.mp4")
         _touch(tmp_path / "alt.funscript")
 
         pair = _make_pair(str(tmp_path), "Topic", [
             PairItem(url="http://x/m.mp4", filename="main.mp4", file_type=FileType.VIDEO, group="Main"),
             PairItem(url="http://x/m.funscript", filename="main.funscript", file_type=FileType.FUNSCRIPT, group="Main"),
             PairItem(url="http://x/s.funscript", filename="main.surge.funscript", file_type=FileType.FUNSCRIPT, group="Main"),
-            PairItem(url="http://x/a.mp4", filename="alt.mp4", file_type=FileType.VIDEO, group="Alt 1"),
             PairItem(url="http://x/a.funscript", filename="alt.funscript", file_type=FileType.FUNSCRIPT, group="Alt 1"),
         ])
         pair.alt_group_config = {"Alt 1": {"inherit_multi_axis": False}}
+        _organize(pair)
 
-        qm = QueueManager()
-        with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
-            mock_load.return_value.script_variant_mode = "flat"
-            qm._organize_output(pair)
+        assert (tmp_path / "Topic (Alt).funscript").exists()
+        assert _variants(tmp_path)["Alt"]["inherit_axes"] is False
 
-        alt_dir = tmp_path / "Topic.alt"
-        assert (alt_dir / "Topic.alt.mp4").exists()
-        assert (alt_dir / "Topic.alt.funscript").exists()
-        # No inheritance
-        assert not (alt_dir / "Topic.alt.surge.funscript").exists()
+    def test_alt_with_different_video_is_a_variant_with_own_video(self, tmp_path):
+        """A comment with its OWN (different) video stays one work: the video
+        becomes `<work> (<Label>).mp4` and the sidecar points the variant at
+        it, so FunLib swaps video + thumbnail when switching variants."""
+        root = tmp_path / "lib"
+        out = root / "Lingyu"
+        _touch(out / "op.mp4", size=100)
+        _touch(out / "op.funscript")
+        _touch(out / "op.surge.funscript")
+        _touch(out / "c1.mp4", size=150)
+        _touch(out / "c1.funscript")
+        _touch(out / "c1.pitch.funscript")
 
-    def test_two_alts_each_with_own_video(self, tmp_path):
-        """The EroScripts case: OP + 2 comments each with their own video.
-        Both alts inherit Main's non-L0 axes."""
-        _touch(tmp_path / "op.mp4")
-        _touch(tmp_path / "op.funscript")
-        _touch(tmp_path / "op.surge.funscript")
-        _touch(tmp_path / "op.pitch.funscript")
-        _touch(tmp_path / "c1.mp4")
-        _touch(tmp_path / "c1.funscript")
-        _touch(tmp_path / "c2.mp4")
-        _touch(tmp_path / "c2.funscript")
-
-        pair = _make_pair(str(tmp_path), "Lingyu", [
-            PairItem(url="http://x/op.mp4", filename="op.mp4", file_type=FileType.VIDEO, group="Main"),
-            PairItem(url="http://x/op.funscript", filename="op.funscript", file_type=FileType.FUNSCRIPT, group="Main"),
-            PairItem(url="http://x/s.funscript", filename="op.surge.funscript", file_type=FileType.FUNSCRIPT, group="Main"),
-            PairItem(url="http://x/p.funscript", filename="op.pitch.funscript", file_type=FileType.FUNSCRIPT, group="Main"),
-            PairItem(url="http://x/c1.mp4", filename="c1.mp4", file_type=FileType.VIDEO, group="Alt 1"),
-            PairItem(url="http://x/c1.funscript", filename="c1.funscript", file_type=FileType.FUNSCRIPT, group="Alt 1"),
-            PairItem(url="http://x/c2.mp4", filename="c2.mp4", file_type=FileType.VIDEO, group="Alt 2"),
-            PairItem(url="http://x/c2.funscript", filename="c2.funscript", file_type=FileType.FUNSCRIPT, group="Alt 2"),
-        ])
-        pair.alt_group_config = {
-            "Alt 1": {"inherit_multi_axis": True},
-            "Alt 2": {"inherit_multi_axis": True},
-        }
-
-        qm = QueueManager()
-        with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
-            mock_load.return_value.script_variant_mode = "flat"
-            qm._organize_output(pair)
-
-        # Main in root
-        assert (tmp_path / "Lingyu.mp4").exists()
-        assert (tmp_path / "Lingyu.funscript").exists()
-        assert (tmp_path / "Lingyu.surge.funscript").exists()
-        assert (tmp_path / "Lingyu.pitch.funscript").exists()
-
-        # Alt 1 → .alt/
-        alt1 = tmp_path / "Lingyu.alt"
-        assert (alt1 / "Lingyu.alt.mp4").exists()
-        assert (alt1 / "Lingyu.alt.funscript").exists()
-        assert (alt1 / "Lingyu.alt.surge.funscript").exists()
-        assert (alt1 / "Lingyu.alt.pitch.funscript").exists()
-
-        # Alt 2 → .alt1/
-        alt2 = tmp_path / "Lingyu.alt1"
-        assert (alt2 / "Lingyu.alt1.mp4").exists()
-        assert (alt2 / "Lingyu.alt1.funscript").exists()
-        assert (alt2 / "Lingyu.alt1.surge.funscript").exists()
-        assert (alt2 / "Lingyu.alt1.pitch.funscript").exists()
-
-        # Alt videos are NOT hardlinks to Main video
-        assert not os.path.samefile(
-            str(tmp_path / "Lingyu.mp4"), str(alt1 / "Lingyu.alt.mp4")
-        )
-        assert not os.path.samefile(
-            str(tmp_path / "Lingyu.mp4"), str(alt2 / "Lingyu.alt1.mp4")
-        )
-
-        # Inherited multi-axis funscripts ARE hardlinks back to Main
-        assert os.path.samefile(
-            str(tmp_path / "Lingyu.surge.funscript"),
-            str(alt1 / "Lingyu.alt.surge.funscript"),
-        )
-        assert os.path.samefile(
-            str(tmp_path / "Lingyu.surge.funscript"),
-            str(alt2 / "Lingyu.alt1.surge.funscript"),
-        )
-
-    def test_alt_display_name_drives_subfolder(self, tmp_path):
-        """Alt with `display_name` gets its own meaningful subfolder
-        name (e.g. `异域风情.alt/`) instead of the bland `Topic.alt/`."""
-        _touch(tmp_path / "op.mp4")
-        _touch(tmp_path / "op.funscript")
-        _touch(tmp_path / "op.surge.funscript")
-        _touch(tmp_path / "c1.mp4")
-        _touch(tmp_path / "c1.funscript")
-
-        pair = _make_pair(str(tmp_path), "Lingyu", [
+        pair = _make_pair(str(out), "Lingyu", [
             PairItem(url="http://x/op.mp4", filename="op.mp4", file_type=FileType.VIDEO, group="Main"),
             PairItem(url="http://x/op.funscript", filename="op.funscript", file_type=FileType.FUNSCRIPT, group="Main"),
             PairItem(url="http://x/s.funscript", filename="op.surge.funscript", file_type=FileType.FUNSCRIPT, group="Main"),
             PairItem(url="http://x/c1.mp4", filename="c1.mp4", file_type=FileType.VIDEO, group="Alt 1"),
             PairItem(url="http://x/c1.funscript", filename="c1.funscript", file_type=FileType.FUNSCRIPT, group="Alt 1"),
+            PairItem(url="http://x/c1p.funscript", filename="c1.pitch.funscript", file_type=FileType.FUNSCRIPT, group="Alt 1"),
         ])
-        pair.alt_group_config = {
-            "Alt 1": {"inherit_multi_axis": True, "display_name": "异域风情"},
-        }
+        pair.source_url = "https://discuss.eroscripts.com/t/lingyu/4321"
+        pair.alt_group_config = {"Alt 1": {"inherit_multi_axis": True, "display_name": "异域风情"}}
+        _organize(pair)
 
-        qm = QueueManager()
-        with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
-            mock_load.return_value.script_variant_mode = "flat"
-            qm._organize_output(pair)
+        assert (out / "Lingyu.mp4").exists() and (out / "Lingyu.funscript").exists()
+        assert (out / "Lingyu (异域风情).mp4").exists()
+        assert (out / "Lingyu (异域风情).funscript").exists()
+        assert (out / "Lingyu (异域风情).pitch.funscript").exists()
+        assert not (out / "Lingyu.alt").exists() and not (root / "Lingyu (异域风情)").exists()
+        v = _variants(out)
+        assert v["Main"]["video"] == "Lingyu.mp4"
+        assert v["异域风情"] == {"label": "异域风情", "video": "Lingyu (异域风情).mp4",
+                              "files": {"L0": "Lingyu (异域风情).funscript",
+                                        "pitch": "Lingyu (异域风情).pitch.funscript"}}
+        sc = _sidecar(out)
+        assert sc["source"] == {"site": "eroscripts", "url": pair.source_url, "topic_id": 4321}
 
-        # Subfolder uses the display name (no .altN numbering)
-        alt_dir = tmp_path / "异域风情.alt"
-        assert alt_dir.is_dir()
-        # And there's no fallback Lingyu.alt sitting around
-        assert not (tmp_path / "Lingyu.alt").exists()
+        # undo brings the original names back
+        QueueManager()._undo_organize(pair)
+        assert (out / "c1.mp4").exists() and (out / "c1.funscript").exists() and (out / "op.mp4").exists()
+        assert not (out / "funlib.json").exists()
 
-        # Files inside share the same stem
-        assert (alt_dir / "异域风情.alt.mp4").exists()
-        assert (alt_dir / "异域风情.alt.funscript").exists()
-        assert (alt_dir / "异域风情.alt.surge.funscript").exists()
-        # Inherited surge is a hardlink to Main
-        assert os.path.samefile(
-            str(tmp_path / "Lingyu.surge.funscript"),
-            str(alt_dir / "异域风情.alt.surge.funscript"),
-        )
-
-    def test_alt_empty_display_name_falls_back(self, tmp_path):
-        """`display_name` whitespace/empty → use Topic.altN fallback."""
+    def test_display_name_brackets_are_dropped_and_labels_unique(self, tmp_path):
         _touch(tmp_path / "op.mp4")
         _touch(tmp_path / "op.funscript")
-        _touch(tmp_path / "c1.mp4")
         _touch(tmp_path / "c1.funscript")
-
-        pair = _make_pair(str(tmp_path), "Topic", [
-            PairItem(url="http://x/op.mp4", filename="op.mp4", file_type=FileType.VIDEO, group="Main"),
-            PairItem(url="http://x/op.funscript", filename="op.funscript", file_type=FileType.FUNSCRIPT, group="Main"),
-            PairItem(url="http://x/c1.mp4", filename="c1.mp4", file_type=FileType.VIDEO, group="Alt 1"),
-            PairItem(url="http://x/c1.funscript", filename="c1.funscript", file_type=FileType.FUNSCRIPT, group="Alt 1"),
-        ])
-        pair.alt_group_config = {
-            "Alt 1": {"inherit_multi_axis": False, "display_name": "   "},
-        }
-
-        qm = QueueManager()
-        with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
-            mock_load.return_value.script_variant_mode = "flat"
-            qm._organize_output(pair)
-
-        assert (tmp_path / "Topic.alt" / "Topic.alt.mp4").exists()
-        assert (tmp_path / "Topic.alt" / "Topic.alt.funscript").exists()
-
-    def test_two_alts_same_display_name_disambiguate(self, tmp_path):
-        """Two Alts with the same display name → second gets `-2` suffix
-        before `.alt`, keeping erodeck pattern intact."""
-        _touch(tmp_path / "op.mp4")
-        _touch(tmp_path / "op.funscript")
-        _touch(tmp_path / "c1.mp4")
-        _touch(tmp_path / "c1.funscript")
-        _touch(tmp_path / "c2.mp4")
         _touch(tmp_path / "c2.funscript")
 
         pair = _make_pair(str(tmp_path), "Topic", [
             PairItem(url="http://x/op.mp4", filename="op.mp4", file_type=FileType.VIDEO, group="Main"),
             PairItem(url="http://x/op.funscript", filename="op.funscript", file_type=FileType.FUNSCRIPT, group="Main"),
-            PairItem(url="http://x/c1.mp4", filename="c1.mp4", file_type=FileType.VIDEO, group="Alt 1"),
             PairItem(url="http://x/c1.funscript", filename="c1.funscript", file_type=FileType.FUNSCRIPT, group="Alt 1"),
-            PairItem(url="http://x/c2.mp4", filename="c2.mp4", file_type=FileType.VIDEO, group="Alt 2"),
             PairItem(url="http://x/c2.funscript", filename="c2.funscript", file_type=FileType.FUNSCRIPT, group="Alt 2"),
         ])
         pair.alt_group_config = {
-            "Alt 1": {"inherit_multi_axis": False, "display_name": "remake"},
-            "Alt 2": {"inherit_multi_axis": False, "display_name": "remake"},
+            "Alt 1": {"inherit_multi_axis": False, "display_name": "(Soft) [v2]"},
+            "Alt 2": {"inherit_multi_axis": False, "display_name": "Soft v2"},
         }
+        _organize(pair)
 
-        qm = QueueManager()
-        with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
-            mock_load.return_value.script_variant_mode = "flat"
-            qm._organize_output(pair)
+        assert (tmp_path / "Topic (Soft v2).funscript").exists()
+        assert (tmp_path / "Topic (Soft v2 2).funscript").exists()
+        assert set(_variants(tmp_path)) == {"Main", "Soft v2", "Soft v2 2"}
 
-        assert (tmp_path / "remake.alt" / "remake.alt.mp4").exists()
-        assert (tmp_path / "remake-2.alt" / "remake-2.alt.mp4").exists()
+    def test_label_taken_on_disk_is_numbered(self, tmp_path):
+        """A "(Soft)" from an earlier download is already in the folder."""
+        _touch(tmp_path / "Topic (Soft).funscript")
+        _touch(tmp_path / "op.mp4")
+        _touch(tmp_path / "op.funscript")
+        _touch(tmp_path / "c1.funscript")
 
-    def test_alt_without_video_still_gets_main_video(self, tmp_path):
-        """Legacy case: comment scripter posted a script but no video.
-        The Alt folder hardlinks the Main video (same as before)."""
+        pair = _make_pair(str(tmp_path), "Topic", [
+            PairItem(url="http://x/op.mp4", filename="op.mp4", file_type=FileType.VIDEO, group="Main"),
+            PairItem(url="http://x/op.funscript", filename="op.funscript", file_type=FileType.FUNSCRIPT, group="Main"),
+            PairItem(url="http://x/c1.funscript", filename="c1.funscript", file_type=FileType.FUNSCRIPT, group="Alt 1"),
+        ])
+        pair.alt_group_config = {"Alt 1": {"display_name": "Soft"}}
+        _organize(pair)
+
+        assert (tmp_path / "Topic (Soft).funscript").exists()
+        assert (tmp_path / "Topic (Soft 2).funscript").exists()
+        v = _variants(tmp_path)
+        assert v["Soft"]["files"] == {"L0": "Topic (Soft).funscript"}
+        assert v["Soft 2"]["files"] == {"L0": "Topic (Soft 2).funscript"}
+
+    def test_undo_restores_flat_variants(self, tmp_path):
         _touch(tmp_path / "main.mp4")
         _touch(tmp_path / "main.funscript")
         _touch(tmp_path / "alt.funscript")
@@ -790,16 +519,57 @@ class TestExplicitGroups:
             PairItem(url="http://x/a.funscript", filename="alt.funscript", file_type=FileType.FUNSCRIPT, group="Alt 1"),
         ])
         pair.alt_group_config = {"Alt 1": {"inherit_multi_axis": True}}
+        _organize(pair)
+        assert (tmp_path / "Topic (Alt).funscript").exists()
+        assert (tmp_path / "funlib.json").exists()
 
-        qm = QueueManager()
-        with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
-            mock_load.return_value.script_variant_mode = "flat"
-            qm._organize_output(pair)
+        QueueManager()._undo_organize(pair)
+        assert sorted(f.name for f in tmp_path.iterdir()) == ["alt.funscript", "main.funscript", "main.mp4"]
+        assert pair.organized is False
 
-        alt_dir = tmp_path / "Topic.alt"
-        assert (alt_dir / "Topic.alt.mp4").exists()
-        # Hardlinked from Main video (same content, just an alternate script)
-        assert os.path.samefile(
-            str(tmp_path / "Topic.mp4"), str(alt_dir / "Topic.alt.mp4")
-        )
-        assert (alt_dir / "Topic.alt.funscript").exists()
+
+class TestSidecar:
+    def test_sidecar_fields_from_pair(self, tmp_path):
+        _touch(tmp_path / "v.mp4")
+        _touch(tmp_path / "s.funscript")
+        _touch(tmp_path / "s.roll.funscript")
+        pair = _make_pair(str(tmp_path), "(Casey Sample) Demo Load", [
+            PairItem(url="http://x/v.mp4", filename="v.mp4", file_type=FileType.VIDEO),
+            PairItem(url="http://x/s.funscript", filename="s.funscript", file_type=FileType.FUNSCRIPT),
+            PairItem(url="http://x/r.funscript", filename="s.roll.funscript", file_type=FileType.FUNSCRIPT),
+        ])
+        pair.source_url = "https://discuss.eroscripts.com/t/demo-load/12345"
+        _organize(pair)
+
+        sc = _sidecar(tmp_path)
+        assert sc["version"] == 2
+        assert sc["title"] == "(Casey Sample) Demo Load"
+        assert sc["author"] == "Casey Sample"
+        assert sc["source"] == {"site": "eroscripts", "url": pair.source_url, "topic_id": 12345}
+        assert sc["pair_id"] == pair.id
+        assert sc["downloaded_at"].endswith("Z")
+        assert sc["variants"] == [{"label": "Main", "primary": True, "video": "(Casey Sample) Demo Load.mp4",
+                                   "files": {"L0": "(Casey Sample) Demo Load.funscript",
+                                             "roll": "(Casey Sample) Demo Load.roll.funscript"}}]
+
+    def test_reorganize_keeps_existing_sidecar_values(self, tmp_path):
+        """Forum fields filled earlier (tags, posted_at, a forum author) are
+        not clobbered by a later organize; variants are refreshed."""
+        _touch(tmp_path / "v.mp4")
+        _touch(tmp_path / "s.funscript")
+        (tmp_path / "funlib.json").write_text(json.dumps({
+            "version": 1, "title": "Old", "author": "opname", "author_url": "https://x/u/opname",
+            "tags": ["hmv"], "posted_at": "2026-01-01T00:00:00Z", "downloaded_at": "2026-01-02T00:00:00Z",
+            "pair_id": "oldpair", "variants": [{"label": "Main", "primary": True, "files": {"L0": "x"}}],
+        }), encoding="utf-8")
+        pair = _make_pair(str(tmp_path), "(Someone) Work", [
+            PairItem(url="http://x/v.mp4", filename="v.mp4", file_type=FileType.VIDEO),
+            PairItem(url="http://x/s.funscript", filename="s.funscript", file_type=FileType.FUNSCRIPT),
+        ])
+        _organize(pair)
+
+        sc = _sidecar(tmp_path)
+        assert sc["title"] == "Old" and sc["author"] == "opname"
+        assert sc["tags"] == ["hmv"] and sc["posted_at"] == "2026-01-01T00:00:00Z"
+        assert sc["downloaded_at"] == "2026-01-02T00:00:00Z" and sc["pair_id"] == "oldpair"
+        assert sc["variants"][0]["files"] == {"L0": "(Someone) Work.funscript"}

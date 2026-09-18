@@ -506,6 +506,7 @@ check("external script row shows its host", extRow.includes('<span class="funpai
   check("completed by title match is outlined", b({ state: "completed", by_title: true }, false), "by-title:✓ 已下載(依標題)");
   check("queued/downloading is active", b({ state: "queued" }, false), "active:⏳ 佇列中");
   check("failed is red", b({ state: "failed" }, true), "failed:✗ 下載失敗");
+  check("in FunLib's recycle bin", b({ state: "deleted", names: ["Work"] }, false), "deleted:🗑 已刪除");
   check("opened but never sent", b({ state: "", visited_at: "2026-09-17T04:00:00" }, false), "visited:👁 已開啟");
   check("only the forum's read mark", b({ state: "" }, true), "visited:👁 看過");
   check("nothing known → no badge", b({ state: "" }, false), null);

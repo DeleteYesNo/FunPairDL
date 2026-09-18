@@ -4,11 +4,12 @@ from pydantic import BaseModel
 
 
 class PairGroupSpec(BaseModel):
-    """One group within a pair: Main (root) or Alt N (.alt[N-1]/ subfolder).
+    """One group within a pair: Main or Alt N (a "(Label)" script variant
+    next to Main in the flat library layout).
 
     The same logical Pair gets sent as a list of groups so the backend
     knows which items belong together at organize time. Each Alt group
-    can optionally inherit Main's multi-axis funscripts as hardlinks.
+    can opt out of inheriting Main's other axes at play time.
     """
     name: str                                       # "Main" or "Alt 1", "Alt 2", ...
     video_urls: list[str] = []
@@ -24,9 +25,9 @@ class PairGroupSpec(BaseModel):
     # instead of waiting for a download slot to resolve.
     sizes: dict[str, int] | None = None
     inherit_multi_axis: bool = True                 # ignored for Main
-    # Folder/file stem to use inside the Alt's subfolder. The backend
-    # appends ".alt" + collision suffix. Empty → fall back to "<topic>.altN".
-    # Ignored for Main (root files always use the topic name).
+    # Variant label: files become "<work> (<label>)[.axis].funscript"
+    # (brackets/path characters dropped, numbered when taken). Empty → the
+    # group's scripter, else "Alt". Ignored for Main.
     display_name: str = ""
     # {file url: group label} — how the user arranged a bundle's files in the
     # panel. The backend splits the bundle by these labels instead of by name.

@@ -1846,17 +1846,17 @@ function _escAttr(s) {
 }
 
 /**
- * Front-end preview of the on-disk subfolder for a given Alt — kept in
- * sync with the backend rule (display_name + ".alt", or topic + slot
- * suffix when blank). Used purely for showing the user what the folder
- * will end up being called.
+ * Front-end preview of the on-disk file name for a given Alt — kept in
+ * sync with the backend rule (flat layout: `<work> (<Label>).funscript`,
+ * Label = the group's name, else its scripter, else "Alt"; brackets and
+ * path characters are dropped). Purely for showing the user the name.
  */
 function _altFolderPreview(parsed, slotIdx, groupName) {
-  if (groupName === "Main") return "(根目錄)";
-  const name = (parsed.groupState.altNames[groupName] || "").trim();
+  if (groupName === "Main") return "(主版本)";
+  const raw = (parsed.groupState.altNames[groupName] || "");
+  const name = raw.replace(/[()\[\]{}（）【】<>:"/\\|?*]/g, " ").replace(/\s+/g, " ").trim();
   const base = (parsed.title || "Untitled").trim();
-  if (name) return `${name}.alt/`;
-  return slotIdx === 1 ? `${base}.alt/` : `${base}.alt${slotIdx - 1}/`;
+  return `${base} (${name || "Alt"}).funscript`;
 }
 
 function _buildGroupsRootHTML(parsed) {
@@ -4647,6 +4647,10 @@ function _topicBadge(st, rowVisited) {
   }
   if (state === "failed") {
     return { text: "✗ 下載失敗", cls: "failed", title: (st.names || []).join("\n") };
+  }
+  if (state === "deleted") {
+    // In FunLib's recycle bin (_trash/): re-sending downloads it again.
+    return { text: "🗑 已刪除", cls: "deleted", title: (st.names || []).join("\n") || "已從 FunLib 刪除" };
   }
   if (st && st.visited_at) {
     return { text: "👁 已開啟", cls: "visited", title: `開啟於 ${st.visited_at}` };

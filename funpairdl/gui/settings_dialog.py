@@ -65,7 +65,7 @@ class SettingsDialog(QDialog):
         self.reconcile_check.setChecked(self.settings.reconcile_on_redownload)
         self.reconcile_check.setToolTip(
             "When re-downloading a work already in the library, merge new axes "
-            "into its folder and route changed scripts to an .alt variant "
+            "into its folder and route changed scripts to a (Label) variant "
             "instead of creating a duplicate folder."
         )
         form.addRow("Reconcile on re-download:", self.reconcile_check)

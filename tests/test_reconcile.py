@@ -1,6 +1,8 @@
 """Tests for QueueManager._reconcile_with_library — merging a re-downloaded
-work into its existing library folder (new axes in, changed scripts -> .alt,
-identical dropped) and never touching a different work that shares a name."""
+work into its existing library folder (new axes in, changed scripts ->
+flat "(Label)" variants, identical dropped) and never touching a different work that shares a name."""
+import json
+
 import funpairdl.persistence.settings as settings_mod
 from funpairdl.core.pair import FileType, Pair, PairItem
 from funpairdl.core.queue_manager import QueueManager
@@ -46,7 +48,7 @@ def test_new_axis_merges_into_existing_folder(tmp_path, monkeypatch):
     assert qm._reconcile_with_library(pair) is True
     assert (work / "Work.roll.funscript").read_text() == "ROLL"      # new axis added
     assert (work / "Work.funscript").read_text() == "MAIN"           # untouched
-    assert not (work / "Work.alt").exists()                          # nothing became a variant
+    assert not (work / "Work (Alt).funscript").exists()              # nothing became a variant
     assert not temp.exists()                                         # temp folder cleaned up
 
 
@@ -58,9 +60,12 @@ def test_changed_script_becomes_alt_variant(tmp_path, monkeypatch):
 
     assert qm._reconcile_with_library(pair) is True
     assert (work / "Work.funscript").read_text() == "OLD"            # original kept
-    alt = work / "Work.alt"
-    assert (alt / "Work.alt.funscript").read_text() == "NEW"         # changed -> variant
-    assert (alt / "Work.alt.mp4").exists()                           # video brought in
+    assert (work / "Work (Alt).funscript").read_text() == "NEW"      # changed -> flat variant
+    assert not (work / "Work.alt").exists()                          # no subfolder, no hardlink
+    sc = json.loads((work / "funlib.json").read_text(encoding="utf-8"))
+    labels = {v["label"]: v for v in sc["variants"]}
+    assert labels["Main"]["primary"] is True and labels["Main"]["files"]["L0"] == "Work.funscript"
+    assert labels["Alt"]["files"]["L0"] == "Work (Alt).funscript"
 
 
 def test_identical_redownload_is_noop(tmp_path, monkeypatch):
@@ -72,9 +77,8 @@ def test_identical_redownload_is_noop(tmp_path, monkeypatch):
                                   {"Work.funscript": "A", "Work.pitch.funscript": "P"})
 
     assert qm._reconcile_with_library(pair) is True
-    assert not (work / "Work.alt").exists()
     assert sorted(f.name for f in work.iterdir()) == [
-        "Work.funscript", "Work.mp4", "Work.pitch.funscript"]
+        "Work.funscript", "Work.mp4", "Work.pitch.funscript", "funlib.json"]
     assert not temp.exists()
 
 
@@ -86,7 +90,7 @@ def test_different_media_not_absorbed(tmp_path, monkeypatch):
     pair, temp = _redownload_pair(tmp_path, "Work", b"VIDEO-B", {"Work.funscript": "B"})
 
     assert qm._reconcile_with_library(pair) is False
-    assert not (work / "Work.alt").exists()
+    assert not (work / "Work (Alt).funscript").exists()
     assert temp.exists()                                             # left for normal organize
 
 
@@ -108,7 +112,7 @@ def test_extra_library_path_is_scanned(tmp_path, monkeypatch):
 def test_realistic_bracketed_name_multiaxis(tmp_path, monkeypatch):
     # Real-world shapes: bracketed/punctuated name + multi-axis suffixes.
     # Same post re-downloaded (same name): a new axis merges, a changed axis
-    # becomes an .alt variant, identical axes are dropped.
+    # becomes a flat variant, identical axes are dropped.
     _stub_settings(monkeypatch, reconcile_on_redownload=True)
     qm = QueueManager(download_dir=tmp_path)
     base = "(ZZ-TEST-0001)(Casey Sample) Demo Load"
@@ -125,7 +129,7 @@ def test_realistic_bracketed_name_multiaxis(tmp_path, monkeypatch):
     items = [PairItem(url="u/v", filename=f"{base}.mp4", file_type=FileType.VIDEO)]
     redl = {
         f"{base}.funscript": "L0",            # identical -> drop
-        f"{base}.pitch.funscript": "PITCH-2",  # changed -> .alt
+        f"{base}.pitch.funscript": "PITCH-2",  # changed -> (Alt) variant
         f"{base}.twist.funscript": "TWIST",    # new axis -> merge into folder
     }
     for fn, content in redl.items():
@@ -137,9 +141,8 @@ def test_realistic_bracketed_name_multiaxis(tmp_path, monkeypatch):
     assert qm._reconcile_with_library(pair) is True
     assert (work / f"{base}.twist.funscript").read_text() == "TWIST"   # new axis merged
     assert (work / f"{base}.pitch.funscript").read_text() == "PITCH"   # original kept
-    alt = work / f"{base}.alt"
-    assert (alt / f"{base}.alt.pitch.funscript").read_text() == "PITCH-2"  # changed -> variant
-    assert (alt / f"{base}.alt.mp4").exists()
+    assert (work / f"{base} (Alt).pitch.funscript").read_text() == "PITCH-2"  # changed -> variant
+    assert not (work / f"{base}.alt").exists()
 
 
 def test_script_only_into_existing_folder(tmp_path, monkeypatch):
@@ -169,7 +172,7 @@ def test_script_only_into_existing_folder(tmp_path, monkeypatch):
     pair.output_dir = str(work)
 
     assert qm._reconcile_with_library(pair) is True
-    names = sorted(f.name for f in work.iterdir() if f.is_file())
+    names = sorted(f.name for f in work.iterdir() if f.is_file() and f.name != "funlib.json")
     assert names == [
         f"{base}.funscript", f"{base}.mp4",
         f"{base}.roll.funscript", f"{base}.twist.funscript",
@@ -198,7 +201,7 @@ def test_cjk_name_matches_separate_folder(tmp_path, monkeypatch):
 def test_video_download_never_merges_into_a_videoless_folder(tmp_path, monkeypatch):
     """With no video on the library side there is nothing to prove it is the
     same work — merging on the name alone once moved a sibling work's only
-    script into a stranger's .alt folder."""
+    script into a stranger's folder as a variant."""
     _stub_settings(monkeypatch, reconcile_on_redownload=True)
     qm = QueueManager(download_dir=tmp_path)
     lib = tmp_path / "Work"
@@ -208,7 +211,7 @@ def test_video_download_never_merges_into_a_videoless_folder(tmp_path, monkeypat
 
     assert qm._reconcile_with_library(pair) is False
     assert (lib / "Work.funscript").read_text() == "OTHER"
-    assert not (lib / "Work.alt").exists()
+    assert not (lib / "Work" / "Work (Alt).funscript").exists()
     assert (temp / "Work.funscript").read_text() == "MINE"
 
 
@@ -263,7 +266,7 @@ def test_title_with_qualifier_tags_finds_existing_folder(tmp_path, monkeypatch):
 
     assert qm._reconcile_with_library(pair) is True
     assert (work / "Alpha Beta.funscript").read_text() == "OLD"
-    assert (work / "Alpha Beta.alt" / "Alpha Beta.alt.funscript").read_text() == "NEW"
+    assert (work / "Alpha Beta (Alt).funscript").read_text() == "NEW"
     assert not temp.exists()
 
 

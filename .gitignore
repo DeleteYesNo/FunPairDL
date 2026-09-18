@@ -41,6 +41,10 @@ Desktop.ini
 # ── Claude Code local settings (keep machine-specific perms private) ──
 .claude/settings.local.json
 
+# Library migration / sidecar backfill reports and search misses (work names)
+_migrate_alt_*.md
+_backfill_*
+
 # Topic index (personal browsing/download history) and the de-dup hash cache
 topic_index.json
 topic_index.json.tmp-*
