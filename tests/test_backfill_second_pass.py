@@ -117,3 +117,13 @@ def test_core_title_and_fuzzy_overlap():
     assert bf.fuzzy_overlap("HMV", "Bekscript 1000 post special HMV") == 0.0     # one word proves nothing
     assert bf.fuzzy_overlap("New Jersey BlobCG HMV (A Loop) Simple", "New Jersey - BlobCG HMV (Suggested)") == 1.0
     assert bf.core_title("Hololive - Tokoyami Towa HJ") == ("Hololive - Tokoyami Towa HJ", "Tokoyami Towa HJ")
+
+
+def test_name_tags():
+    assert bf.name_tags("bready-nikke-godness-of-victory-uncensored_1080p") == ["source-rule34video"]
+    assert bf.name_tags("2b-loop2_1080p60FPS") == ["source-rule34video"]
+    assert bf.name_tags("TSMCB VAM HMV 4k") == ["hmv", "3d"]
+    assert bf.name_tags("PixelFH-FH-Endurance-Round-2") == ["fap-hero"]
+    assert bf.name_tags("NoodleDude - Ultimate TikTok PMV") == ["pmv"]
+    assert bf.name_tags("(Author) Some Title") == []
+    assert bf.name_tags("Shmv thing") == []          # not a whole word

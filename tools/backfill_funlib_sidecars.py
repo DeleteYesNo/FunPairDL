@@ -312,12 +312,42 @@ def source_tags(pair: dict | None) -> set[str]:
     return out
 
 
+_RULE34_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*_(?:\d{3,4}p(?:\d{2,3}fps)?)$", re.IGNORECASE)
+_NAME_TYPE_RULES = [
+    (re.compile(r"(?<![a-z])hmv(?![a-z])", re.I), "hmv"),
+    (re.compile(r"(?<![a-z])pmv(?![a-z])", re.I), "pmv"),
+    (re.compile(r"(?<![a-z])(?:fap ?hero|fh)(?![a-z])", re.I), "fap-hero"),
+    (re.compile(r"(?<![a-z])cock ?hero(?![a-z])", re.I), "cock-hero"),
+    (re.compile(r"(?<![a-z])joi(?![a-z])", re.I), "joi"),
+    (re.compile(r"(?<![a-z])mmd(?![a-z])", re.I), "mmd"),
+    (re.compile(r"(?<![a-z])vam(?![a-z])", re.I), "3d"),
+    (re.compile(r"(?<![a-z])(?:vr|180|sbs)(?![a-z0-9])", re.I), "vr"),
+]
+
+
+def name_tags(name: str) -> list[str]:
+    """Tags a work's name states outright: a rule34video download name
+    (``<slug>_1080p``) and type words (HMV, PMV, FH, JOI, MMD, VAM, VR)."""
+    out: list[str] = []
+    if _RULE34_NAME_RE.match(name.strip()):
+        out.append("source-rule34video")
+    for rx, tag in _NAME_TYPE_RULES:
+        if rx.search(name) and tag not in out:
+            out.append(tag)
+    return out
+
+
 def local_tags(work: Path, sidecar: dict, pair: dict | None, parent_name: str) -> list[str]:
-    """Tags to add (absent ones only): source site, pack, length bucket."""
+    """Tags to add (absent ones only): source site, pack, length bucket,
+    and what the name itself states."""
     have = {str(t).lower() for t in (sidecar.get("tags") or [])}
     add: list[str] = []
+    named = name_tags(sidecar.get("title") or work.name) or name_tags(work.name)
     if not any(t.startswith("source-") for t in have):
         add.extend(sorted(source_tags(pair)))
+        if not add and "source-rule34video" in named:
+            add.append("source-rule34video")
+    add.extend(t for t in named if t != "source-rule34video" and t not in have and t not in add)
     if parent_name and not any(t.startswith("pack-") for t in have):
         pt = pack_tag(parent_name)
         if pt:

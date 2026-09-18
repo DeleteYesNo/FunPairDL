@@ -59,6 +59,18 @@ def funscript_info(data: bytes) -> dict[str, Any]:
                 continue
             if at > last_ms:
                 last_ms = at
+    # Multi-axis "combined" files keep their actions under axes[].actions
+    # (the top-level actions list is empty); the span is the latest of all.
+    for ax in doc.get("axes") or []:
+        if not isinstance(ax, dict):
+            continue
+        for a in ax.get("actions") or []:
+            try:
+                at = int(a.get("at", 0))
+            except Exception:
+                continue
+            if at > last_ms:
+                last_ms = at
     if last_ms > 0:
         out["duration"] = last_ms / 1000.0
     meta = doc.get("metadata")
