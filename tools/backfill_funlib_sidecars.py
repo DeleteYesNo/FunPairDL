@@ -324,16 +324,24 @@ def local_tags(work: Path, sidecar: dict, pair: dict | None, parent_name: str) -
             add.append(pt)
     if not any(t.startswith("len-") for t in have):
         from funpairdl.utils.media_duration import funscript_info
-        main = next((v for v in sidecar.get("variants") or [] if v.get("primary")), None)
-        l0 = (main or {}).get("files", {}).get("L0") if main else None
-        if l0:
+        # Main's L0, else any of Main's axes, else any variant's script
+        variants = sidecar.get("variants") or []
+        ordered = sorted(variants, key=lambda v: 0 if v.get("primary") else 1)
+        candidates: list[str] = []
+        for v in ordered:
+            files = v.get("files") or {}
+            if files.get("L0"):
+                candidates.append(files["L0"])
+            candidates.extend(f for k, f in files.items() if k != "L0")
+        for rel in candidates:
             try:
-                info = funscript_info((work / l0).read_bytes())
-                lt = len_tag(info.get("duration"))
-                if lt:
-                    add.append(lt)
+                info = funscript_info((work / rel).read_bytes())
             except OSError:
-                pass
+                continue
+            lt = len_tag(info.get("duration"))
+            if lt:
+                add.append(lt)
+                break
     return [t for t in add if t.lower() not in have]
 
 
@@ -802,6 +810,9 @@ def main() -> None:
         for work in lib.iter_work_dirs(root):
             if args.only and args.only.lower() not in work.name.lower():
                 continue
+            if not lib.has_media(work):
+                counts["not_a_work"] = counts.get("not_a_work", 0) + 1
+                continue          # a pack of sub-folders or stray files: no sidecar
             counts["works"] += 1
             data = offline_sidecar(work, by_folder, by_title, topic_by_pair, log_topics,
                                    split_parents, sent_from)
