@@ -30,11 +30,14 @@ Second pass for the leftovers (run after the first):
     the prefix-stripped titles match AND the author is confirmed (the hit's
     title names the author, or the topic's OP is the author). Every
     acceptance is listed in the report as LOOSE for review.
-  * ``--search-bundles``: works split out of a file-host bundle (a MEGA
-    folder, a pixeldrain list or filesystem share) are found through the
-    bundle id, which is unique: one forum search per bundle, every work
-    from that bundle gets the topic. Ambiguous hits (several topics) are
-    reported and skipped.
+  * ``--search-fuzzy BUNDLE:OWNER``: works that came out of a scripter's
+    own file-host share (e.g. a pixeldrain filesystem id) are named after
+    the share's files, not the forum titles. They are searched with the
+    author prefix and the core title (a leading "Franchise - " segment
+    dropped), and a hit is accepted only when the topic's OP is OWNER and
+    the core words overlap. Listed as FUZZY in the report for review.
+    (Searching the forum for the bundle id itself finds nothing: the
+    forum's search does not index URLs.)
   * ``--local-tags``: tags derived offline, added only when absent —
     ``source-<site>`` (e621, iwara, …), ``pack-<bundle>`` for split
     children, ``len-…`` buckets (forum names) from the L0 script's length.
@@ -527,16 +530,17 @@ async def forum_phase(works: list[tuple[Path, dict]], args, report: list[str]) -
                 pass
         done = 0
         topic_cache: dict[int, dict] = {}      # many works share one bundle topic
-        if args.search_bundles:
-            bundle_topics = await bundle_phase(fetcher, works, args, report, counts)
-        else:
-            bundle_topics = {}
-        for i, (work, sc) in enumerate(works):
+        fuzzy_owner = {}
+        for spec_ in args.search_fuzzy or []:
+            key, _, owner = spec_.partition(":")
+            if key and owner:
+                fuzzy_owner[key] = owner.lower()
+        by_folder = by_title = None
+        if fuzzy_owner:
+            by_folder, by_title = index_pairs(load_pairs())
+        for work, sc in works:
             if args.limit and done >= args.limit:
                 break
-            if str(work) in bundle_topics:
-                sc = lib.read_sidecar(work) or sc
-                works[i] = (work, sc)
             src = sc.get("source") or {}
             tid = src.get("topic_id") if src.get("site") == "eroscripts" else None
             forum_tags = [t for t in (sc.get("tags") or []) if not str(t).startswith(("len-", "source-", "pack-"))]
@@ -544,10 +548,28 @@ async def forum_phase(works: list[tuple[Path, dict]], args, report: list[str]) -
             if tid and not needs:
                 continue
             loose_author = ""
+            fuzzy = None
             if not tid:
                 title = sc.get("title") or work.name
                 is_miss = str(work) in misses
-                if args.search_loose and is_miss:
+                if fuzzy_owner:
+                    keys = bundle_keys(find_pair(work, by_folder, by_title)) & set(fuzzy_owner)
+                    if keys:
+                        fuzzy = fuzzy_owner[next(iter(keys))]
+                if fuzzy:
+                    done += 1
+                    counts["searched"] += 1
+                    got = await fuzzy_search(fetcher, work, title, fuzzy, args, report, counts)
+                    if got is None:
+                        misses[str(work)] = title
+                        continue
+                    tid = got
+                    if args.apply:
+                        lib.update_sidecar(work, {"source": {"site": "eroscripts", "topic_id": tid,
+                                                             "url": f"{FORUM}/t/{tid}"}})
+                    sc = lib.read_sidecar(work) or sc
+                    misses.pop(str(work), None)
+                elif args.search_loose and is_miss:
                     # second pass: prefix-stripped title, author must be confirmed
                     loose_author = lib.author_from_name(title) or lib.author_from_name(work.name)
                     key = loose_key(title)
@@ -564,6 +586,7 @@ async def forum_phase(works: list[tuple[Path, dict]], args, report: list[str]) -
                     q = title
                 else:
                     continue
+            if not tid:
                 done += 1
                 counts["searched"] += 1
                 from urllib.parse import quote
@@ -641,53 +664,74 @@ async def forum_phase(works: list[tuple[Path, dict]], args, report: list[str]) -
     return counts
 
 
-async def bundle_phase(fetcher, works, args, report, counts) -> dict[str, int]:
-    """One forum search per bundle id; returns {work path: topic id} for the
-    works whose topic it set. Writes source into their sidecars."""
+def core_title(name: str) -> tuple[str, str]:
+    """(core, core without a leading "Franchise - " segment) of a work name:
+    author prefix and trailing qualifier tags removed."""
+    core = strip_author_prefix(name)
+    while True:
+        t = QueueManager._QUALIFIER_RE.sub("", core)
+        if t == core:
+            break
+        core = t
+    core = core.strip(" -–—")
+    parts = [x.strip() for x in re.split(r"\s+[-–—]\s+", core) if x.strip()]
+    short = " ".join(parts[1:]) if len(parts) >= 2 else core
+    return core, short
+
+
+FUZZY_MIN_TOKENS = 2
+FUZZY_MIN_SCORE = 0.75
+
+
+def fuzzy_overlap(a: str, b: str) -> float:
+    """Share of ``a``'s words found in ``b``; 0 when ``a`` has too few words
+    to mean anything (a lone "HMV" matched everything)."""
+    ta, tb = _tokens(a), _tokens(b)
+    if len(ta) < FUZZY_MIN_TOKENS or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta)
+
+
+async def fuzzy_search(fetcher, work: Path, title: str, owner: str, args, report, counts) -> int | None:
+    """Topic id for a work named after a share's file: the title's core
+    words must overlap a hit whose OP is ``owner``."""
     from urllib.parse import quote
-    pairs = load_pairs()
-    by_folder, by_title = index_pairs(pairs)
-    by_key: dict[str, list[Path]] = {}
-    for work, sc in works:
-        if (sc.get("source") or {}).get("topic_id") or not sc.get("pair_id"):
-            continue
-        for k in bundle_keys(find_pair(work, by_folder, by_title)):
-            by_key.setdefault(k, []).append(work)
-    report.append(f"- bundles to look up: {len(by_key)} (covering {sum(len(v) for v in by_key.values())} work(s))")
-    out: dict[str, int] = {}
-    for key, folders in sorted(by_key.items(), key=lambda kv: -len(kv[1])):
-        res = await _guarded(fetcher, f"{FORUM}/search.json?q={quote(key)}", args)
-        counts["bundle_searched"] = counts.get("bundle_searched", 0) + 1
+    author = lib.author_from_name(title) or lib.author_from_name(work.name)
+    core, short = core_title(title)
+    if len(_tokens(short)) < FUZZY_MIN_TOKENS:
+        short = core                      # "Franchise - HMV": keep the franchise words
+    queries = []
+    if author:
+        queries.append(f"{author} {short}")
+    queries.append(short)
+    if core != short:
+        queries.append(core)
+    best = None
+    for q in queries[:2]:
+        res = await _guarded(fetcher, f"{FORUM}/search.json?q={quote(q)}", args)
         if res is None:
             counts["errors"] += 1
-            continue
-        topics = [t for t in (res.get("topics") or []) if isinstance(t, dict) and t.get("id")]
-        # a topic whose matching post is the OP is the bundle's own thread
-        op_topics = {pp.get("topic_id") for pp in (res.get("posts") or [])
-                     if isinstance(pp, dict) and pp.get("post_number") == 1}
-        cands = [t for t in topics if t["id"] in op_topics] or topics
-        if not cands:
-            counts["bundle_missed"] = counts.get("bundle_missed", 0) + 1
-            report.append(f"- BUNDLE-MISS `{key}` ({len(folders)} work(s))")
-            continue
-        if len(cands) > 1:
-            counts["bundle_ambiguous"] = counts.get("bundle_ambiguous", 0) + 1
-            report.append(f"- BUNDLE-AMBIGUOUS `{key}` ({len(folders)} work(s)): " +
-                          "; ".join(f"{t['id']} \"{t.get('title')}\"" for t in cands[:4]))
-            continue
-        hit = cands[0]
-        tid = int(hit["id"])
-        src = {"site": "eroscripts", "topic_id": tid,
-               "url": f"{FORUM}/t/{hit.get('slug') or 'topic'}/{tid}"}
-        counts["bundle_found"] = counts.get("bundle_found", 0) + 1
-        report.append(f"- BUNDLE `{key}` → topic {tid} \"{hit.get('title')}\" ({len(folders)} work(s))")
-        for w in folders:
-            if str(w) in out:
+            return None
+        ops = {pp.get("topic_id"): str(pp.get("username") or "").lower()
+               for pp in res.get("posts") or [] if isinstance(pp, dict) and pp.get("post_number") == 1}
+        for t in res.get("topics") or []:
+            if not isinstance(t, dict) or ops.get(t.get("id")) != owner:
                 continue
-            if args.apply:
-                lib.update_sidecar(w, {"source": src})
-            out[str(w)] = tid
-    return out
+            ht = str(t.get("title") or "")
+            hcore, hshort = core_title(ht)
+            score = max(fuzzy_overlap(short, hshort), fuzzy_overlap(short, hcore), fuzzy_overlap(core, hcore))
+            author_ok = not author or author.lower() in ht.lower()
+            if score >= FUZZY_MIN_SCORE and author_ok and (best is None or score > best[0]):
+                best = (score, int(t["id"]), ht)
+        if best and best[0] >= 0.99:
+            break
+    if best is None:
+        counts["fuzzy_missed"] = counts.get("fuzzy_missed", 0) + 1
+        report.append(f"- FUZZY-MISS `{work.name}`")
+        return None
+    counts["fuzzy_found"] = counts.get("fuzzy_found", 0) + 1
+    report.append(f"- FUZZY `{work.name}` → topic {best[1]} \"{best[2]}\" ({best[0]:.2f})")
+    return best[1]
 
 
 async def _guarded(fetcher, url: str, args):
@@ -720,8 +764,8 @@ def main() -> None:
     ap.add_argument("--retry-misses", action="store_true")
     ap.add_argument("--search-loose", action="store_true",
                     help="second pass over recorded misses: prefix-stripped title + author confirmation")
-    ap.add_argument("--search-bundles", action="store_true",
-                    help="find the topic of file-host bundles by their id; all works from the bundle get it")
+    ap.add_argument("--search-fuzzy", action="append", metavar="BUNDLE:OWNER",
+                    help="fuzzy title search for works from this file-host share; hits must be posted by OWNER")
     ap.add_argument("--local-tags", action="store_true",
                     help="add source-<site> / pack-<bundle> / len-* tags derived offline")
     ap.add_argument("--limit", type=int, default=0, help="max forum lookups this run")
@@ -779,7 +823,7 @@ def main() -> None:
             works.append((work, merged))
     report.append(f"offline: {counts}")
     print(f"offline: {counts}", flush=True)
-    if args.forum or args.search or args.search_loose or args.search_bundles:
+    if args.forum or args.search or args.search_loose or args.search_fuzzy:
         fc = asyncio.run(forum_phase(works, args, report))
         report.append(f"forum: {fc}")
         print(f"forum: {fc}", flush=True)

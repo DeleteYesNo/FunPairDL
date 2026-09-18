@@ -104,3 +104,15 @@ def test_bundle_keys_from_item_urls():
     ]}
     assert bf.bundle_keys(pair) == {"AbCdEf12", "Root1234", "List5678"}
     assert bf.bundle_keys(None) == set()
+
+
+def test_core_title_and_fuzzy_overlap():
+    core, short = bf.core_title("(Tail Blazer) Legend of Zelda - Mommy Zelda's HJ")
+    assert core == "Legend of Zelda - Mommy Zelda's HJ" and short == "Mommy Zelda's HJ"
+    hcore, hshort = bf.core_title("(Tail blazer) Mommy Zelda's HJ (Requested, HQ script)")
+    assert hcore == "Mommy Zelda's HJ" and hshort == "Mommy Zelda's HJ"
+    assert bf.fuzzy_overlap(short, hshort) == 1.0
+    assert bf.fuzzy_overlap("KDA More PMV", "KDA - More PMV") == 1.0
+    assert bf.fuzzy_overlap("Malenia HJ", "Malenia BJ") == 0.5
+    assert bf.fuzzy_overlap("HMV", "Bekscript 1000 post special HMV") == 0.0     # one word proves nothing
+    assert bf.core_title("Hololive - Tokoyami Towa HJ") == ("Hololive - Tokoyami Towa HJ", "Tokoyami Towa HJ")
