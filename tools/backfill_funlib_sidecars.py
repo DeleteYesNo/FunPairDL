@@ -75,6 +75,11 @@ SOURCE_SITES = {"e621.net": "e621", "e926.net": "e621", "iwara.tv": "iwara", "so
                 "hanime1.me": "hanime"}
 MISSES_FILE = ROOT / "_backfill_misses.json"
 _LOG_TOPIC_RE = re.compile(r"discuss\.eroscripts\.com/t/([^/\s\"'?#]+)/(\d+)")
+LOG_URL_TRUNCATED_AT = 100      # the browser logs url[:100]; a URL that long may have lost id digits
+
+
+def _truncated(url: str) -> bool:
+    return len(url) >= LOG_URL_TRUNCATED_AT
 
 
 # ── offline sources ──────────────────────────────────────────────────────
@@ -140,7 +145,11 @@ def load_log_topics(log_path: Path = LOG_FILE) -> dict[str, str]:
     try:
         with open(log_path, encoding="utf-8", errors="replace") as f:
             for line in f:
-                for slug, tid in _LOG_TOPIC_RE.findall(line):
+                for m in _LOG_TOPIC_RE.finditer(line):
+                    slug, tid = m.group(1), m.group(2)
+                    url = line[m.start():].split()[0].strip()
+                    if _truncated(url[url.find("https://"):] if "https://" in url else "https://" + url):
+                        continue
                     k = QueueManager._match_key(slug.replace("-", " "))
                     if len(k) >= 4:
                         seen.setdefault(k, set()).add(tid)
@@ -205,6 +214,8 @@ def load_log_sent_from_topic(log_path: Path = LOG_FILE) -> dict[str, str]:
                 m = _PAGE_RE.match(line)
                 if m:
                     at = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                    if _truncated(line[line.find("https://"):].split()[0]):
+                        continue
                     recent.append((at, m.group(2), m.group(3)))
                     recent = [r for r in recent if (at - r[0]).total_seconds() <= LOOSE_WINDOW_S]
                     continue
