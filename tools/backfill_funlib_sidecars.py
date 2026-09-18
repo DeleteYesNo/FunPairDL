@@ -363,6 +363,14 @@ def local_tags(work: Path, sidecar: dict, pair: dict | None, parent_name: str) -
             if files.get("L0"):
                 candidates.append(files["L0"])
             candidates.extend(f for k, f in files.items() if k != "L0")
+        if not candidates:
+            # scripts not named after the folder (an old pack, a stray
+            # trailing space): any script in the folder still tells the length
+            try:
+                candidates = sorted(f.name for f in work.iterdir()
+                                    if f.is_file() and f.name.lower().endswith(".funscript"))
+            except OSError:
+                candidates = []
         for rel in candidates:
             try:
                 info = funscript_info((work / rel).read_bytes())

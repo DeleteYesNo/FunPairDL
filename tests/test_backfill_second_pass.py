@@ -127,3 +127,11 @@ def test_name_tags():
     assert bf.name_tags("NoodleDude - Ultimate TikTok PMV") == ["pmv"]
     assert bf.name_tags("(Author) Some Title") == []
     assert bf.name_tags("Shmv thing") == []          # not a whole word
+
+
+def test_local_tags_len_from_any_script_when_names_do_not_match(tmp_path):
+    w = tmp_path / "Pack Name"
+    w.mkdir()
+    actions = [{"at": 0, "pos": 0}, {"at": 3 * 60 * 1000, "pos": 100}]
+    (w / "Other Title 1080P.funscript").write_text(json.dumps({"actions": actions}), encoding="utf-8")
+    assert bf.local_tags(w, {"tags": [], "variants": []}, None, "") == ["len-2-5"]
