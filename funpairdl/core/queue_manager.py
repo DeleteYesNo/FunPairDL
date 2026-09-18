@@ -27,6 +27,7 @@ from funpairdl.core.pair import (
 )
 from funpairdl.providers.base import ResolvedFile
 from funpairdl.providers.registry import ProviderRegistry
+from funpairdl.core import library as lib
 from funpairdl.utils.filename import sanitize_filename
 from funpairdl.utils.url_parser import detect_provider
 
@@ -2252,16 +2253,6 @@ class QueueManager:
         return new_pairs
 
     @staticmethod
-    def _alt_slot_suffix(idx: int) -> str:
-        """Map a zero-based Alt slot to its on-disk suffix.
-
-        Convention: first Alt → ".alt", subsequent → ".alt1", ".alt2", ...
-        Matches erodeck's expected layout and stays backward-compatible
-        with the old author-collision code path.
-        """
-        return "alt" if idx == 0 else f"alt{idx}"
-
-    @staticmethod
     def _alt_sort_key(name: str) -> tuple[int, str]:
         """Stable ordering for Alt group names.
 
@@ -2445,27 +2436,6 @@ class QueueManager:
             out.append(p)
         return out
 
-    def _next_alt_slot(self, dest: Path) -> str:
-        """Next free '.alt'/'.altN' subfolder suffix inside dest."""
-        import re
-        used = []
-        for sub in dest.iterdir():
-            if sub.is_dir():
-                m = re.search(r"\.alt(\d*)$", sub.name, re.IGNORECASE)
-                if m:
-                    used.append(int(m.group(1)) if m.group(1) else 0)
-        return self._alt_slot_suffix(max(used) + 1 if used else 0)
-
-    @staticmethod
-    def _link_or_copy(src: Path, dst: Path) -> None:
-        """Hardlink src->dst; fall back to a copy across volumes."""
-        import os
-        import shutil
-        try:
-            os.link(src, dst)
-        except OSError:
-            shutil.copy2(src, dst)
-
     def _work_stem(self, filename: str) -> str:
         """Funscript filename -> work base (strip .funscript and any axis suffix)."""
         name = filename
@@ -2479,7 +2449,7 @@ class QueueManager:
     def _reconcile_with_library(self, pair: Pair) -> bool:
         """Merge a re-downloaded work into its existing library copy instead of
         leaving a duplicate: new axes go into the folder, changed scripts become
-        an .alt variant, identical files are dropped. Handles a video+script
+        (Label) variants, identical files are dropped. Handles a video+script
         re-download AND a script-only re-download. Returns True when absorbed.
         """
         from funpairdl.persistence.settings import Settings
@@ -2547,13 +2517,13 @@ class QueueManager:
                         continue
                     if other.state in (PairState.QUEUED, PairState.DOWNLOADING, PairState.PAUSED):
                         busy.add(_rp(Path(other.output_dir)))
-            for lib in self._library_dirs():
+            for root in self._library_dirs():
                 try:
-                    entries = list(lib.iterdir())
+                    entries = list(root.iterdir())
                 except OSError:
                     continue
                 for d in entries:
-                    if not d.is_dir() or d.resolve() == own:
+                    if not d.is_dir() or lib.is_meta_dir(d.name) or d.resolve() == own:
                         continue
                     if not wkeys & {self._match_key(d.name), self._title_key(d.name)}:
                         continue
@@ -2609,7 +2579,7 @@ class QueueManager:
                 if identical:
                     sp.unlink(missing_ok=True)
                 else:
-                    changed.append((sp, suffix))
+                    changed.append((sp, suffix, s))
 
         def _move(sp: Path, target: Path) -> None:
             import shutil
@@ -2628,18 +2598,29 @@ class QueueManager:
             name = dest_base + (f".{suffix}" if suffix else "") + ".funscript"
             _move(sp, dest / name)
 
-        # 2) changed scripts -> one new .alt variant (video hardlinked if present)
+        # 2) changed scripts -> (Label) variants next to the existing set;
+        #    the video is shared, nothing is linked or copied
+        overrides: dict[str, dict] = {}
         if changed:
-            slot = self._next_alt_slot(dest)
-            alt_dir = dest / f"{dest_base}.{slot}"
-            alt_dir.mkdir(parents=True, exist_ok=True)
-            if dest_video is not None:
-                alt_video = alt_dir / f"{dest_base}.{slot}{dest_video.suffix}"
-                if not alt_video.exists():
-                    self._link_or_copy(dest_video, alt_video)
-            for sp, suffix in changed:
-                name = f"{dest_base}.{slot}" + (f".{suffix}" if suffix else "") + ".funscript"
-                _move(sp, alt_dir / name)
+            used = lib.existing_labels(dest, dest_base)
+            main_authors = {(i.author or "").strip() for i in scripts
+                            if (i.group or "Main") == "Main" and (i.author or "").strip()}
+            by_group: dict[str, list[tuple[Path, str, PairItem]]] = {}
+            for sp, suffix, s in changed:
+                by_group.setdefault(s.group or "Main", []).append((sp, suffix, s))
+            for gname, entries in by_group.items():
+                items = [e[2] for e in entries]
+                authors = {(i.author or "").strip() for i in items if (i.author or "").strip()}
+                if gname == "Main":
+                    label = lib.sanitize_label(next(iter(authors))) if len(authors) == 1 else "Alt"
+                else:
+                    label = self._group_label(pair, gname, items, main_authors)
+                label = lib.unique_label(label, used)
+                used.add(label)
+                if len(authors) == 1:
+                    overrides[label] = {"author": next(iter(authors))}
+                for sp, suffix, _s in entries:
+                    _move(sp, dest / lib.script_name(dest_base, label, suffix))
 
         # 3) drop a duplicate downloaded video; clean up a separate temp folder
         if (src_video is not None and dest_video is not None
@@ -2652,34 +2633,83 @@ class QueueManager:
             except OSError:
                 pass
 
+        self._write_work_sidecar(pair, dest, dest_base, overrides)
         logger.info(
             "Reconciled '%s' into '%s' (%d new axes, %d variant scripts)",
             pair.name, dest.name, len(new_axis), len(changed),
         )
         return True
 
+    def _group_label(self, pair: Pair, gname: str, items: list[PairItem],
+                     main_authors: set[str]) -> str:
+        """Variant label for an Alt group: the panel's display name, else
+        the group's scripter when it is not Main's, else "Alt"."""
+        cfg = pair.alt_group_config.get(gname, {})
+        disp = (cfg.get("display_name") or "").strip()
+        if disp:
+            return lib.sanitize_label(disp)
+        authors = {it.author.strip() for it in items if (it.author or "").strip()}
+        if len(authors) == 1:
+            a = next(iter(authors))
+            if a.lower() not in {m.lower() for m in main_authors}:
+                return lib.sanitize_label(a)
+        return "Alt"
+
+    def _schedule_sidecar_enrich(self, work_dir: Path, source_url: str) -> None:
+        """Fill the sidecar's forum fields (tags, category, posted_at, OP)
+        in the background on the download loop; nothing to do without an
+        EroScripts topic or a running loop."""
+        if lib.source_site(source_url) != "eroscripts":
+            return
+        tid = lib.topic_id_from_url(source_url)
+        if not tid or not self._dl_loop or not self._dl_loop.is_running():
+            return
+        session = self._session
+
+        async def _run() -> None:
+            try:
+                from funpairdl.utils.discourse import enrich_sidecar
+                await enrich_sidecar(work_dir, tid, session)
+            except Exception as e:
+                logger.info("Sidecar enrich skipped for %s: %s", work_dir.name, e)
+
+        try:
+            asyncio.run_coroutine_threadsafe(_run(), self._dl_loop)
+        except RuntimeError as e:
+            logger.debug("Sidecar enrich not scheduled: %s", e)
+
+    def _write_work_sidecar(self, pair: Pair, work_dir: Path, base: str,
+                            overrides: dict[str, dict] | None = None,
+                            title: str | None = None) -> None:
+        try:
+            variants = lib.scan_variants(work_dir, base, overrides)
+            lib.update_sidecar(work_dir, lib.sidecar_from_pair(pair, variants, title=title))
+        except OSError as e:
+            logger.error("Failed to write %s in %s: %s", lib.SIDECAR_NAME, work_dir, e)
+            return
+        self._schedule_sidecar_enrich(work_dir, pair.source_url)
+
     def _organize_output(self, pair: Pair) -> None:
-        """Rename files to share the same base name and place each Alt
-        group into its own erodeck-compatible subfolder.
+        """Rename files to the flat library layout (docs/library-layout.md)
+        and write the work's ``funlib.json``.
 
         Grouping is driven by `item.group`:
-          - "Main" / "" → root folder, renamed to `<base>.<axis>.funscript`
-          - "Alt N"     → `.alt[N-1]/` subfolder, renamed to
-                          `<base>.alt[N-1].<axis>.funscript`
+          - "Main" / ""  → `<base>.mp4`, `<base>[.axis].funscript`
+          - "Alt N"      → `<base> (<Label>)[.axis].funscript` next to Main;
+                           Label = the group's display name, else its
+                           scripter, else "Alt", made unique in the folder.
 
-        If an Alt group has no video of its own, Main's video is
-        hardlinked into the subfolder (legacy "alternate scripter for
-        the same video" behavior). If the group's config sets
-        `inherit_multi_axis=True` (default), Main's non-L0 funscripts
-        are hardlinked into the subfolder for any axis the Alt itself
-        doesn't already cover.
+        No subfolders and no hardlinks: a variant shares Main's video, and
+        the axes it lacks are inherited by FunLib at play time
+        (`inherit_multi_axis=False` becomes `inherit_axes: false` in the
+        sidecar). An Alt group that brought its OWN, different video keeps
+        it next to its scripts as `<base> (<Label>).<ext>` — still one work,
+        FunLib switches video and thumbnail with the variant.
         """
-        import os
         from collections import OrderedDict
-        from datetime import date
 
         # If this work already lives in the library, merge into it (new axes
-        # into the folder, changed scripts as an .alt variant) rather than
+        # into the folder, changed scripts as (Label) variants) rather than
         # leaving a duplicate folder. Falls through to normal organize on any
         # failure or when there's no existing copy.
         try:
@@ -2719,27 +2749,22 @@ class QueueManager:
             key=self._alt_sort_key,
         )
 
-        hardlinks: list[tuple[str, str]] = []
-
         # ─── Main group: rename in root ───
         main_items = group_items.get("Main", [])
         main_videos = [i for i in main_items if i.file_type == FileType.VIDEO]
         main_scripts = [i for i in main_items if i.file_type == FileType.FUNSCRIPT]
 
-        video_ext = ".mp4"
-        main_video_path: Path | None = None  # for sibling-hardlink + Alt fallback
+        main_video_path: Path | None = None
 
-        # Multiple Main videos = mirrors from different hosts. First wins
-        # the rename; later ones keep their original name and get sibling
-        # funscripts via the hardlink pass below.
+        # Multiple Main videos = mirrors from different hosts. The first
+        # wins the rename; a later one that is byte-identical is redundant
+        # and dropped, a different one keeps its original name (logged).
         for item in main_videos:
             old_path = output_dir / item.filename
             if not old_path.exists():
                 continue
-            cur_ext = old_path.suffix
             if main_video_path is None:
-                video_ext = cur_ext
-                new_name = f"{base_name}{video_ext}"
+                new_name = f"{base_name}{old_path.suffix}"
                 new_path = output_dir / new_name
                 if old_path != new_path:
                     if new_path.exists():
@@ -2774,11 +2799,16 @@ class QueueManager:
                         logger.error("Failed to rename %s: %s", old_path.name, e)
                 else:
                     main_video_path = new_path
+            elif old_path != main_video_path and self._same_file(old_path, main_video_path):
+                old_path.unlink(missing_ok=True)
+                logger.info("Dropped mirror identical to %s: %s", main_video_path.name, old_path.name)
+            else:
+                logger.warning("Extra Main video kept under its own name: %s", old_path.name)
 
-        # Rename Main scripts; track per-axis primary for inheritance.
-        # If two Main scripts collide on the same axis, the first wins
-        # the rename and we log a warning — moving such collisions into
-        # a real Alt group is now the user's job via the picker UI.
+        # Rename Main scripts; track per-axis primary. If two Main scripts
+        # collide on the same axis, the first wins the rename and we log a
+        # warning — moving such collisions into a real Alt group is the
+        # user's job via the picker UI.
         main_axis_primary: dict[str, tuple[PairItem, str]] = {}
         for item in main_scripts:
             canonical, suffix = self._parse_axis(item.filename)
@@ -2791,7 +2821,7 @@ class QueueManager:
                     canonical, main_axis_primary[canonical][0].filename, item.filename,
                 )
                 continue
-            new_name = f"{base_name}.{suffix}.funscript" if suffix else f"{base_name}.funscript"
+            new_name = lib.script_name(base_name, "", suffix)
             new_path = output_dir / new_name
             if old_path != new_path:
                 if new_path.exists():
@@ -2806,179 +2836,100 @@ class QueueManager:
                     continue
             main_axis_primary[canonical] = (item, suffix)
 
-        # ─── Resolve each Alt group's on-disk stem ───
-        # Priority: display_name (user-supplied via UI) → topic + slot
-        # number. Same-name collisions get a `-2`, `-3` suffix so two
-        # Alts that share a display label don't clobber each other.
-        alt_bases: dict[str, str] = {}
-        used_bases: set[str] = set()
-        for slot_idx, alt_name in enumerate(alt_names):
-            cfg = pair.alt_group_config.get(alt_name, {})
-            disp = (cfg.get("display_name") or "").strip()
-            if disp:
-                stem = sanitize_filename(disp)
-            else:
-                stem = f"{base_name}.{self._alt_slot_suffix(slot_idx)}"
-            if not stem:
-                stem = f"{base_name}.{self._alt_slot_suffix(slot_idx)}"
-            candidate = f"{stem}.alt" if disp else stem
-            if candidate in used_bases:
-                n = 2
-                while f"{stem}-{n}.alt" in used_bases:
-                    n += 1
-                candidate = f"{stem}-{n}.alt"
-            used_bases.add(candidate)
-            alt_bases[alt_name] = candidate
+        # ─── Alt groups → flat (Label) variants ───
+        used_labels = lib.existing_labels(output_dir, base_name)
+        main_authors = {(i.author or "").strip() for i in main_scripts if (i.author or "").strip()}
+        main_names = {i.filename.lower() for i in main_items}
+        overrides: dict[str, dict] = {}
+        if len(main_authors) == 1:
+            overrides["Main"] = {"author": next(iter(main_authors))}
 
-        for slot_idx, alt_name in enumerate(alt_names):
-            alt_base = alt_bases[alt_name]
-            alt_dir = output_dir / alt_base
-
+        for alt_name in alt_names:
             # Only files that are this group's OWN: an item whose filename
             # is a Main item's filename is the same file (a mirror bundle
             # carried the same upload and was skipped as already on disk) —
-            # moving it would steal Main's script. With nothing of its own
-            # on disk, an .alt folder holding only a hardlinked video is
-            # junk, so none is made.
-            main_names = {i.filename.lower() for i in group_items.get("Main", [])}
+            # moving it would steal Main's script.
             alt_items = [i for i in group_items[alt_name]
                          if i.filename.lower() not in main_names
                          and (output_dir / i.filename).exists()]
             if not alt_items:
-                logger.info("Alt group %s has no files of its own — no %s folder",
-                            alt_name, alt_base)
+                logger.info("Alt group %s has no files of its own — nothing to place", alt_name)
                 continue
             alt_videos = [i for i in alt_items if i.file_type == FileType.VIDEO]
             alt_scripts = [i for i in alt_items if i.file_type == FileType.FUNSCRIPT]
-            alt_dir.mkdir(parents=True, exist_ok=True)
 
-            # Place Alt video. If the Alt group has its own video, move it
-            # into the subfolder under the alt name. Otherwise hardlink
-            # Main's video (preserves the "alternate scripter for the
-            # same video" workflow).
-            alt_video_placed = False
-            if alt_videos:
-                first = alt_videos[0]
-                src = output_dir / first.filename
-                if src.exists():
-                    dest = alt_dir / f"{alt_base}{src.suffix}"
-                    if not dest.exists():
-                        try:
-                            src.rename(dest)
-                            first.filename = dest.name
-                            alt_video_placed = True
-                            logger.info("Moved Alt video: %s -> %s", src.name, dest)
-                        except OSError as e:
-                            logger.error("Failed to move Alt video %s: %s", src, e)
-                # Any further videos in the same Alt group are mirrors —
-                # leave them in root with their original names; the
-                # sibling-funscript pass below will pair them up.
+            label = lib.unique_label(
+                self._group_label(pair, alt_name, alt_items, main_authors), used_labels)
+            used_labels.add(label)
+            cfg = pair.alt_group_config.setdefault(alt_name, {})
+            cfg["label"] = label
+            authors = {(i.author or "").strip() for i in alt_scripts if (i.author or "").strip()}
+            if len(authors) == 1:
+                overrides.setdefault(label, {})["author"] = next(iter(authors))
 
-            if not alt_video_placed and main_video_path is not None and main_video_path.exists():
-                dest = alt_dir / f"{alt_base}{main_video_path.suffix}"
-                if not dest.exists():
+            # An Alt video identical to Main's is the same file twice: drop
+            # it. A different one makes this group its own work (below).
+            own_video: tuple[PairItem, Path] | None = None
+            for v in alt_videos:
+                src = output_dir / v.filename
+                if main_video_path is not None and main_video_path.exists() \
+                        and src != main_video_path and self._same_file(src, main_video_path):
+                    src.unlink(missing_ok=True)
+                    logger.info("Dropped Alt video identical to Main's: %s", src.name)
+                    continue
+                if own_video is None:
+                    own_video = (v, src)
+                else:
+                    logger.warning("Extra Alt video kept under its own name: %s", src.name)
+
+            if own_video is not None:
+                v, src = own_video
+                dest = output_dir / f"{base_name} ({label}){src.suffix}"
+                if dest.exists() and dest != src:
+                    logger.warning("Target exists, Alt video keeps its name: %s", dest)
+                elif dest != src:
                     try:
-                        os.link(str(main_video_path), str(dest))
-                        hardlinks.append((str(main_video_path), str(dest)))
-                        logger.info("Hardlinked Main video into %s", alt_dir.name)
+                        src.rename(dest)
+                        v.filename = dest.name
+                        logger.info("Variant (%s) video: %s -> %s", label, src.name, dest.name)
                     except OSError as e:
-                        logger.error("Failed to hardlink Main video into %s: %s", alt_dir, e)
+                        logger.error("Failed to rename Alt video %s: %s", src.name, e)
 
-            # Move + rename Alt scripts; remember which axes the Alt
-            # already covers so inheritance doesn't double-fill them.
-            alt_axes_covered: set[str] = set()
-            for item in alt_scripts:
-                canonical, suffix = self._parse_axis(item.filename)
-                src = output_dir / item.filename
+            for s in alt_scripts:
+                _canonical, suffix = self._parse_axis(s.filename)
+                src = output_dir / s.filename
                 if not src.exists():
                     continue
-                new_name = f"{alt_base}.{suffix}.funscript" if suffix else f"{alt_base}.funscript"
-                dest = alt_dir / new_name
+                new_name = lib.script_name(base_name, label, suffix)
+                dest = output_dir / new_name
+                if dest == src:
+                    continue
                 if dest.exists():
                     logger.warning("Target exists, skipping: %s", dest)
                     continue
                 try:
                     src.rename(dest)
-                    item.filename = new_name
-                    alt_axes_covered.add(canonical)
-                    logger.info("Moved Alt script: %s -> %s", src.name, dest)
+                    s.filename = new_name
+                    logger.info("Variant (%s): %s -> %s", label, src.name, new_name)
                 except OSError as e:
-                    logger.error("Failed to move %s: %s", src.name, e)
+                    logger.error("Failed to rename %s: %s", src.name, e)
+            if not bool(cfg.get("inherit_multi_axis", True)):
+                overrides.setdefault(label, {})["inherit_axes"] = False
 
-            # Inherit Main's multi-axis funscripts when configured.
-            # We never inherit L0 (the main axis) — that's what each Alt
-            # group's own primary funscript represents.
-            cfg = pair.alt_group_config.get(alt_name, {})
-            inherit = bool(cfg.get("inherit_multi_axis", True))
-            if inherit:
-                for canonical, (main_item, main_suffix) in main_axis_primary.items():
-                    if canonical == "L0":
-                        continue
-                    if canonical in alt_axes_covered:
-                        continue
-                    main_path = output_dir / main_item.filename
-                    if not main_path.exists():
-                        continue
-                    hl_name = f"{alt_base}.{main_suffix}.funscript"
-                    hl_dest = alt_dir / hl_name
-                    if hl_dest.exists():
-                        continue
-                    try:
-                        os.link(str(main_path), str(hl_dest))
-                        hardlinks.append((str(main_path), str(hl_dest)))
-                        logger.info("Inherited Main %s axis into %s", canonical, alt_dir.name)
-                    except OSError as e:
-                        logger.warning("Failed to inherit Main %s into %s: %s", canonical, alt_dir, e)
+        # A stale .linkinfo from an older layout would describe links that
+        # no longer exist.
+        linkinfo = output_dir / ".linkinfo"
+        if linkinfo.exists() and not any(
+                d.is_dir() and lib._ALT_DIR_RE.match(d.name) for d in output_dir.iterdir()):
+            linkinfo.unlink(missing_ok=True)
 
-        # ─── Sibling-funscript hardlinks for extra Main mirrors ───
-        # When Main has multiple videos but one funscript, players only
-        # see the script next to the matching stem. Hardlink the primary
-        # Main funscript next to every Main mirror video.
-        primary_funscript_path: Path | None = None
-        primary_script = output_dir / f"{base_name}.funscript"
-        if primary_script.exists():
-            primary_funscript_path = primary_script
-
-        if primary_funscript_path is not None:
-            for item in main_videos:
-                vid_path = output_dir / item.filename
-                if not vid_path.exists():
-                    continue
-                expected_script = vid_path.with_suffix(".funscript")
-                if expected_script.exists():
-                    continue
-                if main_video_path is not None and vid_path == main_video_path:
-                    continue
-                try:
-                    os.link(str(primary_funscript_path), str(expected_script))
-                    hardlinks.append((str(primary_funscript_path), str(expected_script)))
-                    logger.info("Hardlinked sibling funscript: %s -> %s",
-                                primary_funscript_path.name, expected_script.name)
-                except OSError as e:
-                    logger.warning("Failed to hardlink sibling funscript for %s: %s",
-                                   vid_path.name, e)
-
-        # ─── Write .linkinfo ───
-        if hardlinks:
-            linkinfo_path = output_dir / ".linkinfo"
-            today = date.today().isoformat()
-            lines = []
-            for original, linked in hardlinks:
-                lines.append("[hardlink]")
-                lines.append(f"original={original}")
-                lines.append(f"linked={linked}")
-                lines.append(f"created={today}")
-                lines.append("")
-            try:
-                linkinfo_path.write_text("\n".join(lines), encoding="utf-8")
-                logger.info("Wrote .linkinfo with %d entries", len(hardlinks))
-            except OSError as e:
-                logger.error("Failed to write .linkinfo: %s", e)
-
+        self._write_work_sidecar(pair, output_dir, base_name, overrides)
         pair.organized = True
 
     def _undo_organize(self, pair: Pair) -> None:
-        """Reverse _organize_output(): restore original filenames, remove alt subfolders."""
+        """Reverse _organize_output(): restore original filenames, bring
+        sibling-work files back, remove the sidecars it wrote and any
+        legacy alt subfolders."""
         import shutil
 
         if not pair.organized or not pair.original_filenames:
@@ -2987,27 +2938,69 @@ class QueueManager:
 
         output_dir = Path(pair.output_dir)
 
-        # Phase 1: Delete .linkinfo and remove hardlinked videos in alt subfolders
+        def _drop_own_sidecar(d: Path) -> None:
+            sc = lib.read_sidecar(d)
+            if sc and sc.get("pair_id") == pair.id:
+                (d / lib.SIDECAR_NAME).unlink(missing_ok=True)
+
+        _drop_own_sidecar(output_dir)
+
+        # Phase 0: sibling work folders made for Alt groups with their own video
+        for gname, cfg in pair.alt_group_config.items():
+            sib = cfg.get("organized_dir")
+            if not sib:
+                continue
+            sib_dir = Path(sib)
+            for item in pair.items:
+                if (item.group or "Main") != gname:
+                    continue
+                orig = pair.original_filenames.get(item.id)
+                cur = sib_dir / item.filename
+                if not orig or not cur.exists():
+                    continue
+                target = output_dir / orig
+                if target.exists():
+                    logger.warning("Cannot restore %s: %s exists", cur, target)
+                    continue
+                try:
+                    cur.rename(target)
+                    item.filename = orig
+                except OSError as e:
+                    logger.error("Failed to restore %s: %s", cur, e)
+            _drop_own_sidecar(sib_dir)
+            try:
+                if sib_dir.is_dir() and not any(sib_dir.iterdir()):
+                    sib_dir.rmdir()
+            except OSError:
+                pass
+            cfg.pop("organized_dir", None)
+
+        # Phase 1: legacy layout — .linkinfo and .alt subfolders
         linkinfo = output_dir / ".linkinfo"
         if linkinfo.exists():
             linkinfo.unlink(missing_ok=True)
 
         # Phase 2: Move scripts from alt subfolders back to root
         for sub in sorted(output_dir.iterdir()):
-            if not sub.is_dir() or not sub.name.endswith((".alt",)) and ".alt" not in sub.name:
-                continue
-            # Check it's an erodeck alt folder (name contains .alt)
-            if ".alt" not in sub.name:
+            if not sub.is_dir() or not lib._ALT_DIR_RE.match(sub.name):
                 continue
             for f in sub.iterdir():
-                if f.suffix.lower() == ".funscript":
-                    # Move script back to root (will be renamed to original name below)
+                if f.name == lib.SIDECAR_NAME:
+                    f.unlink(missing_ok=True)
+                    continue
+                is_link = False
+                try:
+                    is_link = f.stat().st_nlink > 1
+                except OSError:
+                    pass
+                if f.suffix.lower() == ".funscript" or not is_link:
+                    # A real file (script, or a video of its own) goes back
+                    # to the root (renamed to its original name below).
                     target = output_dir / f.name
                     if not target.exists():
                         f.rename(target)
                 else:
-                    # Hardlinked video — just delete
-                    f.unlink(missing_ok=True)
+                    f.unlink(missing_ok=True)   # hardlinked copy of Main's file
             # Remove empty alt dir
             try:
                 sub.rmdir()

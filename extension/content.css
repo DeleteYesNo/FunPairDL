@@ -853,4 +853,5 @@
 .funpairdl-topic-badge--by-title { background: transparent; color: #2e9e6a; border: 1px solid #2e9e6a; }
 .funpairdl-topic-badge--active { background: #4a90d9; color: #fff; }
 .funpairdl-topic-badge--failed { background: #d9534f; color: #fff; }
+.funpairdl-topic-badge--deleted { background: #6c757d; color: #fff; }
 .funpairdl-topic-badge--visited { background: transparent; color: #888; border: 1px solid #aaa; }

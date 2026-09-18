@@ -39,6 +39,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from funpairdl.core.library import (  # noqa: E402
+    existing_labels, in_trash, is_meta_dir, sanitize_label, script_name, unique_label, update_sidecar,
+)
 from funpairdl.core.queue_manager import QueueManager  # noqa: E402
 
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".wmv", ".ts", ".flv"}
@@ -73,7 +76,7 @@ def inventory(folder: Path, cache: HashCache) -> dict[Path, str]:
     """{relative path: sha256} for every video/funscript under folder."""
     out = {}
     for dp, dn, fn in os.walk(folder):
-        dn[:] = [d for d in dn if d != ".parts"]
+        dn[:] = [d for d in dn if not is_meta_dir(d)]
         for f in fn:
             p = Path(dp) / f
             if p.suffix.lower() in VIDEO_EXTS or f.lower().endswith(".funscript"):
@@ -138,11 +141,15 @@ def main():
     busy = {Path(b).resolve() for b in json.loads(args.busy)} if args.busy else set()
 
     def work_dir(p: str) -> Path | None:
+        if in_trash(Path(p)):
+            return None          # FunLib's recycle bin does not exist for us
         for r in roots:
             try:
                 rel = Path(p).relative_to(r)
             except ValueError:
                 continue
+            if is_meta_dir(rel.parts[0]):
+                return None
             return r / rel.parts[0]
         return None
 
@@ -204,11 +211,15 @@ def main():
             alt_src = next((rel for rel, h in sorted(inv[keeper].items())
                             if h == loser_vid_hash and rel.suffix.lower() in VIDEO_EXTS), base_video)
             if uncovered:
-                # same video, scripts the keeper lacks -> .alt slots, one per L0
+                # same video, scripts the keeper lacks -> "(Label)" variants
+                # laid flat next to the keeper's set (docs/library-layout.md);
+                # the video is shared, nothing is linked
                 if alt_src is None:
                     lines.append(f"- SKIP (keeper has no top-level video): `{keeper.name}`")
                     actions["skipped"] += 1
                     continue
+                keeper_base = alt_src.stem if len(alt_src.parts) == 1 else keeper.name
+                used = existing_labels(keeper, keeper_base)
                 by_dir: dict[Path, list[Path]] = {}
                 for rel in sorted(uncovered):
                     by_dir.setdefault(rel.parent, []).append(rel)
@@ -217,28 +228,26 @@ def main():
                     axes = [r for r in rels if QueueManager._parse_axis(r.name)[0] != "L0"]
                     slots = l0 or [None]
                     for main_rel in slots:
-                        slot = next_alt_slot(keeper, keeper.name) if args.apply else "alt?"
-                        alt_dir = keeper / f"{keeper.name}.{slot}"
+                        label = unique_label(sanitize_label(loser.name, "Alt"), used)
+                        used.add(label)
                         moves = []
                         if main_rel is not None:
-                            moves.append((loser / main_rel, alt_dir / f"{keeper.name}.{slot}.funscript"))
+                            moves.append((loser / main_rel, keeper / script_name(keeper_base, label, "")))
                         for ax in axes:
                             suffix = QueueManager._parse_axis(ax.name)[1]
-                            moves.append((loser / ax, alt_dir / f"{keeper.name}.{slot}.{suffix}.funscript"))
-                        vid_dst = alt_dir / f"{keeper.name}.{slot}{alt_src.suffix}"
-                        lines.append(f"- ALT: `{loser.name}` -> `{keeper.name}/{alt_dir.name}` "
+                            moves.append((loser / ax, keeper / script_name(keeper_base, label, suffix)))
+                        lines.append(f"- VARIANT: `{loser.name}` -> `{keeper.name}` as ({label}) "
                                      f"({len(moves)} script(s))")
                         if args.apply:
-                            alt_dir.mkdir(exist_ok=False)
                             for src, dst in moves:
                                 if dst.exists():
                                     dst = dst.with_name(dst.stem + "-2" + dst.suffix)
                                 shutil.move(str(src), str(dst))
-                            os.link(keeper / alt_src, vid_dst)
-                            links.append((keeper / alt_src, vid_dst))
                         actions["alt_merge"] += 1
                         axes = []   # axes go with the first slot only
-                append_linkinfo(keeper, links, args.apply)
+                if args.apply:
+                    from funpairdl.core.library import scan_variants
+                    update_sidecar(keeper, {"variants": scan_variants(keeper, keeper_base)})
             # loser is now fully covered -> quarantine
             qdir = loser.parent / f"_dup_quarantine_{STAMP}"
             size = sum((loser / r).stat().st_size for r in inv[loser]

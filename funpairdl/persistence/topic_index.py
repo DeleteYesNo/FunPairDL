@@ -31,9 +31,13 @@ _ARCHIVE_TTL = 30.0  # seconds between re-reads of the archive when unchanged
 
 
 class TopicIndex:
-    def __init__(self, path: Path = TOPIC_INDEX_FILE, archive_path: Path = QUEUE_ARCHIVE_FILE):
+    def __init__(self, path: Path = TOPIC_INDEX_FILE, archive_path: Path = QUEUE_ARCHIVE_FILE,
+                 deleted_log=None):
         self.path = Path(path)
         self.archive_path = Path(archive_path)
+        # FunLib's recycle bin (<root>/_trash/deleted.jsonl): a work in the
+        # bin shows as "deleted" instead of "completed".
+        self.deleted_log = deleted_log
         self._data: dict[str, dict] | None = None
         self._file_sig: tuple = ()
         self._archive: dict[str, str] = {}        # pair id -> name
@@ -145,6 +149,7 @@ class TopicIndex:
                 cur = live_titles.get(k)
                 if cur is None or self._RANK.get(p.state.value, 0) > self._RANK.get(cur, 0):
                     live_titles[k] = p.state.value
+        trash = self._trash_index(title_key)
         with _lock:
             data = self._load()
             out: dict[str, dict] = {}
@@ -155,18 +160,21 @@ class TopicIndex:
                 e = data.get(tid) or {}
                 states: list[str] = []
                 names: list[str] = []
+                pair_ids: list[str] = []
                 for p in e.get("pairs") or []:
                     pid = p.get("id")
                     lp = live_by_id.get(pid)
                     if lp is not None:
                         states.append(lp.state.value)
                         names.append(lp.name)
+                        pair_ids.append(pid)
                     elif pid in self._archive:
                         states.append("completed")
                         names.append(self._archive[pid] or p.get("name", ""))
+                        pair_ids.append(pid)
                 by_title = False
+                k = title_key(t.get("title") or e.get("title") or "")
                 if not states:
-                    k = title_key(t.get("title") or e.get("title") or "")
                     if len(k) >= 4:
                         if k in live_titles:
                             states.append(live_titles[k])
@@ -175,14 +183,46 @@ class TopicIndex:
                             states.append("completed")
                             by_title = True
                 state = max(states, key=lambda s: self._RANK.get(s, 0)) if states else ""
+                deleted = False
+                if state == "completed" and trash is not None:
+                    deleted = self._is_trashed(trash, tid, pair_ids, k)
+                    if deleted:
+                        state = "deleted"
                 out[tid] = {
                     "state": state,
                     "pairs": len(states),
                     "names": names[:5],
                     "visited_at": e.get("visited_at", ""),
                     "by_title": by_title,
+                    "deleted": deleted,
                 }
             return out
+
+    # ── FunLib recycle bin ──
+    def _trash_index(self, title_key):
+        """Whole-work trash events currently in the bin, as lookup sets;
+        None when the bin is empty or unreadable."""
+        log = self.deleted_log
+        if log is None:
+            from funpairdl.core.library import get_deleted_log
+            log = get_deleted_log()
+        try:
+            idx = log.index(title_key)
+        except Exception as e:
+            logger.warning("deleted.jsonl unreadable: %s", e)
+            return None
+        w = idx["work"]
+        return w if (w["folders"] or w["pair_ids"] or w["topic_ids"]) else None
+
+    @staticmethod
+    def _is_trashed(trash: dict, topic_id: str, pair_ids: list[str], key: str) -> bool:
+        """A topic's work is in FunLib's bin when a whole-work trash event
+        names its topic, one of its pairs, or its folder (by title key)."""
+        if topic_id in trash["topic_ids"]:
+            return True
+        if any(pid in trash["pair_ids"] for pid in pair_ids):
+            return True
+        return len(key) >= 4 and key in trash["folder_keys"]
 
 
 _index: TopicIndex | None = None

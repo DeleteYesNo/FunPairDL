@@ -16,7 +16,7 @@ The core unit is a **Pair**: one post / work = one video + one or more `.funscri
 - Expands "bundles" (a Pixeldrain list or a MEGA folder) into individual files.
 - Pairs videos with funscripts automatically (with a preview before downloading), handling multi-axis scripts (`.roll`, `.pitch`, …).
 - Downloads with multi-segment / HLS support and a persistent queue.
-- Organizes output: unifies file names, preserves multi-axis suffixes, and creates `.alt` / `.alt1` variant subfolders for alternates or multiple authors.
+- Organizes output into the flat library layout shared with FunLib (`docs/library-layout.md`): unified file names, multi-axis suffixes preserved, alternate scripts as `<work> (<Label>).funscript` next to the main set, and a `funlib.json` sidecar (title, author, forum topic, tags, variants).
 
 It is a Windows desktop **GUI** (PySide6) with a local **FastAPI** backend and an embedded tabbed browser.
 
@@ -85,7 +85,7 @@ Released under the **PolyForm Noncommercial License 1.0.0** — free for any non
 - 把「bundle」(Pixeldrain list、MEGA 資料夾)展開成個別檔案。
 - 自動配對影片與 funscript(下載前會顯示預覽),並處理多軸腳本(`.roll`、`.pitch`…)。
 - 支援多分段 / HLS 下載,並用佇列持久化保存進度。
-- 整理輸出:統一檔名、保留多軸 suffix,遇到變體或多作者時建立 `.alt` / `.alt1` 子資料夾。
+- 整理輸出:與 FunLib 共用的平放版面(`docs/library-layout.md`):統一檔名、保留多軸 suffix,變體腳本存成 `<作品> (<Label>).funscript`,並寫入 `funlib.json`(標題、作者、帖子、標籤、變體)。
 
 它是一個 Windows 桌面 **GUI**(PySide6),搭配本機 **FastAPI** 後端與內建分頁瀏覽器。
 
