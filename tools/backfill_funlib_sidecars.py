@@ -505,7 +505,8 @@ async def forum_phase(works: list[tuple[Path, dict]], args, report: list[str]) -
                 break
             src = sc.get("source") or {}
             tid = src.get("topic_id") if src.get("site") == "eroscripts" else None
-            needs = not (sc.get("tags") and sc.get("category") and sc.get("posted_at") and sc.get("posted_by"))
+            forum_tags = [t for t in (sc.get("tags") or []) if not str(t).startswith(("len-", "source-", "pack-"))]
+            needs = not (forum_tags and sc.get("category") and sc.get("posted_at") and sc.get("posted_by"))
             if tid and not needs:
                 continue
             loose_author = ""
