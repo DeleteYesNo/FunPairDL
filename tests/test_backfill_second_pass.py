@@ -92,3 +92,15 @@ def test_local_tags(tmp_path):
     assert bf.local_tags(w, sc2, pair, "Casey Pack") == []
     assert bf.len_tag(30) == "len-0-2" and bf.len_tag(3600) == "len-60-plus" and bf.len_tag(None) == ""
     assert bf.pack_tag("(Author) Example Series Mockie 5 Packs! (Total 6m 13s)") == "pack-example-series-mockie-5-packs-total-6m"
+
+
+def test_bundle_keys_from_item_urls():
+    pair = {"items": [
+        {"url": "https://mega.nz/folder/AbCdEf12#keykeykey/file/xyz"},
+        {"url": "https://pixeldrain.com/api/filesystem/Root1234/All%20Demo%20Set/x.mp4"},
+        {"url": "https://pixeldrain.com/l/List5678"},
+        {"url": "https://pixeldrain.com/u/File9999"},          # a lone file is not a bundle
+        {"url": "https://discuss.eroscripts.com/uploads/short-url/abc.funscript"},
+    ]}
+    assert bf.bundle_keys(pair) == {"AbCdEf12", "Root1234", "List5678"}
+    assert bf.bundle_keys(None) == set()
