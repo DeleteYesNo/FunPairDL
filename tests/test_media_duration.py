@@ -72,3 +72,12 @@ def test_webm_duration_from_segment_info():
     head = _ebml(0x1A45DFA3, _ebml(0x4282, b"webm")) + _ebml(0x18538067, segment_children)
     assert abs(webm_duration(head) - 154.32) < 1e-6
     assert webm_duration(b"\x00" * 32) is None
+
+
+def test_funscript_info_reads_combined_multi_axis_files():
+    import json
+    from funpairdl.utils.media_duration import funscript_info
+    doc = {"version": "1.1", "actions": [], "axes": [
+        {"id": "R0", "actions": [{"at": 0, "pos": 50}, {"at": 90_000, "pos": 60}]},
+        {"id": "R1", "actions": [{"at": 0, "pos": 50}, {"at": 120_000, "pos": 40}]}]}
+    assert funscript_info(json.dumps(doc).encode()) ["duration"] == 120.0
