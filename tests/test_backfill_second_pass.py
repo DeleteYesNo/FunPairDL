@@ -115,4 +115,5 @@ def test_core_title_and_fuzzy_overlap():
     assert bf.fuzzy_overlap("KDA More PMV", "KDA - More PMV") == 1.0
     assert bf.fuzzy_overlap("Malenia HJ", "Malenia BJ") == 0.5
     assert bf.fuzzy_overlap("HMV", "Bekscript 1000 post special HMV") == 0.0     # one word proves nothing
+    assert bf.fuzzy_overlap("New Jersey BlobCG HMV (A Loop) Simple", "New Jersey - BlobCG HMV (Suggested)") == 1.0
     assert bf.core_title("Hololive - Tokoyami Towa HJ") == ("Hololive - Tokoyami Towa HJ", "Tokoyami Towa HJ")

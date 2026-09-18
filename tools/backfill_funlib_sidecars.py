@@ -681,12 +681,19 @@ def core_title(name: str) -> tuple[str, str]:
 
 FUZZY_MIN_TOKENS = 2
 FUZZY_MIN_SCORE = 0.75
+# Words a share's file names add for script variants of one work; they
+# never appear in the topic title, so they do not count against a match.
+FUZZY_VARIANT_WORDS = frozenset({
+    "simple", "basic", "hard", "hardcore", "soft", "loop", "bounce", "vibration", "vib", "vibe",
+    "invert", "inverted", "v1", "v2", "v3", "v4", "kr", "jp", "eng", "sub", "subbed", "dub",
+    "dubbed", "ver", "version", "alt", "remake", "fixed", "fix", "edit", "edited",
+})
 
 
 def fuzzy_overlap(a: str, b: str) -> float:
     """Share of ``a``'s words found in ``b``; 0 when ``a`` has too few words
     to mean anything (a lone "HMV" matched everything)."""
-    ta, tb = _tokens(a), _tokens(b)
+    ta, tb = _tokens(a) - FUZZY_VARIANT_WORDS, _tokens(b)
     if len(ta) < FUZZY_MIN_TOKENS or not tb:
         return 0.0
     return len(ta & tb) / len(ta)
