@@ -30,6 +30,11 @@ Second pass for the leftovers (run after the first):
     the prefix-stripped titles match AND the author is confirmed (the hit's
     title names the author, or the topic's OP is the author). Every
     acceptance is listed in the report as LOOSE for review.
+  * ``--search-bundles``: works split out of a file-host bundle (a MEGA
+    folder, a pixeldrain list or filesystem share) are found through the
+    bundle id, which is unique: one forum search per bundle, every work
+    from that bundle gets the topic. Ambiguous hits (several topics) are
+    reported and skipped.
   * ``--local-tags``: tags derived offline, added only when absent —
     ``source-<site>`` (e621, iwara, …), ``pack-<bundle>`` for split
     children, ``len-…`` buckets (forum names) from the L0 script's length.
@@ -253,6 +258,27 @@ def loose_key(name: str) -> str:
             break
         s = t
     return QueueManager._match_key(s)
+
+
+_BUNDLE_RES = [
+    ("mega", re.compile(r"mega\.nz/(?:folder/|#F!)([A-Za-z0-9_-]{8})")),
+    ("pixeldrain-fs", re.compile(r"pixeldrain\.com/api/filesystem/([A-Za-z0-9]{6,})")),
+    ("pixeldrain-fs", re.compile(r"pixeldrain\.com/d/([A-Za-z0-9]{6,})")),
+    ("pixeldrain-list", re.compile(r"pixeldrain\.com/l/([A-Za-z0-9]{6,})")),
+]
+
+
+def bundle_keys(pair: dict | None) -> set[str]:
+    """Unique bundle ids a pair's items came from (MEGA folder, pixeldrain
+    filesystem root / list). A lone pixeldrain file id is not a bundle."""
+    out: set[str] = set()
+    for it in (pair or {}).get("items") or []:
+        u = it.get("url") or ""
+        for _kind, rx in _BUNDLE_RES:
+            m = rx.search(u)
+            if m:
+                out.add(m.group(1))
+    return out
 
 
 def pack_tag(parent_name: str) -> str:
@@ -500,9 +526,17 @@ async def forum_phase(works: list[tuple[Path, dict]], args, report: list[str]) -
             except (KeyError, TypeError, ValueError):
                 pass
         done = 0
-        for work, sc in works:
+        topic_cache: dict[int, dict] = {}      # many works share one bundle topic
+        if args.search_bundles:
+            bundle_topics = await bundle_phase(fetcher, works, args, report, counts)
+        else:
+            bundle_topics = {}
+        for i, (work, sc) in enumerate(works):
             if args.limit and done >= args.limit:
                 break
+            if str(work) in bundle_topics:
+                sc = lib.read_sidecar(work) or sc
+                works[i] = (work, sc)
             src = sc.get("source") or {}
             tid = src.get("topic_id") if src.get("site") == "eroscripts" else None
             forum_tags = [t for t in (sc.get("tags") or []) if not str(t).startswith(("len-", "source-", "pack-"))]
@@ -583,7 +617,11 @@ async def forum_phase(works: list[tuple[Path, dict]], args, report: list[str]) -
                 sc = lib.read_sidecar(work) or sc
             else:
                 done += 1
-            topic = await _guarded(fetcher, f"{FORUM}/t/{tid}.json", args)
+            topic = topic_cache.get(tid)
+            if topic is None:
+                topic = await _guarded(fetcher, f"{FORUM}/t/{tid}.json", args)
+                if topic is not None:
+                    topic_cache[tid] = topic
             if topic is None:
                 counts["errors"] += 1
                 report.append(f"- NOTOPIC `{work.name}` (topic {tid})")
@@ -601,6 +639,55 @@ async def forum_phase(works: list[tuple[Path, dict]], args, report: list[str]) -
         if args.apply:
             MISSES_FILE.write_text(json.dumps(misses, ensure_ascii=False, indent=1), encoding="utf-8")
     return counts
+
+
+async def bundle_phase(fetcher, works, args, report, counts) -> dict[str, int]:
+    """One forum search per bundle id; returns {work path: topic id} for the
+    works whose topic it set. Writes source into their sidecars."""
+    from urllib.parse import quote
+    pairs = load_pairs()
+    by_folder, by_title = index_pairs(pairs)
+    by_key: dict[str, list[Path]] = {}
+    for work, sc in works:
+        if (sc.get("source") or {}).get("topic_id") or not sc.get("pair_id"):
+            continue
+        for k in bundle_keys(find_pair(work, by_folder, by_title)):
+            by_key.setdefault(k, []).append(work)
+    report.append(f"- bundles to look up: {len(by_key)} (covering {sum(len(v) for v in by_key.values())} work(s))")
+    out: dict[str, int] = {}
+    for key, folders in sorted(by_key.items(), key=lambda kv: -len(kv[1])):
+        res = await _guarded(fetcher, f"{FORUM}/search.json?q={quote(key)}", args)
+        counts["bundle_searched"] = counts.get("bundle_searched", 0) + 1
+        if res is None:
+            counts["errors"] += 1
+            continue
+        topics = [t for t in (res.get("topics") or []) if isinstance(t, dict) and t.get("id")]
+        # a topic whose matching post is the OP is the bundle's own thread
+        op_topics = {pp.get("topic_id") for pp in (res.get("posts") or [])
+                     if isinstance(pp, dict) and pp.get("post_number") == 1}
+        cands = [t for t in topics if t["id"] in op_topics] or topics
+        if not cands:
+            counts["bundle_missed"] = counts.get("bundle_missed", 0) + 1
+            report.append(f"- BUNDLE-MISS `{key}` ({len(folders)} work(s))")
+            continue
+        if len(cands) > 1:
+            counts["bundle_ambiguous"] = counts.get("bundle_ambiguous", 0) + 1
+            report.append(f"- BUNDLE-AMBIGUOUS `{key}` ({len(folders)} work(s)): " +
+                          "; ".join(f"{t['id']} \"{t.get('title')}\"" for t in cands[:4]))
+            continue
+        hit = cands[0]
+        tid = int(hit["id"])
+        src = {"site": "eroscripts", "topic_id": tid,
+               "url": f"{FORUM}/t/{hit.get('slug') or 'topic'}/{tid}"}
+        counts["bundle_found"] = counts.get("bundle_found", 0) + 1
+        report.append(f"- BUNDLE `{key}` → topic {tid} \"{hit.get('title')}\" ({len(folders)} work(s))")
+        for w in folders:
+            if str(w) in out:
+                continue
+            if args.apply:
+                lib.update_sidecar(w, {"source": src})
+            out[str(w)] = tid
+    return out
 
 
 async def _guarded(fetcher, url: str, args):
@@ -633,6 +720,8 @@ def main() -> None:
     ap.add_argument("--retry-misses", action="store_true")
     ap.add_argument("--search-loose", action="store_true",
                     help="second pass over recorded misses: prefix-stripped title + author confirmation")
+    ap.add_argument("--search-bundles", action="store_true",
+                    help="find the topic of file-host bundles by their id; all works from the bundle get it")
     ap.add_argument("--local-tags", action="store_true",
                     help="add source-<site> / pack-<bundle> / len-* tags derived offline")
     ap.add_argument("--limit", type=int, default=0, help="max forum lookups this run")
@@ -690,7 +779,7 @@ def main() -> None:
             works.append((work, merged))
     report.append(f"offline: {counts}")
     print(f"offline: {counts}", flush=True)
-    if args.forum or args.search or args.search_loose:
+    if args.forum or args.search or args.search_loose or args.search_bundles:
         fc = asyncio.run(forum_phase(works, args, report))
         report.append(f"forum: {fc}")
         print(f"forum: {fc}", flush=True)
