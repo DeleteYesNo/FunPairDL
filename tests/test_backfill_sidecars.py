@@ -40,8 +40,14 @@ def test_load_log_topics_keeps_only_unambiguous(tmp_path):
         "x Page loaded: https://discuss.eroscripts.com/t/two-titles-alike/222\n"
         "x Page loaded: https://discuss.eroscripts.com/t/two-titles-alike/333\n",
         encoding="utf-8")
+    long_slug = "a-very-long-topic-slug-that-runs-right-up-to-the-log-limit-xyz"
+    trunc_url = f"https://discuss.eroscripts.com/t/{long_slug}/12345"[:100]
+    assert len(trunc_url) == 100
+    with open(log, "a", encoding="utf-8") as f:
+        f.write("x Page loaded: " + trunc_url + "\n")
     t = bf.load_log_topics(log)
     assert t[bf.QueueManager._match_key("casey sample demo load")] == "111"
+    assert bf.QueueManager._match_key(long_slug.replace("-", " ")) not in t     # truncated → ignored
     assert bf.QueueManager._match_key("two titles alike") not in t
 
 
