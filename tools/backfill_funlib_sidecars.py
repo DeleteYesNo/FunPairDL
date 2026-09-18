@@ -19,6 +19,21 @@ Phase 3 — ``--search``: for works with no topic, search the forum for the
   title and take the hit whose title matches; misses are remembered in
   ``_backfill_misses.json`` and not retried unless ``--retry-misses``.
 
+Second pass for the leftovers (run after the first):
+  * offline, always: a bundle's auto-split children inherit the parent
+    pair's topic (from the "Auto-split" log lines); a pair sent from a
+    topic page gets that topic when exactly one topic page was loaded in
+    the foreground during the minute before and its slug overlaps the
+    pair's name.
+  * ``--search-loose``: for recorded misses whose name carries an
+    "(Author)" prefix, search without the prefix and accept a hit only when
+    the prefix-stripped titles match AND the author is confirmed (the hit's
+    title names the author, or the topic's OP is the author). Every
+    acceptance is listed in the report as LOOSE for review.
+  * ``--local-tags``: tags derived offline, added only when absent —
+    ``source-<site>`` (e621, iwara, …), ``pack-<bundle>`` for split
+    children, ``len-…`` buckets (forum names) from the L0 script's length.
+
 Forum requests go through the running app's embedded browser (CDP, port
 9223) so the login cookies never leave it; without the app they use the
 saved cookies directly (only safe while the app is NOT running).
@@ -52,6 +67,12 @@ from funpairdl.utils import discourse  # noqa: E402
 
 STAMP = time.strftime("%Y%m%d-%H%M%S")
 FORUM = discourse.FORUM_BASE
+LOOSE_WINDOW_S = 60
+LEN_BUCKETS = [(2, "len-0-2"), (5, "len-2-5"), (10, "len-5-10"), (25, "len-10-25"),
+               (60, "len-25-60"), (None, "len-60-plus")]      # forum tag names, minutes
+SOURCE_SITES = {"e621.net": "e621", "e926.net": "e621", "iwara.tv": "iwara", "socigames.com": "socigames",
+                "hmvmania.com": "hmvmania", "rule34video.com": "rule34video", "rule34.xxx": "rule34",
+                "hanime1.me": "hanime"}
 MISSES_FILE = ROOT / "_backfill_misses.json"
 _LOG_TOPIC_RE = re.compile(r"discuss\.eroscripts\.com/t/([^/\s\"'?#]+)/(\d+)")
 
@@ -128,6 +149,154 @@ def load_log_topics(log_path: Path = LOG_FILE) -> dict[str, str]:
     return {k: next(iter(v)) for k, v in seen.items() if len(v) == 1}
 
 
+_SPLIT_CHILD_RE = re.compile(r"Auto-split: created pair '(.*)' \(\d+ items\)$")
+_SPLIT_PARENT_RE = re.compile(r"Auto-split: original pair '(.*)' split into (\d+) pairs$")
+_ADDED_RE = re.compile(r"^(\S+ \S+) \[INFO\] funpairdl\.queue_manager: Added pair: (.*) \(\d+ items\)$")
+_PAGE_RE = re.compile(r"^(\S+ \S+) \[INFO\] funpairdl\.gui\.browser: Page loaded in [\d.]+s \(foreground, ok=True\): "
+                      r"https://discuss\.eroscripts\.com/t/([^/\s]+)/(\d+)")
+
+
+def load_log_split_children(log_path: Path = LOG_FILE) -> dict[str, str]:
+    """child pair name → parent pair name, from the auto-split log lines
+    (the N "created pair" lines precede their "original pair … split into N")."""
+    out: dict[str, str] = {}
+    pending: list[str] = []
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                m = _SPLIT_CHILD_RE.search(line)
+                if m:
+                    pending.append(m.group(1))
+                    continue
+                m = _SPLIT_PARENT_RE.search(line)
+                if m:
+                    n = int(m.group(2))
+                    for child in pending[-n:]:
+                        out[child] = m.group(1)
+                    pending = []
+    except OSError:
+        pass
+    return out
+
+
+def _tokens(s: str) -> set[str]:
+    return {t for t in re.split(r"[^0-9a-z\u3040-\u30ff\u4e00-\u9fff]+", (s or "").lower()) if len(t) >= 2}
+
+
+def _overlaps(slug: str, name: str) -> bool:
+    sk = QueueManager._match_key(slug.replace("-", " "))
+    nk = QueueManager._title_key(name)
+    if len(sk) >= 6 and len(nk) >= 6 and (sk in nk or nk in sk):
+        return True
+    a, b = _tokens(slug.replace("-", " ")), _tokens(name)
+    return bool(a and b) and len(a & b) / len(a | b) >= 0.5
+
+
+def load_log_sent_from_topic(log_path: Path = LOG_FILE) -> dict[str, str]:
+    """title key of a pair name → topic id, for pairs added within a minute
+    after exactly one topic page was loaded in the foreground, when that
+    topic's slug overlaps the pair name. Ambiguous names are dropped."""
+    seen: dict[str, set[str]] = {}
+    recent: list[tuple[datetime, str, str]] = []      # (time, slug, topic id)
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.rstrip("\n")
+                m = _PAGE_RE.match(line)
+                if m:
+                    at = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                    recent.append((at, m.group(2), m.group(3)))
+                    recent = [r for r in recent if (at - r[0]).total_seconds() <= LOOSE_WINDOW_S]
+                    continue
+                m = _ADDED_RE.match(line)
+                if not m:
+                    continue
+                at = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                name = m.group(2)
+                window = [r for r in recent if 0 <= (at - r[0]).total_seconds() <= LOOSE_WINDOW_S]
+                topics = {r[2]: r[1] for r in window}
+                if len(topics) != 1:
+                    continue
+                tid, slug = next(iter(topics.items()))
+                if not _overlaps(slug, name):
+                    continue
+                k = QueueManager._title_key(name)
+                if len(k) >= 4:
+                    seen.setdefault(k, set()).add(tid)
+    except OSError:
+        pass
+    return {k: next(iter(v)) for k, v in seen.items() if len(v) == 1}
+
+
+def strip_author_prefix(name: str) -> str:
+    return re.sub(r"^(\s*[\(\[（【][^\)\]）】]*[\)\]）】]\s*)+", "", name or "").strip()
+
+
+def loose_key(name: str) -> str:
+    """Title key with the leading "(Author)" groups and trailing qualifier
+    tags removed — what a loose forum match compares."""
+    s = strip_author_prefix(name)
+    while True:
+        t = QueueManager._QUALIFIER_RE.sub("", s)
+        if t == s:
+            break
+        s = t
+    return QueueManager._match_key(s)
+
+
+def pack_tag(parent_name: str) -> str:
+    slug = re.sub(r"[^0-9a-z\u3040-\u30ff\u4e00-\u9fff]+", "-", strip_author_prefix(parent_name).lower()).strip("-")
+    if len(slug) > 40:
+        slug = slug[:40].rsplit("-", 1)[0] if "-" in slug[:40] else slug[:40]
+    return f"pack-{slug.strip('-')}" if slug else ""
+
+
+def len_tag(seconds: float | None) -> str:
+    if not seconds or seconds <= 0:
+        return ""
+    minutes = seconds / 60.0
+    for limit, tag in LEN_BUCKETS:
+        if limit is None or minutes < limit:
+            return tag
+    return ""
+
+
+def source_tags(pair: dict | None) -> set[str]:
+    out: set[str] = set()
+    from urllib.parse import urlparse
+    for it in (pair or {}).get("items") or []:
+        host = (urlparse(it.get("url") or "").hostname or "").lower()
+        for h, site in SOURCE_SITES.items():
+            if host == h or host.endswith("." + h):
+                out.add(f"source-{site}")
+    return out
+
+
+def local_tags(work: Path, sidecar: dict, pair: dict | None, parent_name: str) -> list[str]:
+    """Tags to add (absent ones only): source site, pack, length bucket."""
+    have = {str(t).lower() for t in (sidecar.get("tags") or [])}
+    add: list[str] = []
+    if not any(t.startswith("source-") for t in have):
+        add.extend(sorted(source_tags(pair)))
+    if parent_name and not any(t.startswith("pack-") for t in have):
+        pt = pack_tag(parent_name)
+        if pt:
+            add.append(pt)
+    if not any(t.startswith("len-") for t in have):
+        from funpairdl.utils.media_duration import funscript_info
+        main = next((v for v in sidecar.get("variants") or [] if v.get("primary")), None)
+        l0 = (main or {}).get("files", {}).get("L0") if main else None
+        if l0:
+            try:
+                info = funscript_info((work / l0).read_bytes())
+                lt = len_tag(info.get("duration"))
+                if lt:
+                    add.append(lt)
+            except OSError:
+                pass
+    return [t for t in add if t.lower() not in have]
+
+
 def to_utc_iso(local_iso: str) -> str:
     try:
         dt = datetime.fromisoformat(local_iso)
@@ -155,10 +324,15 @@ def repair_op_author(existing: dict | None, title: str, folder: str) -> dict | N
     return fixed
 
 
+def find_pair(work: Path, by_folder: dict, by_title: dict) -> dict | None:
+    return by_folder.get(work.name.lower()) or by_title.get(QueueManager._title_key(work.name))
+
+
 def offline_sidecar(work: Path, by_folder: dict, by_title: dict,
-                    topic_by_pair: dict, log_topics: dict) -> dict:
+                    topic_by_pair: dict, log_topics: dict,
+                    split_parents: dict | None = None, sent_from: dict | None = None) -> dict:
     folder = work.name
-    pair = by_folder.get(folder.lower()) or by_title.get(QueueManager._title_key(folder))
+    pair = find_pair(work, by_folder, by_title)
     title = (pair.get("name") if pair else "") or folder
     data: dict = {"version": lib.SIDECAR_VERSION, "title": title}
     author = lib.author_from_name(title) or lib.author_from_name(folder)
@@ -188,6 +362,24 @@ def offline_sidecar(work: Path, by_folder: dict, by_title: dict,
                 tid = int(log_topics[key])
                 url = f"{FORUM}/t/{tid}"
                 break
+    # second pass: a topic the pair was sent from (foreground page + name overlap)
+    if not url and sent_from:
+        for key in (QueueManager._title_key(title), QueueManager._title_key(folder)):
+            if key in sent_from:
+                tid = int(sent_from[key])
+                url = f"{FORUM}/t/{tid}"
+                break
+    # second pass: a bundle's child inherits the parent pair's topic
+    if not url and split_parents:
+        parent_name = split_parents.get(title) or split_parents.get(folder)
+        parent = by_title.get(QueueManager._title_key(parent_name)) if parent_name else None
+        if parent:
+            purl = (parent.get("source_url") or "").strip()
+            ptid = lib.topic_id_from_url(purl) if purl and lib.source_site(purl) == "eroscripts" else None
+            if not ptid and parent["id"] in topic_by_pair:
+                ptid = int(topic_by_pair[parent["id"]][0])
+            if ptid:
+                tid, url = ptid, f"{FORUM}/t/{ptid}"
     if url:
         src = {"site": lib.source_site(url), "url": url}
         if tid:
@@ -269,7 +461,8 @@ class CookieFetcher:
 
 async def forum_phase(works: list[tuple[Path, dict]], args, report: list[str]) -> dict:
     """Fill forum fields; returns counters."""
-    counts = {"enriched": 0, "searched": 0, "found": 0, "missed": 0, "errors": 0, "skipped_miss": 0}
+    counts = {"enriched": 0, "searched": 0, "found": 0, "missed": 0, "errors": 0, "skipped_miss": 0,
+              "loose_found": 0, "loose_rejected": 0}
     if _port_open(args.cdp_port):
         fetcher = CdpFetcher(args.cdp_port)
         how = f"CDP :{args.cdp_port}"
@@ -304,18 +497,29 @@ async def forum_phase(works: list[tuple[Path, dict]], args, report: list[str]) -
             needs = not (sc.get("tags") and sc.get("category") and sc.get("posted_at") and sc.get("posted_by"))
             if tid and not needs:
                 continue
+            loose_author = ""
             if not tid:
-                if not args.search:
-                    continue
-                key = QueueManager._title_key(sc.get("title") or work.name)
-                if len(key) < 4:
-                    continue
-                if str(work) in misses and not args.retry_misses:
-                    counts["skipped_miss"] += 1
+                title = sc.get("title") or work.name
+                is_miss = str(work) in misses
+                if args.search_loose and is_miss:
+                    # second pass: prefix-stripped title, author must be confirmed
+                    loose_author = lib.author_from_name(title) or lib.author_from_name(work.name)
+                    key = loose_key(title)
+                    if not loose_author or len(key) < 4:
+                        continue
+                    q = strip_author_prefix(title)
+                elif args.search:
+                    key = QueueManager._title_key(title)
+                    if len(key) < 4:
+                        continue
+                    if is_miss and not args.retry_misses:
+                        counts["skipped_miss"] += 1
+                        continue
+                    q = title
+                else:
                     continue
                 done += 1
                 counts["searched"] += 1
-                q = sc.get("title") or work.name
                 from urllib.parse import quote
                 res = await _guarded(fetcher, f"{FORUM}/search.json?q={quote(q)}", args)
                 if res is None:
@@ -323,16 +527,43 @@ async def forum_phase(works: list[tuple[Path, dict]], args, report: list[str]) -
                     continue
                 hit = None
                 for t in res.get("topics") or []:
-                    if isinstance(t, dict) and QueueManager._title_key(str(t.get("title") or "")) == key:
+                    if not isinstance(t, dict):
+                        continue
+                    ht = str(t.get("title") or "")
+                    if loose_author:
+                        if loose_key(ht) == key:
+                            hit = t
+                            break
+                    elif QueueManager._title_key(ht) == key:
                         hit = t
                         break
                 if hit is None:
                     counts["missed"] += 1
                     misses[str(work)] = q
-                    report.append(f"- MISS `{work.name}`")
+                    if not loose_author:
+                        report.append(f"- MISS `{work.name}`")
                     continue
-                counts["found"] += 1
                 tid = int(hit["id"])
+                if loose_author:
+                    # confirm the author: named in the hit's title, or the OP
+                    ht = str(hit.get("title") or "")
+                    op = next((str(pp.get("username") or "") for pp in res.get("posts") or []
+                               if isinstance(pp, dict) and pp.get("topic_id") == tid and pp.get("post_number") == 1), "")
+                    confirmed = (loose_author.lower() in ht.lower()
+                                 or (op and op.lower() == loose_author.lower()))
+                    if not confirmed:
+                        topic_doc = await _guarded(fetcher, f"{FORUM}/t/{tid}.json", args)
+                        opname = ((topic_doc or {}).get("details") or {}).get("created_by", {}).get("username", "")
+                        confirmed = bool(opname) and opname.lower() == loose_author.lower()
+                    if not confirmed:
+                        counts["loose_rejected"] += 1
+                        report.append(f"- LOOSE-REJECT `{work.name}` ~ topic {tid} \"{ht}\" (author {loose_author} not confirmed)")
+                        continue
+                    counts["loose_found"] += 1
+                    report.append(f"- LOOSE `{work.name}` → topic {tid} \"{ht}\"")
+                    misses.pop(str(work), None)
+                else:
+                    counts["found"] += 1
                 src = {"site": "eroscripts", "topic_id": tid,
                        "url": f"{FORUM}/t/{hit.get('slug') or 'topic'}/{tid}"}
                 if args.apply:
@@ -388,6 +619,10 @@ def main() -> None:
     ap.add_argument("--forum", action="store_true", help="fetch topic JSON for works with a topic id")
     ap.add_argument("--search", action="store_true", help="search the forum for works without a topic")
     ap.add_argument("--retry-misses", action="store_true")
+    ap.add_argument("--search-loose", action="store_true",
+                    help="second pass over recorded misses: prefix-stripped title + author confirmation")
+    ap.add_argument("--local-tags", action="store_true",
+                    help="add source-<site> / pack-<bundle> / len-* tags derived offline")
     ap.add_argument("--limit", type=int, default=0, help="max forum lookups this run")
     ap.add_argument("--delay", type=float, default=1.5, help="seconds between forum requests")
     ap.add_argument("--only", default="", help="only work folders whose name contains this")
@@ -402,17 +637,22 @@ def main() -> None:
     by_folder, by_title = index_pairs(pairs)
     topic_by_pair = load_topic_index()
     log_topics = load_log_topics()
+    split_parents = load_log_split_children()
+    sent_from = load_log_sent_from_topic()
     report = [f"# funlib.json backfill {STAMP} ({'APPLY' if args.apply else 'DRY RUN'})",
               f"roots: {', '.join(str(r) for r in roots)}; pairs known: {len(pairs)}; "
-              f"topic index links: {len(topic_by_pair)}; log topic slugs: {len(log_topics)}", ""]
-    counts = {"works": 0, "written": 0, "unchanged": 0, "with_pair": 0, "with_topic": 0, "no_pair": 0}
+              f"topic index links: {len(topic_by_pair)}; log topic slugs: {len(log_topics)}; "
+              f"split children: {len(split_parents)}; sent-from-topic names: {len(sent_from)}", ""]
+    counts = {"works": 0, "written": 0, "unchanged": 0, "with_pair": 0, "with_topic": 0, "no_pair": 0,
+              "local_tagged": 0}
     works: list[tuple[Path, dict]] = []
     for root in roots:
         for work in lib.iter_work_dirs(root):
             if args.only and args.only.lower() not in work.name.lower():
                 continue
             counts["works"] += 1
-            data = offline_sidecar(work, by_folder, by_title, topic_by_pair, log_topics)
+            data = offline_sidecar(work, by_folder, by_title, topic_by_pair, log_topics,
+                                   split_parents, sent_from)
             if data.get("pair_id"):
                 counts["with_pair"] += 1
             else:
@@ -422,6 +662,13 @@ def main() -> None:
             original = lib.read_sidecar(work)
             existing = repair_op_author(original, data.get("title") or work.name, work.name)
             merged = lib.merge_sidecar(existing, data)
+            if args.local_tags:
+                pair = find_pair(work, by_folder, by_title)
+                pname = split_parents.get(data.get("title") or "") or split_parents.get(work.name) or ""
+                extra = local_tags(work, merged, pair, pname)
+                if extra:
+                    merged["tags"] = list(merged.get("tags") or []) + extra
+                    counts["local_tagged"] += 1
             if merged != (original or {}):
                 counts["written"] += 1
                 if args.apply:
@@ -431,7 +678,7 @@ def main() -> None:
             works.append((work, merged))
     report.append(f"offline: {counts}")
     print(f"offline: {counts}", flush=True)
-    if args.forum or args.search:
+    if args.forum or args.search or args.search_loose:
         fc = asyncio.run(forum_phase(works, args, report))
         report.append(f"forum: {fc}")
         print(f"forum: {fc}", flush=True)
