@@ -44,7 +44,7 @@ def is_meta_dir(name: str) -> bool:
     """Folders under a library root that are not works and must be treated
     as absent: FunLib's ``_trash``, de-dup quarantine, download temp."""
     n = (name or "").lower()
-    return n == TRASH_DIR or n.startswith("_dup_quarantine") or n == ".parts"
+    return n == TRASH_DIR or n.startswith("_dup_quarantine") or n.startswith(".")
 
 
 def in_trash(path: Path) -> bool:
@@ -72,6 +72,18 @@ def library_roots(download_dir: Path | str | None = None, extra: list[str] | Non
         seen.add(rp)
         out.append(p)
     return out
+
+
+def has_media(folder: Path) -> bool:
+    """A work folder holds a video or a funscript directly inside it; a
+    folder of sub-folders (a pack) or of stray files is not a work."""
+    try:
+        for f in folder.iterdir():
+            if f.is_file() and (f.suffix.lower() in VIDEO_EXTS or f.name.lower().endswith(".funscript")):
+                return True
+    except OSError:
+        pass
+    return False
 
 
 def iter_work_dirs(root: Path, include_no_video: bool = True):

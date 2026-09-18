@@ -71,8 +71,12 @@ def test_iter_work_dirs_skips_trash_and_enters_no_video(tmp_path):
     (tmp_path / "_dup_quarantine_20260916" / "Work C").mkdir(parents=True)
     (tmp_path / "No Video" / "Work D").mkdir(parents=True)
     (tmp_path / "loose.mp4").write_bytes(b"x")
+    (tmp_path / ".claude").mkdir()
     names = sorted(d.name for d in lib.iter_work_dirs(tmp_path))
     assert names == ["Work A", "Work D"]
+    (tmp_path / "Pack" / "Sub").mkdir(parents=True)
+    (tmp_path / "Work A" / "Work A.funscript").write_bytes(b"x")
+    assert lib.has_media(tmp_path / "Work A") and not lib.has_media(tmp_path / "Pack")
     assert lib.in_trash(tmp_path / "_trash" / "x" / "Work B")
     assert not lib.in_trash(tmp_path / "Work A")
 
