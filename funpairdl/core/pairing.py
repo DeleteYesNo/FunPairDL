@@ -183,6 +183,23 @@ class Group:
 FUZZY_MATCH_THRESHOLD = 0.78
 
 
+def group_name(videos: list["Candidate"], scripts: list["Candidate"]) -> str:
+    """Folder name for a group: the shortest member stem (axis suffix
+    dropped from scripts). Members share a normalized key, so they differ
+    only in noise — "Work (nude).mp4", "Work (stockings).mp4" and
+    "Work.funscript" are one work called "Work", not "Work (nude)"."""
+    stems: list[str] = []
+    for v in videos:
+        stems.append(v.name.rsplit(".", 1)[0] if "." in v.name else v.name)
+    for sc in scripts:
+        st = sc.name.rsplit(".", 1)[0] if "." in sc.name else sc.name
+        stems.append(AXIS_SUFFIX.sub("", st))
+    stems = [st.strip() for st in stems if st.strip()]
+    if not stems:
+        return ""
+    return min(stems, key=len)
+
+
 def pair_files(candidates: list[Candidate]) -> list[Group]:
     """Group the given candidates into Pair-shaped groups.
 
@@ -215,7 +232,7 @@ def pair_files(candidates: list[Candidate]) -> list[Group]:
 
     for (parent, norm_key), bucket in same_dir.items():
         if bucket["v"] and bucket["s"]:
-            name = bucket["v"][0].name.rsplit(".", 1)[0]
+            name = group_name(bucket["v"], bucket["s"])
             groups.append(Group(
                 name=name,
                 videos=list(bucket["v"]),
@@ -244,7 +261,7 @@ def pair_files(candidates: list[Candidate]) -> list[Group]:
             # Only the unused ones reach here; flag MEDIUM because the
             # files live in different directories, which can mean either
             # mirror or unrelated coincidence.
-            name = bucket["v"][0].name.rsplit(".", 1)[0]
+            name = group_name(bucket["v"], bucket["s"])
             groups.append(Group(
                 name=name,
                 videos=list(bucket["v"]),

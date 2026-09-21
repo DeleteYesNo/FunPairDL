@@ -951,3 +951,52 @@ class TestOrganizeDedupOnRedownload:
         assert existing.exists()
         assert dl.exists()                          # variant kept, not deleted
         assert len(list(tmp_path.glob("*.mp4"))) == 2
+
+
+class TestVariantVideosStayOneWork:
+    """Two renders of one work on the same host with a single script set
+    (a picker batch of "Work (nude).mp4", "Work (stockings).mp4" and
+    "Work[.axis].funscript") are one pair — the split once made two folders
+    and dealt the axis set out between them."""
+
+    @staticmethod
+    def _v(fid, name):
+        return PairItem(url=f"https://pixeldrain.com/u/{fid}", filename=name, file_type=FileType.VIDEO)
+
+    @staticmethod
+    def _s(fid, name):
+        return PairItem(url=f"https://pixeldrain.com/u/{fid}", filename=name, file_type=FileType.FUNSCRIPT)
+
+    def test_two_renders_with_one_script_set_do_not_split(self):
+        items = [
+            self._v("aaaa1111", "[Auth] Work Title (nude).mp4"),
+            self._v("bbbb2222", "[Auth] Work Title (stockings).mp4"),
+            self._s("cccc3333", "[Auth] Work Title.funscript"),
+            self._s("dddd4444", "[Auth] Work Title.pitch.funscript"),
+            self._s("eeee5555", "[Auth] Work Title.surge.funscript"),
+        ]
+        qm = QueueManager()
+        assert qm.plan_bundle_split(items, None, "[Auth] Work Title") is None
+        assert qm._auto_split_bundle_pair(Pair(name="[Auth] Work Title", items=items)) is None
+
+    def test_parts_with_their_own_scripts_still_split(self):
+        items = [
+            self._v("aaaa1111", "Scene (part 1).mp4"),
+            self._v("bbbb2222", "Scene (part 2).mp4"),
+            self._s("cccc3333", "Scene (part 1).funscript"),
+            self._s("dddd4444", "Scene (part 2).funscript"),
+        ]
+        groups = QueueManager().plan_bundle_split(items, None, "Scene")
+        assert groups is not None and len(groups) == 2
+        for g in groups:
+            assert len(g["videos"]) == 1 and len(g["scripts"]) == 1
+            assert g["scripts"][0].filename.startswith(g["videos"][0].filename.rsplit(".", 1)[0])
+
+    def test_same_titled_posts_without_a_tag_stay_apart(self):
+        # Identical names on one host are two posts titled alike, not variants.
+        items = [
+            self._v("aaaa1111", "Same Title.mp4"),
+            self._v("bbbb2222", "Same Title.mp4"),
+            self._s("cccc3333", "Same Title.funscript"),
+        ]
+        assert QueueManager().plan_bundle_split(items, None, "Same Title") is not None

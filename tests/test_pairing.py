@@ -127,3 +127,29 @@ class TestPairFiles:
         # Different normalized keys → no pairing → two LOW orphans.
         assert len(groups) == 2
         assert all(g.is_orphan for g in groups)
+
+
+class TestGroupName:
+    def test_two_renders_and_one_script_set_are_named_after_the_work(self):
+        # Two renders of one work plus its axis set share a key, so they are
+        # one group — and the group is the work, not the first render.
+        cands = [
+            Candidate(key=1, name="[Auth] Work Title (nude).mp4", kind=FileKind.VIDEO, parent_path="/b"),
+            Candidate(key=2, name="[Auth] Work Title (stockings).mp4", kind=FileKind.VIDEO, parent_path="/b"),
+            Candidate(key=3, name="[Auth] Work Title.funscript", kind=FileKind.SCRIPT, parent_path="/b"),
+            Candidate(key=4, name="[Auth] Work Title.pitch.funscript", kind=FileKind.SCRIPT, parent_path="/b"),
+            Candidate(key=5, name="[Auth] Work Title.surge.funscript", kind=FileKind.SCRIPT, parent_path="/b"),
+        ]
+        groups = pair_files(cands)
+        assert len(groups) == 1
+        assert groups[0].name == "[Auth] Work Title"
+        assert groups[0].confidence == Confidence.HIGH
+        assert len(groups[0].videos) == 2 and len(groups[0].scripts) == 3
+
+    def test_single_video_keeps_its_own_stem(self):
+        cands = [
+            Candidate(key=1, name="Work [1080p].mp4", kind=FileKind.VIDEO, parent_path="/b"),
+            Candidate(key=2, name="Work.funscript", kind=FileKind.SCRIPT, parent_path="/b"),
+        ]
+        groups = pair_files(cands)
+        assert len(groups) == 1 and groups[0].name == "Work"

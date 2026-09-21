@@ -573,3 +573,73 @@ class TestSidecar:
         assert sc["tags"] == ["hmv"] and sc["posted_at"] == "2026-01-01T00:00:00Z"
         assert sc["downloaded_at"] == "2026-01-02T00:00:00Z" and sc["pair_id"] == "oldpair"
         assert sc["variants"][0]["files"] == {"L0": "(Someone) Work.funscript"}
+
+
+class TestSecondMainVideoIsVariant:
+    """A second, different video in Main is a variant of the work (a batch of
+    two renders with one script set): it lands as `<work> (<tag>).mp4` with
+    a copy of Main's L0 so FunLib lists it, the other axes inherited."""
+
+    def _pair(self, out, names):
+        items = [
+            PairItem(url=f"https://pixeldrain.com/u/vid{i}", filename=n, file_type=FileType.VIDEO)
+            for i, n in enumerate(names)
+        ] + [
+            PairItem(url="https://pixeldrain.com/u/s0", filename="Work Title.funscript", file_type=FileType.FUNSCRIPT),
+            PairItem(url="https://pixeldrain.com/u/s1", filename="Work Title.pitch.funscript", file_type=FileType.FUNSCRIPT),
+            PairItem(url="https://pixeldrain.com/u/s2", filename="Work Title.surge.funscript", file_type=FileType.FUNSCRIPT),
+        ]
+        return _make_pair(str(out), "Work Title", items)
+
+    def test_different_second_video_becomes_variant_with_copied_L0(self, tmp_path):
+        out = tmp_path / "Work Title"
+        _touch(out / "Work Title (nude).mp4", size=100)
+        (out / "Work Title (stockings).mp4").write_bytes(b"y" * 150)
+        (out / "Work Title.funscript").write_bytes(b'{"actions":[]}')
+        _touch(out / "Work Title.pitch.funscript")
+        _touch(out / "Work Title.surge.funscript")
+        pair = self._pair(out, ["Work Title (nude).mp4", "Work Title (stockings).mp4"])
+
+        _organize(pair)
+
+        assert (out / "Work Title.mp4").read_bytes() == b"x" * 100
+        assert (out / "Work Title (stockings).mp4").read_bytes() == b"y" * 150
+        assert not (out / "Work Title (nude).mp4").exists()
+        assert (out / "Work Title (stockings).funscript").read_bytes() == b'{"actions":[]}'
+        assert not (out / "Work Title (stockings).pitch.funscript").exists()
+        v = _variants(out)
+        assert v["Main"]["video"] == "Work Title.mp4"
+        assert set(v["Main"]["files"]) == {"L0", "pitch", "surge"}
+        assert v["stockings"] == {"label": "stockings", "video": "Work Title (stockings).mp4",
+                                  "files": {"L0": "Work Title (stockings).funscript"}}
+        assert pair.alt_group_config["Alt 1"]["label"] == "stockings"
+        assert pair.items[1].group == "Alt 1"
+        assert pair.items[1].filename == "Work Title (stockings).mp4"
+
+    def test_identical_second_video_is_still_dropped(self, tmp_path):
+        out = tmp_path / "Work Title"
+        _touch(out / "Work Title (nude).mp4", size=100)
+        _touch(out / "Work Title (mirror).mp4", size=100)
+        _touch(out / "Work Title.funscript")
+        _touch(out / "Work Title.pitch.funscript")
+        _touch(out / "Work Title.surge.funscript")
+        pair = self._pair(out, ["Work Title (nude).mp4", "Work Title (mirror).mp4"])
+
+        _organize(pair)
+
+        assert sorted(p.name for p in out.glob("*.mp4")) == ["Work Title.mp4"]
+        assert not (out / "Work Title (mirror).funscript").exists()
+        assert list(_variants(out)) == ["Main"]
+        assert pair.alt_group_config == {}
+
+
+class TestVariantTag:
+    def test_tag_the_primary_lacks(self):
+        assert QueueManager._variant_tag("Work (stockings).mp4", "Work (nude).mp4") == "stockings"
+        assert QueueManager._variant_tag("[Auth] Work [4K].mp4", "[Auth] Work [1080p].mp4") == "4K"
+
+    def test_suffix_after_common_prefix(self):
+        assert QueueManager._variant_tag("Work 4K.mp4", "Work.mp4") == "4K"
+
+    def test_nothing_distinguishing(self):
+        assert QueueManager._variant_tag("Work.mp4", "Work (x).mp4") == ""

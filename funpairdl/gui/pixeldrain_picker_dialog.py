@@ -90,6 +90,12 @@ class PickerResult:
     rename_direction: str  # "off" | "video_first" | "script_first"
     auto_rename: bool = True   # False => skip rename for this Pair (orphans)
     output_dir_override: str = ""  # empty -> use global download_dir
+    # Real names/sizes the picker already knows (url -> name / bytes). Without
+    # them the queue guesses a name from the URL: a pixeldrain /u/<id> gives
+    # an opaque "aB3dE9fG.mp4", and the bundle auto-split then took two such
+    # ids for two different works and named the folders after them.
+    filenames: dict[str, str] = field(default_factory=dict)
+    sizes: dict[str, int] = field(default_factory=dict)
 
 
 # ── Async worker that owns its own event loop ───────────────────────────
@@ -1244,9 +1250,16 @@ class PixeldrainPickerDialog(QDialog):
         if self.cb_merge.isChecked():
             name = self.merged_name_edit.text().strip() or "Pixeldrain Pair"
             videos, scripts = [], []
+            filenames: dict[str, str] = {}
+            sizes: dict[str, int] = {}
             for it in leaves:
                 t = it.data(0, ROLE_AS_TYPE) or "other"
                 u = url_for(it)
+                n: FsNode = it.data(0, ROLE_NODE)
+                if n.name:
+                    filenames[u] = n.name
+                if n.size:
+                    sizes[u] = int(n.size)
                 if t == "script":
                     scripts.append(u)
                 else:
@@ -1257,7 +1270,8 @@ class PixeldrainPickerDialog(QDialog):
             auto_rename = direction != "off" and bool(videos and scripts)
             return [PickerResult(name, videos, scripts, direction,
                                  auto_rename=auto_rename,
-                                 output_dir_override=self._current_output_override())]
+                                 output_dir_override=self._current_output_override(),
+                                 filenames=filenames, sizes=sizes)]
 
         # ── Normal mode: heuristic-based grouping with preview ──
         candidates: list[Candidate] = []
@@ -1317,10 +1331,13 @@ class PixeldrainPickerDialog(QDialog):
         # Translate Groups to PickerResults
         results: list[PickerResult] = []
         for g in groups:
+            members = list(g.videos) + list(g.others) + list(g.scripts)
             videos = [leaf_to_url[c.key] for c in g.videos]
             scripts = [leaf_to_url[c.key] for c in g.scripts]
             # `others` go into video bucket so they download as files
             videos.extend(leaf_to_url[c.key] for c in g.others)
+            filenames = {leaf_to_url[c.key]: c.name for c in members if c.name}
+            sizes = {leaf_to_url[c.key]: int(c.size) for c in members if c.size}
             # Orphans (no video OR no script) skip auto-rename regardless of
             # the user's selection — there is nothing to rename against.
             auto_rename = direction != "off" and not g.is_orphan
@@ -1331,6 +1348,8 @@ class PixeldrainPickerDialog(QDialog):
                 rename_direction=direction,
                 auto_rename=auto_rename,
                 output_dir_override=self._current_output_override(),
+                filenames=filenames,
+                sizes=sizes,
             ))
         return results
 

@@ -653,6 +653,8 @@ class MainWindow(QMainWindow):
                     script_urls=result.script_urls,
                     auto_rename=result.auto_rename,
                     output_dir_override=result.output_dir_override,
+                    filenames=result.filenames,
+                    sizes=result.sizes,
                 )
         self._pending_clipboard_urls = []
 

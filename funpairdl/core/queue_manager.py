@@ -2057,6 +2057,26 @@ class QueueManager:
             else:
                 unmatched_scripts.append(s)
 
+        # Scripts that fit every video equally are the work's scripts, and
+        # the videos are its variants: "Work (nude).mp4" + "Work
+        # (stockings).mp4" with "Work[.axis].funscript" is one work, not
+        # two. Containment gave every script to the video with the longest
+        # key and left the other bare; the order rescue below would then deal
+        # the axis set out between the two folders. Same-host videos with one
+        # mirror key are otherwise kept apart (two booru posts titled alike),
+        # so this only applies when their names do differ by a tag and at
+        # most one of them holds a name match.
+        if not labels and len(videos) >= 2 and len(h_videos) == len(videos):
+            mkeys = {self._mirror_key(_identity(v)) for v in videos}
+            mkeys.discard("")
+            idents = {Path(_identity(v)).stem.lower() for v in videos}
+            name_holders = sum(
+                1 for v, _, _ in video_info
+                if any(basis.get(id(sc)) == "name" for sc in matched[id(v)])
+            )
+            if len(mkeys) == 1 and len(idents) > 1 and name_holders <= 1:
+                return None
+
         # Document-order rescue for orphan scripts. EroScripts authors usually
         # lay a bundle out as "video, then its script, next video, its
         # script, …", so a script's partner is the video at the same position.
@@ -2334,6 +2354,56 @@ class QueueManager:
             pair.alt_group_config.setdefault(alt_name, {"inherit_multi_axis": True})
             for it in items:
                 it.group = alt_name
+
+    def _autopromote_extra_main_videos(self, pair: Pair, output_dir: Path) -> None:
+        """A second, different video in Main is a variant of the work
+        ("Work (nude).mp4" next to "Work (stockings).mp4" with one script
+        set): give it an implicit Alt group named by what sets it apart, so
+        it lands as `<base> (<tag>).<ext>` with Main's L0 beside it (the alt
+        loop in _organize_output copies that). Byte-identical mirrors are
+        left to the Main loop, which drops them."""
+        main_videos = [
+            it for it in pair.items
+            if (it.group or "Main") == "Main" and it.file_type == FileType.VIDEO
+            and (output_dir / it.filename).exists()
+        ]
+        if len(main_videos) <= 1:
+            return
+        primary = main_videos[0]
+        used = set(pair.alt_group_config.keys()) | {it.group for it in pair.items if it.group}
+        next_n = 1
+        for extra in main_videos[1:]:
+            if self._same_file(output_dir / extra.filename, output_dir / primary.filename):
+                continue
+            while f"Alt {next_n}" in used:
+                next_n += 1
+            alt_name = f"Alt {next_n}"
+            used.add(alt_name)
+            tag = self._variant_tag(extra.filename, primary.filename)
+            pair.alt_group_config[alt_name] = {"inherit_multi_axis": True, "display_name": tag}
+            extra.group = alt_name
+            logger.info("Second Main video is a variant: %s -> %s (%s)",
+                        extra.filename, alt_name, tag or "Alt")
+
+    _TAG_RE = re.compile(r"[\[\(【]([^\]\)】]+)[\]\)】]")
+
+    @classmethod
+    def _variant_tag(cls, name: str, primary_name: str) -> str:
+        """What sets a variant video apart from the primary one, as a label:
+        its bracketed tags the primary lacks ("Work (stockings)" next to
+        "Work (nude)" -> "stockings"), else whatever follows their common
+        prefix ("Work 4K" next to "Work" -> "4K"). Empty when nothing does,
+        and the group label then falls back to the scripter or "Alt"."""
+        stem, pstem = Path(name).stem, Path(primary_name).stem
+        theirs = {t.strip().lower() for t in cls._TAG_RE.findall(pstem)}
+        tags = [t.strip() for t in cls._TAG_RE.findall(stem)
+                if t.strip() and t.strip().lower() not in theirs]
+        if tags:
+            return lib.sanitize_label(" ".join(tags), fallback="")
+        i = 0
+        while i < min(len(stem), len(pstem)) and stem[i].lower() == pstem[i].lower():
+            i += 1
+        return lib.sanitize_label(stem[i:], fallback="")
 
     _VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".wmv", ".ts", ".flv"}
 
@@ -2733,6 +2803,7 @@ class QueueManager:
         # Main into implicit Alt groups (legacy flat-list submissions
         # relied on this).
         self._autopromote_main_collisions(pair)
+        self._autopromote_extra_main_videos(pair, output_dir)
 
         # ─── Partition items by group ───
         # Treat empty group (legacy queue) as "Main".
@@ -2913,6 +2984,22 @@ class QueueManager:
                     logger.info("Variant (%s): %s -> %s", label, src.name, new_name)
                 except OSError as e:
                     logger.error("Failed to rename %s: %s", src.name, e)
+            # A variant that brought its own video but no stroke script is
+            # played with the work's scripts. FunLib knows a variant only by
+            # its L0 file, so it gets a copy of Main's; the other axes are
+            # inherited at play time like any variant's.
+            if own_video is not None and not any(
+                    self._parse_axis(s.filename)[0] == "L0" for s in alt_scripts):
+                import shutil
+                main_l0 = output_dir / lib.script_name(base_name, "", "")
+                l0_dest = output_dir / lib.script_name(base_name, label, "")
+                if main_l0.exists() and not l0_dest.exists():
+                    try:
+                        shutil.copyfile(main_l0, l0_dest)
+                        logger.info("Variant (%s) has a video but no L0: copied %s -> %s",
+                                    label, main_l0.name, l0_dest.name)
+                    except OSError as e:
+                        logger.error("Failed to copy %s for variant %s: %s", main_l0.name, label, e)
             if not bool(cfg.get("inherit_multi_axis", True)):
                 overrides.setdefault(label, {})["inherit_axes"] = False
 
