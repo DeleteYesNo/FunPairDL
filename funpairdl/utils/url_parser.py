@@ -99,6 +99,20 @@ def source_label(provider_name: str, url: str) -> str:
     return host
 
 
+def is_eroscripts_page(url: str) -> bool:
+    """True for an https page on eroscripts.com or a subdomain of it.
+
+    Exact host match on purpose: this gates the embedded browser's bridge,
+    so "eroscripts.com.evil.example" or ".../?eroscripts.com" must not pass.
+    """
+    try:
+        p = urlparse(url)
+        host = (p.hostname or "").lower()
+    except Exception:
+        return False
+    return p.scheme == "https" and (host == "eroscripts.com" or host.endswith(".eroscripts.com"))
+
+
 # Match Pixeldrain file or list URLs in arbitrary text
 import re
 

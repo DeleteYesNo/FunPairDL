@@ -35,6 +35,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from funpairdl.utils.url_parser import is_eroscripts_page
+
 logger = logging.getLogger("funpairdl.gui.browser")
 
 API_URL = "http://127.0.0.1:9172/api"
@@ -89,6 +91,10 @@ class _BridgeDispatcher(QObject):
         # run on this thread, so a missing key means the tab is gone — drop.
         bridge = self._bridges.get(bridge_key)
         if bridge is None:
+            return
+        # The tab may have left EroScripts while the handler ran — a reply
+        # (credentials, config) must not land in whatever page is there now.
+        if not bridge.page_allowed():
             return
         bridge.messageResponse.emit(callback_id, payload)
 
@@ -677,9 +683,32 @@ class BrowserBridge(QObject):
         super().__init__(parent)
         self._core = core
         self._key = ""  # routing key, assigned by BridgeCore.register_bridge
+        self._refused_host: str | None = None  # log a refusing page once
+
+    def page_allowed(self) -> bool:
+        """Whether the page this tab shows now may use the bridge.
+
+        The bridge and content.js are injected profile-wide into the
+        MainWorld, so every site a tab visits (file hosts and their ads,
+        artist sites) can reach window.funpairdlBridge — and it answers
+        get-ero-credentials with the forum password and get-config with the
+        gofile token. content.js only acts on EroScripts, so that's the only
+        host let through. Only the main frame gets qt.webChannelTransport,
+        and a page-initiated navigation keeps page.url() on the old page
+        until it commits, so the tab URL is the sender's URL.
+        """
+        page = self.parent()
+        return page is not None and is_eroscripts_page(page.url().toString())
 
     @Slot(str, str, str)
     def sendMessage(self, msg_type: str, data_json: str, callback_id: str):
+        if not self.page_allowed():
+            page = self.parent()
+            host = page.url().host() if page is not None else "?"
+            if host != self._refused_host:
+                self._refused_host = host
+                logger.warning("Bridge: refused %s from %s (not EroScripts)", msg_type, host)
+            return
         try:
             data = json.loads(data_json) if data_json else {}
         except json.JSONDecodeError:

@@ -1,5 +1,5 @@
 """Tests for provider detection from a URL."""
-from funpairdl.utils.url_parser import detect_provider, source_label
+from funpairdl.utils.url_parser import detect_provider, is_eroscripts_page, source_label
 
 
 class TestDetectProvider:
@@ -56,3 +56,18 @@ class TestSourceLabel:
 
     def test_garbage_url_does_not_raise(self):
         assert source_label("direct", "not a url") == ""
+
+
+class TestIsEroscriptsPage:
+    def test_forum_pages(self):
+        assert is_eroscripts_page("https://discuss.eroscripts.com/t/some-topic/123")
+        assert is_eroscripts_page("https://eroscripts.com/")
+
+    def test_lookalikes_and_other_hosts(self):
+        assert not is_eroscripts_page("https://eroscripts.com.evil.example/")
+        assert not is_eroscripts_page("https://evil-eroscripts.com/")
+        assert not is_eroscripts_page("https://evil.example/?u=discuss.eroscripts.com")
+        assert not is_eroscripts_page("https://pixeldrain.com/u/AaAa0001")
+        assert not is_eroscripts_page("http://discuss.eroscripts.com/")  # not https
+        assert not is_eroscripts_page("about:blank")
+        assert not is_eroscripts_page("")
