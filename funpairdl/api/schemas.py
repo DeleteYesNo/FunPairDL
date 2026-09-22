@@ -32,6 +32,49 @@ class PairGroupSpec(BaseModel):
     # {file url: group label} — how the user arranged a bundle's files in the
     # panel. The backend splits the bundle by these labels instead of by name.
     bundle_plan: dict[str, str] | None = None
+    # {video url: [other urls of the same video]} — mirrors / re-encodes the
+    # panel decided not to download; tried in order if the chosen one fails.
+    alternates: dict[str, list[str]] | None = None
+
+
+class VideoCandidate(BaseModel):
+    url: str
+    name: str = ""
+    source: str = "OP"            # "OP" | "comment"
+    size: int = 0
+    height: int = 0
+    duration: float | None = None
+    priority: float = 99.0
+
+
+class VideoPlanRequest(BaseModel):
+    """Which of a post's video links to download (see core.video_plan)."""
+    videos: list[VideoCandidate] = []
+    pick_mode: str = ""           # "" = the setting
+    min_resolution: str = ""      # "" = the setting's default resolution
+    encode_vs_variant: str = ""   # "" = the setting
+    decisions: dict[str, str] = {}  # {url: "reencode" | "variant"}
+
+
+class LookupVideo(BaseModel):
+    url: str
+    resolved: str = ""
+    duration: float | None = None
+
+
+class LookupScript(BaseModel):
+    url: str
+    resolved: str = ""
+    name: str = ""
+    size: int = 0
+    duration: float | None = None
+
+
+class LibraryLookupRequest(BaseModel):
+    """Is this post's work already in the library? (see core.library_lookup)"""
+    title: str = ""
+    videos: list[LookupVideo] = []
+    scripts: list[LookupScript] = []
 
 
 class BundleFileSpec(BaseModel):
@@ -66,6 +109,7 @@ class AddPairRequest(BaseModel):
     filenames: dict[str, str] | None = None  # {url: real_filename} for probed files
     sizes: dict[str, int] | None = None  # {url: size_bytes} for probed files (>0 only)
     bundle_plan: dict[str, str] | None = None  # {url: group label}, see PairGroupSpec
+    alternates: dict[str, list[str]] | None = None  # {video url: fallback urls}, see PairGroupSpec
     # New grouped interface: each entry becomes its own folder slot
     # (Main = root, Alt N = subfolder), with optional multi-axis inheritance.
     groups: list[PairGroupSpec] | None = None
@@ -73,6 +117,9 @@ class AddPairRequest(BaseModel):
     auto_rename: bool = True  # Whether to rename files to pair name after download
     eroscripts_cookies: str = ""  # Sent by extension for authenticated downloads
     source_url: str = ""  # the forum topic this was sent from (topic index)
+    # An existing work folder to download INTO (the library already holds
+    # the video): scripts are reconciled into it as new axes / variants.
+    merge_into: str = ""
 
 
 class TopicRef(BaseModel):

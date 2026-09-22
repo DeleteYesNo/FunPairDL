@@ -17,6 +17,8 @@ from funpairdl.api.schemas import (
     StatusResponse,
     TopicStatusRequest,
     TopicVisitedRequest,
+    VideoPlanRequest,
+    LibraryLookupRequest,
 )
 from funpairdl.core.pair import ItemState, PairState
 from funpairdl.core.queue_manager import QueueManager
@@ -59,6 +61,12 @@ async def get_config() -> dict:
     return {
         "gofile_token": settings.gofile_token,
         "default_resolution": settings.default_resolution,
+        # What the panel decides on its own (Settings → Send decisions).
+        "video_pick_mode": settings.video_pick_mode,
+        "encode_vs_variant": settings.encode_vs_variant,
+        "collect_other_authors": settings.collect_other_authors,
+        "merge_into_library": settings.merge_into_library,
+        "batch_skip_identical": settings.batch_skip_identical,
     }
 
 
@@ -105,7 +113,9 @@ async def add_pair(req: AddPairRequest) -> dict:
         filenames=req.filenames,
         sizes=req.sizes,
         bundle_plan=req.bundle_plan,
+        alternates=req.alternates,
         source_url=req.source_url,
+        merge_into=req.merge_into,
     )
 
     logger.info("Pair added via API: %s (%d items)", pair.name, len(pair.items))
@@ -291,6 +301,43 @@ async def bundle_plan(req: BundlePlanRequest) -> dict:
             for g in groups
         ],
     }
+
+
+@router.post("/video/plan")
+async def video_plan(req: VideoPlanRequest) -> dict:
+    """Which of a post's video links to download: one per video (mirrors and
+    re-encodes become fallbacks), variants on their own, ambiguities listed
+    for the user. Preferences default to the settings."""
+    from funpairdl.core.video_plan import Prefs, VideoSpec, plan_videos
+    from funpairdl.persistence.settings import Settings
+
+    settings = await asyncio.to_thread(Settings.load)
+    prefs = Prefs(
+        pick_mode=req.pick_mode or settings.video_pick_mode or "smallest",
+        min_resolution=req.min_resolution or settings.default_resolution or "best",
+        encode_vs_variant=req.encode_vs_variant or settings.encode_vs_variant or "ask",
+    )
+    videos = [VideoSpec(url=v.url, name=v.name, source=v.source or "OP", size=int(v.size or 0),
+                        height=int(v.height or 0), duration=float(v.duration or 0),
+                        priority=float(v.priority))
+              for v in req.videos if v.url]
+    return await asyncio.to_thread(plan_videos, videos, prefs, dict(req.decisions or {}))
+
+
+@router.post("/library/lookup")
+async def library_lookup(req: LibraryLookupRequest) -> dict:
+    """Is the post's work already in the library, and which of its scripts
+    are new? (see core.library_lookup)"""
+    from funpairdl.core import library_lookup as ll
+
+    qm = _get_qm()
+    with qm._pairs_lock:
+        live = list(qm.pairs)
+    roots = await asyncio.to_thread(qm._library_dirs)
+    return await asyncio.to_thread(
+        ll.lookup, req.title,
+        [v.model_dump() for v in req.videos], [s.model_dump() for s in req.scripts],
+        live, roots, QueueManager._title_key, QueueManager._match_key, QueueManager._parse_axis)
 
 
 @router.post("/probe")

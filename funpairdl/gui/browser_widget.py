@@ -580,6 +580,19 @@ class BridgeCore:
                     respond(callback_id, await r.json())
                 return
 
+            if msg_type in ("video-plan", "library-lookup"):
+                # Panel decisions: which video links to download, and whether
+                # the library already holds this work (see /video/plan,
+                # /library/lookup).
+                path = "video/plan" if msg_type == "video-plan" else "library/lookup"
+                s = self._get_session()
+                async with s.post(
+                    f"{API_URL}/{path}", json=data or {},
+                    timeout=aiohttp.ClientTimeout(total=20),
+                ) as r:
+                    respond(callback_id, await r.json())
+                return
+
             if msg_type == "get-config":
                 s = self._get_session()
                 async with s.get(

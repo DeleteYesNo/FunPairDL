@@ -238,7 +238,7 @@ check("topic id null on blank", ctx._topicIdFromUrl("about:blank"), null);
 
 // ── batch selection persistence key ──
 check("sel key from topic url",
-  ctx._batchSelKey("https://discuss.eroscripts.com/t/some-slug/777/2"), "fpdl_batch_sel_777");
+  ctx._batchSelKey("https://discuss.eroscripts.com/t/some-slug/777/2"), "fpdl_batch_sel2_777");
 check("sel key null for non-topic", ctx._batchSelKey("https://discuss.eroscripts.com/latest"), null);
 
 // ── probe cache TTL: entries older than 30 min are re-probed ──
@@ -511,6 +511,48 @@ check("external script row shows its host", extRow.includes('<span class="funpai
   check("only the forum's read mark", b({ state: "" }, true), "visited:👁 看過");
   check("nothing known → no badge", b({ state: "" }, false), null);
   check("no status at all → no badge", b(undefined, false), null);
+}
+
+// ── batch tiering: only open questions reach the user ──
+{
+  const none = ctx._batchDecisions({ ambiguous: [], workPlanSplit: false, workBasis: "", bundleBasis: [],
+    hasVideos: true, checkedVideos: 1, mergeInto: "", probeFailedAll: false, otherAuthorCommentScripts: 0 });
+  check("tier: nothing open -> no decisions", none.length, 0);
+  check("tier: auto", ctx._batchTier(none, { nothingSelected: false }), "auto");
+
+  const amb = ctx._batchDecisions({ ambiguous: [{ url: "u", name: "Work v2.mp4", tag: "v2" }],
+    hasVideos: true, checkedVideos: 1 });
+  check("tier: ambiguous encode/variant asks", amb.length, 1);
+  check("tier: ambiguous kind", amb[0].kind, "ambiguous");
+  check("tier: ask", ctx._batchTier(amb, { nothingSelected: false }), "ask");
+
+  const guessed = ctx._batchDecisions({ workPlanSplit: true, workBasis: "order", hasVideos: true, checkedVideos: 2 });
+  check("tier: guessed pairing asks", guessed.map((d) => d.kind).join(","), "pairing");
+  const named = ctx._batchDecisions({ workPlanSplit: true, workBasis: "name", hasVideos: true, checkedVideos: 2 });
+  check("tier: named pairing is settled", named.length, 0);
+
+  const bundle = ctx._batchDecisions({ bundleBasis: ["name", "order"], hasVideos: true, checkedVideos: 1 });
+  check("tier: weak bundle group asks", bundle.map((d) => d.kind).join(","), "bundle");
+
+  const novid = ctx._batchDecisions({ hasVideos: true, checkedVideos: 0, mergeInto: "", probeFailedAll: true });
+  check("tier: no usable video asks", novid[0].kind, "novideo");
+  const merged = ctx._batchDecisions({ hasVideos: true, checkedVideos: 0, mergeInto: "F:/lib/Work" });
+  check("tier: merged work needs no video", merged.length, 0);
+
+  const comments = ctx._batchDecisions({ hasVideos: true, checkedVideos: 1, otherAuthorCommentScripts: 2 });
+  check("tier: collection comment scripts ask", comments[0].kind, "comments");
+
+  check("tier: dead", ctx._batchTier([], { dead: true }), "dead");
+  check("tier: library has it all -> done", ctx._batchTier([], { nothingSelected: true, libraryHasWork: true }), "done");
+  check("tier: nothing selected without a library hit -> ask", ctx._batchTier([], { nothingSelected: true }), "ask");
+}
+
+// ── send prefs: header controls override the settings ──
+{
+  const p = ctx._currentPrefs({ video_pick_mode: "best_quality", collect_other_authors: false });
+  check("prefs: settings pass through without header controls", p.video_pick_mode, "best_quality");
+  check("prefs: resolution floor defaults to best", p.min_resolution, "best");
+  check("prefs: other authors from settings", p.collect_other_authors, false);
 }
 
 if (failures) {

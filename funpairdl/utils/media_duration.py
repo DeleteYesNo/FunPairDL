@@ -332,3 +332,49 @@ async def probe_media_duration(
     except Exception as e:
         logger.debug("duration probe failed for %s: %s", url[:80], e)
         return None
+
+
+# ---------------------------------------------------------------------------
+# local files
+# ---------------------------------------------------------------------------
+
+def local_media_duration(path) -> float | None:
+    """Seconds of a video file on disk (mp4/mov/m4v via moov, webm/mkv via
+    EBML), or None. Reads at most the head and the moov atom."""
+    from pathlib import Path as _P
+    p = _P(path)
+    try:
+        size = p.stat().st_size
+        with open(p, "rb") as f:
+            head = f.read(HEAD_BYTES)
+            if not head:
+                return None
+            if head[:4] == b"\x1a\x45\xdf\xa3":
+                return webm_duration(head)
+            if len(head) < 8 or head[4:8] not in (b"ftyp", b"moov", b"mdat", b"free", b"wide", b"skip"):
+                return None
+            step, arg = mp4_plan(head, 0)
+            hops = 0
+            while hops < MAX_HOPS * 4:
+                hops += 1
+                if step == "done":
+                    return arg
+                if step == "fail":
+                    return None
+                if step == "fetch":
+                    off, length = arg
+                    if off < 0 or off >= size:
+                        return None
+                    f.seek(off)
+                    return mp4_duration_from_moov(f.read(length))
+                if step == "header":
+                    off = arg
+                    if off < 0 or off + 16 > size:
+                        return None
+                    f.seek(off)
+                    step, arg = mp4_plan(f.read(16), off)
+                    continue
+                return None
+    except OSError:
+        return None
+    return None

@@ -126,6 +126,25 @@ class Settings:
     reconcile_on_redownload: bool = True
     library_paths: list[str] = field(default_factory=list)
 
+    # ── What the panel decides for the user before sending (2026-09-23) ──
+    # One download per video: mirrors and re-encodes of it become fallbacks.
+    # "smallest" = the smallest file that meets the resolution floor (the
+    # panel's Resolution pick), "best_quality" = the highest resolution.
+    video_pick_mode: str = "smallest"
+    # A name that differs only by a version word ("v2", "final") could be a
+    # re-encode (one download) or a variant (its own file): "ask" the user
+    # once per link, or always take it as "reencode" / "variant".
+    encode_vs_variant: str = "ask"
+    # Scripts posted by someone other than the OP (comments, other topics)
+    # are collected as (Author) variants of the work.
+    collect_other_authors: bool = True
+    # A post whose video the library already holds: skip the video and
+    # merge the scripts into that work as variants.
+    merge_into_library: bool = True
+    # Scripts identical to what the work already has are excluded from the
+    # send and listed once in the batch overlay.
+    batch_skip_identical: bool = True
+
     @classmethod
     def load(cls, path: Path = CONFIG_FILE) -> Settings:
         global _cache, _cache_path, _cache_time

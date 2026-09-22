@@ -1286,6 +1286,9 @@ function parseAllPosts(rootOverride, titleOverride, metaMapOverride) {
     return arr.filter(item => { if (seen.has(item[key])) return false; seen.add(item[key]); return true; });
   }
 
+  // Who posted the topic: scripts from anyone else are "other authors'".
+  const _opUsername = ((perPost.find((p) => p.isOP) || {}).username) || _username(posts[0]) || "";
+
   // Collection mode: only when 2+ sections each have their own video(s).
   // Multiple video URLs within the SAME section are mirrors (same video, different hosts),
   // not separate content. Posts with 1 video section + multiple script sections should
@@ -1298,6 +1301,7 @@ function parseAllPosts(rootOverride, titleOverride, metaMapOverride) {
       return {
         mode: "collection",
         title,
+        opUsername: _opUsername,
         sections,
         commentVideos: cVideos,
         commentScripts: cScripts,
@@ -1335,7 +1339,7 @@ function parseAllPosts(rootOverride, titleOverride, metaMapOverride) {
       } else {
         altCounter += 1;
         groupName = `Alt ${altCounter}`;
-        autoGroups.push({ name: groupName, sourceLabel: _label(p) });
+        autoGroups.push({ name: groupName, sourceLabel: _label(p), username: p.username || "" });
       }
       for (const v of sg.videos) allVideos.push({ ...v, autoGroup: groupName });
       for (const s of sg.scripts) allScripts.push({ ...s, autoGroup: groupName });
@@ -1376,6 +1380,7 @@ function parseAllPosts(rootOverride, titleOverride, metaMapOverride) {
   return {
     mode: "single",
     title,
+    opUsername: _opUsername,
     videos: dedupedVideos,
     scripts: dedupedScripts,
     autoGroups: liveAutoGroups,
@@ -1582,6 +1587,7 @@ async function sendPairToServer(data) {
       filenames: g.filenames || {},
       sizes: g.sizes || {},   // probed byte sizes {url: bytes}, >0 only
       bundle_plan: g.bundlePlan || {},  // bundle file url → sub-group label
+      alternates: g.alternates || {},   // chosen video url → fallback urls
       inherit_multi_axis: g.inheritMultiAxis !== false,
       display_name: (g.displayName || "").trim(),
     }));
@@ -1598,7 +1604,12 @@ async function sendPairToServer(data) {
     if (data.sizes && Object.keys(data.sizes).length > 0) {
       payload.sizes = data.sizes;
     }
+    if (data.alternates && Object.keys(data.alternates).length > 0) {
+      payload.alternates = data.alternates;
+    }
   }
+  // The library already holds the video: download into that work's folder.
+  if (data.mergeInto) payload.merge_into = data.mergeInto;
   // In embedded mode, send data directly; in extension, wrap in "data" field
   if (window.funpairdlBridge) {
     return await _sendMsg("send-pair", payload);
@@ -2057,6 +2068,7 @@ function populateSingleItems(panel, parsed) {
 
   _attachGroupBlockEvents(panel, parsed);
   _updateInheritancePreviews(panel, parsed);
+  _loadSendPrefs().then((p) => _applyAuthorPolicy(panel, parsed, _currentPrefs(p)));
 }
 
 // ─── Panel UI: Collection mode ───
@@ -2312,6 +2324,7 @@ function createPanel(parsed) {
 
 function setupProbing(panel, parsed) {
   const probeResults = {};
+  _watchUserTouches(panel);
 
   function updateVideoSize(probeKey, info) {
     const sizeEl = panel.querySelector(`[data-probe="${probeKey}"]`);
@@ -2415,12 +2428,18 @@ function setupProbing(panel, parsed) {
     const sizeEl = panel.querySelector(`[data-probe="${probeKey}"]`);
     if (!sizeEl) return;
     sizeEl.textContent = "...";
+    _probeBegin(panel, probeKey);
     probeUrl(v.url).then((info) => {
       if (!info) {
         sizeEl.textContent = "?";
+        v.probeFailed = true;
         _retryLater(probeKey, () => probeVideo(v, probeKey));
+        _probeEnd(panel, parsed, probeKey);
         return;
       }
+      v.probeFailed = false;
+      // A folder/list link: its files are planned in their own dropdown.
+      v.probedIsBundle = Array.isArray(info.files) && info.files.length > 0;
       probeResults[probeKey] = info;
       // A file-locker URL (pixeldrain /u/, mega /file/, ...) carries no type
       // hint, so a funscript hosted there is initially treated as a "video".
@@ -2429,10 +2448,15 @@ function setupProbing(panel, parsed) {
       if (Array.isArray(info.tags) && info.tags.length) v.probedTags = info.tags;
       if (info.thumbnail) v.probedThumb = info.thumbnail;
       if (info.duration) v.probedDuration = Number(info.duration) || 0;
+      // What the video plan compares: bytes and the best height on offer.
+      v.probedSize = Number(info.size) || 0;
+      v.probedHeight = Math.max(0, ...((info.formats || []).map((f) => Number(f.height) || 0)));
       updateVideoSize(probeKey, info);
       showProbeExtras(sizeEl, probeKey, info);
       _attachMediaHints(sizeEl.closest(".funpairdl-item"), info);
       _scheduleWorkPlan(panel, parsed);
+      _scheduleVideoPlan(panel, parsed);
+      _probeEnd(panel, parsed, probeKey);
     });
   }
 
@@ -2440,10 +2464,12 @@ function setupProbing(panel, parsed) {
     const sizeEl = panel.querySelector(`[data-probe="${probeKey}"]`);
     if (!sizeEl) return;
     sizeEl.textContent = "...";
+    _probeBegin(panel, probeKey);
     const handleResult = (info) => {
       if (!info) {
         sizeEl.textContent = "?";
         _retryLater(probeKey, () => probeScript(s, probeKey));
+        _probeEnd(panel, parsed, probeKey);
         return;
       }
       probeResults[probeKey] = info;
@@ -2451,12 +2477,17 @@ function setupProbing(panel, parsed) {
         .filter(Boolean).join(" · ");
       if (info.duration) s.probedDuration = Number(info.duration) || 0;
       if (info.video_url) s.probedLink = info.video_url;
+      s.probedSize = Number(info.size) || 0;
       showProbeExtras(sizeEl, probeKey, info);
       _scheduleWorkPlan(panel, parsed);
+      _probeEnd(panel, parsed, probeKey);
     };
     if (s.url.includes("discuss.eroscripts.com/uploads/short-url/")) {
       resolveShortUrl(s.url).then((resolved) => {
-        if (resolved === s.url) { sizeEl.textContent = "?"; return; }
+        if (resolved === s.url) { sizeEl.textContent = "?"; _probeEnd(panel, parsed, probeKey); return; }
+        // The CDN path's basename is the upload's sha1 — the library lookup
+        // tells an identical script by it.
+        s.resolvedUrl = resolved;
         probeUrl(resolved).then(handleResult);
       });
     } else {
@@ -2476,6 +2507,13 @@ function setupProbing(panel, parsed) {
     parsed.videos.forEach((v, i) => probeVideo(v, `video-${i}`));
     parsed.scripts.forEach((s, i) => probeScript(s, `script-${i}`));
   }
+
+  // The decisions (which video to download, is the work in the library)
+  // need the probes' names, sizes and durations: they run once every probe
+  // has answered, or after 20 s regardless.
+  if (panel._probeSettleTimer) clearTimeout(panel._probeSettleTimer);
+  panel._probeSettleTimer = setTimeout(() => _onProbesSettled(panel, parsed), PROBE_SETTLE_TIMEOUT_MS);
+  if (!panel._probePending || panel._probePending.size === 0) _onProbesSettled(panel, parsed);
 
   // Resolution change → update all video sizes
   const resSelect = document.getElementById("funpairdl-resolution");
@@ -2513,6 +2551,8 @@ function setupProbing(panel, parsed) {
       chrome.storage.local.set({ preferredResolution: resSelect.value });
     }
     for (const [key, info] of Object.entries(probeResults)) updateVideoSize(key, info);
+    // The resolution is the floor the video pick honours.
+    _scheduleVideoPlan(panel, parsed);
   });
 }
 
@@ -2651,7 +2691,7 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
   // bucket first is to keep the group association after resolution.
   const buckets = {}; // groupName → { videoUrls, scriptUrls, scriptAuthorMap }
   function _bucket(g) {
-    if (!buckets[g]) buckets[g] = { videoUrls: [], scriptUrls: [], scriptAuthorMap: {}, filenames: {}, bundlePlan: {} };
+    if (!buckets[g]) buckets[g] = { videoUrls: [], scriptUrls: [], scriptAuthorMap: {}, filenames: {}, bundlePlan: {}, alternates: {} };
     return buckets[g];
   }
   const bundlePlan = panel._bundlePlan || {};
@@ -2664,6 +2704,8 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
     const b = _bucket(gname);
     // Work group the row was placed in by the pairing preview (plain rows).
     if (bundlePlan[video.url]) b.bundlePlan[video.url] = bundlePlan[video.url];
+    // Mirrors / re-encodes the video plan set aside: tried only on failure.
+    if (panel._alternates && panel._alternates[video.url]) b.alternates[video.url] = [...panel._alternates[video.url]];
     const bundleCbs = panel.querySelectorAll(`.funpairdl-bundle-cb[data-probe-key="${key}"]`);
     if (bundleCbs.length > 0) {
       bundleCbs.forEach((bcb) => {
@@ -2746,6 +2788,8 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
     const resolvedPlan = {};
     resolvedV.forEach((u, i) => { const lb = b.bundlePlan[b.videoUrls[i]]; if (lb) resolvedPlan[u] = lb; });
     resolvedS.forEach((u, i) => { const lb = b.bundlePlan[b.scriptUrls[i]]; if (lb) resolvedPlan[u] = lb; });
+    const resolvedAlternates = {};
+    resolvedV.forEach((u, i) => { const alts = b.alternates[b.videoUrls[i]]; if (alts && alts.length) resolvedAlternates[u] = alts; });
     groups.push({
       name: gname,
       videoUrls: resolvedV,
@@ -2754,12 +2798,21 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
       filenames: resolvedFilenames,
       sizes: resolvedSizes,
       bundlePlan: resolvedPlan,
+      alternates: resolvedAlternates,
       inheritMultiAxis: (parsed.groupState && parsed.groupState.inheritAxes[gname] !== false),
       displayName: (parsed.groupState && parsed.groupState.altNames && parsed.groupState.altNames[gname]) || "",
     });
   }
 
-  if (groups.length === 0) {
+  // The library already holds this video: the scripts go alone, into that
+  // work's folder, where organize reconciles them (new axes / variants).
+  const mergeInto = panel._mergeInto || "";
+  if (mergeInto) {
+    for (const g of groups) { g.videoUrls = []; g.alternates = {}; }
+  }
+  const liveGroups = groups.filter((g) => g.videoUrls.length || g.scriptUrls.length);
+
+  if (liveGroups.length === 0) {
     sendBtn.textContent = "Nothing selected!";
     setTimeout(() => { sendBtn.disabled = false; sendBtn.textContent = "Send to FunPairDL"; }, 2000);
     return { sent: 0, failed: 0, error: "nothing_selected" };
@@ -2767,7 +2820,7 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
 
   sendBtn.textContent = "Sending...";
   const result = await sendPairToServer({
-    title: parsed.title, groups,
+    title: parsed.title, groups: liveGroups, mergeInto,
     preferredResolution, autoRename,
     sourceUrl: parsed.sourceUrl || location.href,
   });
@@ -2863,6 +2916,7 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
     const scriptAuthorMap = {};
     const filenameMap = {};
     const bundlePlan = {};
+    const alternates = {};
 
     for (const row of bucket.videos) {
       const v = _collectionRowObject(parsed, row.name, row.value);
@@ -2891,6 +2945,7 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
           scriptUrls.push(v.url);
         } else {
           videoUrls.push(v.url);
+          if (panel._alternates && panel._alternates[v.url]) alternates[v.url] = [...panel._alternates[v.url]];
         }
       }
     }
@@ -2916,8 +2971,9 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
       Object.assign(existing.scriptAuthorMap, scriptAuthorMap);
       Object.assign(existing.filenameMap, filenameMap);
       Object.assign(existing.bundlePlan, bundlePlan);
+      Object.assign(existing.alternates, alternates);
     } else {
-      pairs.push({ name: pairName, videoUrls, scriptUrls, scriptAuthorMap, filenameMap, bundlePlan });
+      pairs.push({ name: pairName, videoUrls, scriptUrls, scriptAuthorMap, filenameMap, bundlePlan, alternates });
     }
   }
 
@@ -2961,6 +3017,9 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
     resolvedV.forEach((u, j) => { const sz = _probedSizeFor(p.videoUrls[j], u); if (sz > 0) resolvedSizes[u] = sz; });
     resolvedS.forEach((u, j) => { const sz = _probedSizeFor(p.scriptUrls[j], u); if (sz > 0) resolvedSizes[u] = sz; });
 
+    const resolvedAlternates = {};
+    resolvedV.forEach((u, j) => { const alts = (p.alternates || {})[p.videoUrls[j]]; if (alts && alts.length) resolvedAlternates[u] = alts; });
+
     sendBtn.textContent = `Sending (${i + 1}/${pairs.length})...`;
     const result = await sendPairToServer({
       title: p.name, videoUrls: resolvedV, scriptUrls: resolvedS,
@@ -2968,6 +3027,7 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
       filenames: resolvedFilenames,
       sizes: resolvedSizes,
       bundlePlan: p.bundlePlan || {},
+      alternates: resolvedAlternates,
       sourceUrl: parsed.sourceUrl || location.href,
     });
 
@@ -2996,6 +3056,516 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
     }, 3000);
   }
   return { sent: sentCount, failed: failCount, pairIds: sentPairIds };
+}
+
+
+// ─── Send decisions (Settings → Send decisions) ───
+// What the panel settles by itself before a send: which of several links
+// to one video is downloaded (the rest become fallbacks), whether the
+// library already holds the work (then only the scripts go, into it), and
+// whether other scripters' scripts are collected. Defaults come from the
+// app's settings; the batch overlay's header can override them per session.
+
+const _SEND_PREF_DEFAULTS = {
+  video_pick_mode: "smallest", encode_vs_variant: "ask", collect_other_authors: true,
+  merge_into_library: true, batch_skip_identical: true,
+};
+const PROBE_SETTLE_TIMEOUT_MS = 20000;
+const VIDEO_PLAN_DEBOUNCE_MS = 700;
+let _sendPrefsPromise = null;
+
+function _loadSendPrefs(force) {
+  if (!_sendPrefsPromise || force) {
+    _sendPrefsPromise = Promise.resolve()
+      .then(() => _sendMsg("get-config", {}))
+      .then((cfg) => ({ ..._SEND_PREF_DEFAULTS, ...((cfg && !cfg._error) ? cfg : {}) }))
+      .catch(() => ({ ..._SEND_PREF_DEFAULTS }));
+  }
+  return _sendPrefsPromise;
+}
+
+// The settings, overridden by whatever the overlay header currently says.
+function _currentPrefs(base) {
+  const p = { ...(base || _SEND_PREF_DEFAULTS) };
+  const pick = document.getElementById("funpairdl-pick-mode");
+  if (pick) p.video_pick_mode = pick.value;
+  const oa = document.getElementById("funpairdl-other-authors");
+  if (oa) p.collect_other_authors = oa.checked;
+  const res = document.getElementById("funpairdl-resolution");
+  p.min_resolution = res ? res.value : "best";
+  return p;
+}
+
+// A checkbox changed by the plan, not the user: change listeners still run
+// (select-all sync, work plan), but the row is not marked as touched.
+function _setChecked(panel, cb, val) {
+  if (!cb || cb.checked === !!val) return;
+  panel._silent = (panel._silent || 0) + 1;
+  cb.checked = !!val;
+  try { cb.dispatchEvent(new Event("change", { bubbles: true })); }
+  finally { panel._silent -= 1; }
+}
+
+// A row the user (un)ticked keeps that state through every re-plan.
+function _watchUserTouches(panel) {
+  if (panel._touchWatch) return;
+  panel._touchWatch = true;
+  panel.addEventListener("change", (e) => {
+    if (panel._silent) return;
+    const row = e.target && e.target.closest && e.target.closest(".funpairdl-item");
+    if (row) row.dataset.touched = "1";
+  });
+}
+
+function _setRowTag(row, cls, text, title) {
+  if (!row) return;
+  let tag = row.querySelector(".funpairdl-tag-vrole");
+  if (!text) { if (tag) tag.remove(); return; }
+  if (!tag) {
+    tag = document.createElement("span");
+    const size = row.querySelector(".funpairdl-size");
+    if (size) size.before(tag); else row.appendChild(tag);
+  }
+  tag.className = `funpairdl-tag-vrole funpairdl-vrole-${cls}`;
+  tag.textContent = text;
+  tag.title = title || "";
+}
+
+function _setPanelNote(panel, html) {
+  const body = panel.querySelector(".funpairdl-panel-body") || panel;
+  let note = body.querySelector(":scope > .funpairdl-panel-note");
+  if (!html) { if (note) note.remove(); return; }
+  if (!note) {
+    note = document.createElement("div");
+    note.className = "funpairdl-panel-note";
+    body.prepend(note);
+  }
+  note.innerHTML = html;
+}
+
+// ── probe bookkeeping: the decisions wait for every probe to answer ──
+function _probeBegin(panel, key) {
+  if (!panel._probePending) panel._probePending = new Set();
+  panel._probePending.add(key);
+}
+
+function _probeEnd(panel, parsed, key) {
+  if (!panel._probePending) return;
+  panel._probePending.delete(key);
+  if (panel._probePending.size === 0) _onProbesSettled(panel, parsed);
+}
+
+function _onProbesSettled(panel, parsed) {
+  if (panel._settleTimer) clearTimeout(panel._settleTimer);
+  panel._settleTimer = setTimeout(async () => {
+    if (!panel.parentNode) return;
+    panel._probesSettled = true;
+    try { await _refreshVideoPlan(panel, parsed); } catch (e) {}
+    try { await _runLibraryLookup(panel, parsed); } catch (e) {}
+    panel.dispatchEvent(new CustomEvent("fpdl-settled"));
+  }, 900);
+}
+
+// ── video plan: one download per video ──
+function _videoRowsForPlan(panel, parsed) {
+  const out = [];
+  const push = (v, key) => {
+    if (!v) return;
+    const row = panel.querySelector(`.funpairdl-item[data-key="${key}"]`);
+    if (!row) return;
+    // A bundle (folder/list) is planned inside its own dropdown — never as
+    // one video, even before its probe has listed the files.
+    if (v.isBundle || v.probedIsBundle || isBundleUrl(v.url)) return;
+    if (panel.querySelector(`.funpairdl-bundle-cb[data-probe-key="${key}"]`)) return;
+    out.push({ v, row, key });
+  };
+  if (parsed.mode === "collection") {
+    (parsed.sections || []).forEach((sec, si) => sec.videos.forEach((v, vi) => push(v, `sv-${si}-${vi}`)));
+    (parsed.commentVideos || []).forEach((v, i) => push(v, `cv-${i}`));
+  } else {
+    (parsed.videos || []).forEach((v, i) => push(v, `video-${i}`));
+  }
+  return out;
+}
+
+function _scriptRowsForLookup(panel, parsed) {
+  const out = [];
+  const push = (s, key) => {
+    if (!s) return;
+    const row = panel.querySelector(`.funpairdl-item[data-key="${key}"]`);
+    if (row) out.push({ s, row, key });
+  };
+  if (parsed.mode === "collection") {
+    (parsed.sections || []).forEach((sec, si) => sec.scripts.forEach((s, i) => push(s, `ss-${si}-${i}`)));
+    (parsed.commentScripts || []).forEach((s, i) => push(s, `cs-${i}`));
+  } else {
+    (parsed.scripts || []).forEach((s, i) => push(s, `script-${i}`));
+  }
+  return out;
+}
+
+function _scheduleVideoPlan(panel, parsed) {
+  if (panel._videoPlanTimer) clearTimeout(panel._videoPlanTimer);
+  panel._videoPlanTimer = setTimeout(() => { _refreshVideoPlan(panel, parsed); }, VIDEO_PLAN_DEBOUNCE_MS);
+}
+
+async function _refreshVideoPlan(panel, parsed) {
+  const rows = _videoRowsForPlan(panel, parsed);
+  if (rows.length === 0) return;
+  const prefs = _currentPrefs(await _loadSendPrefs());
+  const videos = rows.map(({ v }) => ({
+    url: v.url, name: v.probedFilename || "",
+    source: v.source === "OP" ? "OP" : "comment",
+    size: v.probedSize || _probeSizeEntry(v.url) || 0,
+    height: v.probedHeight || 0,
+    duration: v.probedDuration || null,
+    priority: Number(v.priority) || 99,
+  }));
+  const decisions = panel._encodeDecisions || {};
+  const key = JSON.stringify([videos, prefs.video_pick_mode, prefs.min_resolution,
+                              prefs.encode_vs_variant, decisions, !!panel._mergeInto]);
+  if (panel._videoPlanKey === key) return;
+  const seq = (panel._videoPlanSeq = (panel._videoPlanSeq || 0) + 1);
+  let plan = null;
+  try {
+    plan = await _sendMsg("video-plan", {
+      videos, pick_mode: prefs.video_pick_mode, min_resolution: prefs.min_resolution,
+      encode_vs_variant: prefs.encode_vs_variant, decisions,
+    });
+  } catch (e) { plan = null; }
+  if (seq !== panel._videoPlanSeq || !plan || !plan.roles) return;
+  panel._videoPlanKey = key;
+  _applyVideoPlan(panel, parsed, rows, plan);
+}
+
+function _applyVideoPlan(panel, parsed, rows, plan) {
+  panel._videoPlan = plan;
+  panel._alternates = {};
+  const groupOf = {};
+  for (const g of plan.groups || []) {
+    for (const u of Object.keys(g.members || {})) groupOf[u] = g;
+    if (g.chosen && (g.alternates || []).length) panel._alternates[g.chosen] = [...g.alternates];
+  }
+  for (const { v, row } of rows) {
+    const role = plan.roles[v.url] || "chosen";
+    const g = groupOf[v.url] || {};
+    const cb = row.querySelector('input[type="checkbox"][name]');
+    let text = "", cls = role, title = g.reason || "";
+    if (role === "chosen") text = (g.alternates || []).length ? "✔ 下載這個" : "";
+    else if (role === "alternate") { text = "備援"; title = title || "同一影片的另一個來源；首選失敗時才會用"; }
+    else if (role === "variant") text = g.tag ? `變體 (${g.tag})` : "變體";
+    else if (role === "ambiguous") { text = "待決定"; title = "另一編碼還是另一個版本？下方選一個"; }
+    else if (role === "unrelated") { text = "非本作品?"; title = title || "名稱與帖子的作品對不上；要的話自己勾"; }
+    if (panel._mergeInto) { text = "已在庫"; cls = "inlib"; title = "媒體庫已有這支影片，不下載"; }
+    _setRowTag(row, cls, text, title);
+    if (cb && !row.dataset.touched) {
+      _setChecked(panel, cb, !panel._mergeInto && (role === "chosen" || role === "variant"));
+    }
+    const ask = role === "ambiguous" ? (plan.ambiguous || []).find((a) => a.url === v.url) : null;
+    _renderAskRow(panel, parsed, row, v, ask);
+  }
+  panel.dispatchEvent(new CustomEvent("fpdl-plan-applied"));
+}
+
+// A link named only by a version word: the user says whether it is the same
+// video re-encoded (a fallback) or another render (its own download).
+function _renderAskRow(panel, parsed, row, v, ask) {
+  const next = row.nextElementSibling;
+  const existing = next && next.classList && next.classList.contains("funpairdl-ask-row") ? next : null;
+  if (!ask) { if (existing) existing.remove(); return; }
+  if (existing) return;
+  const el = document.createElement("div");
+  el.className = "funpairdl-ask-row";
+  const name = v.probedFilename || v.label || v.url;
+  el.innerHTML = `<span>「${escapeAttr(name)}」只比首選多了「${escapeAttr(ask.tag || "?")}」：</span>
+    <button type="button" data-choice="reencode">同一影片的另一編碼（當備援）</button>
+    <button type="button" data-choice="variant">另一個版本（獨立下載）</button>`;
+  el.addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-choice]");
+    if (!b) return;
+    e.preventDefault();
+    e.stopPropagation();
+    panel._encodeDecisions = panel._encodeDecisions || {};
+    panel._encodeDecisions[v.url] = b.dataset.choice;
+    el.remove();
+    _scheduleVideoPlan(panel, parsed);
+    panel.dispatchEvent(new CustomEvent("fpdl-decided"));
+  });
+  row.after(el);
+}
+
+// ── library lookup: is this work already on disk? ──
+async function _runLibraryLookup(panel, parsed) {
+  if (panel._lookupDone) return;
+  panel._lookupDone = true;
+  const prefs = _currentPrefs(await _loadSendPrefs());
+  if (!prefs.merge_into_library && !prefs.batch_skip_identical) return;
+  const rows = _videoRowsForPlan(panel, parsed);
+  const roles = (panel._videoPlan && panel._videoPlan.roles) || {};
+  const videos = rows
+    .filter(({ v }) => roles[v.url] !== "unrelated")
+    .map(({ v }) => ({ url: v.url, resolved: v.resolvedUrl || "", duration: v.probedDuration || null }));
+  const scriptRows = _scriptRowsForLookup(panel, parsed);
+  const scripts = scriptRows.map(({ s }) => ({
+    url: s.url, resolved: s.resolvedUrl || "", name: s.filename || "",
+    size: s.probedSize || _probeSizeEntry(s.url) || 0,
+    duration: s.probedDuration || null,
+  }));
+  let res = null;
+  try { res = await _sendMsg("library-lookup", { title: parsed.title || "", videos, scripts }); }
+  catch (e) { res = null; }
+  panel._lookup = (res && !res._error) ? res : null;
+  if (!panel._lookup || !panel._lookup.work) {
+    panel.dispatchEvent(new CustomEvent("fpdl-lookup"));
+    return;
+  }
+  const work = panel._lookup.work;
+  const same = panel._lookup.same_content === true;
+  const merge = same && prefs.merge_into_library && parsed.mode === "single";
+  if (merge) {
+    panel._mergeInto = work.dir;
+    for (const { row } of rows) {
+      _setChecked(panel, row.querySelector('input[type="checkbox"][name]'), false);
+      _setRowTag(row, "inlib", "已在庫", `媒體庫已有：${work.base}`);
+      _renderAskRow(panel, parsed, row, {}, null);
+    }
+    // A bundle's video files stay home too; its scripts go unless the
+    // folder already holds one of exactly that size (funscript sizes are
+    // exact, so equal size is the same file).
+    const diskSizes = new Set((panel._lookup.disk_scripts || []).map((d) => Number(d.size) || 0));
+    panel._skippedIdentical = [];
+    panel.querySelectorAll(".funpairdl-bundle-cb").forEach((cb) => {
+      const fname = cb.dataset.fileName || "";
+      if (!/\.funscript$/i.test(fname)) { _setChecked(panel, cb, false); return; }
+      const sz = _probeSizeEntry(cb.dataset.fileUrl || "");
+      if (sz && diskSizes.has(sz) && prefs.batch_skip_identical) {
+        _setChecked(panel, cb, false);
+        panel._skippedIdentical.push(fname);
+      }
+    });
+  }
+  if (!panel._skippedIdentical) panel._skippedIdentical = [];
+  for (const { s, row } of scriptRows) {
+    const verdict = panel._lookup.scripts[s.url] || "";
+    const cb = row.querySelector('input[type="checkbox"][name]');
+    if (verdict === "identical") {
+      _setRowTag(row, "skip", "相同，略過", "媒體庫裡已有一模一樣的檔案");
+      if (same && prefs.batch_skip_identical) {
+        _setChecked(panel, cb, false);
+        panel._skippedIdentical.push(s.filename || s.url);
+      }
+    } else if (verdict === "changed" && same) {
+      _setRowTag(row, "changed", "不同 → 變體", "同一軸已有另一版本，會存成 (作者) 變體");
+    } else if (verdict === "new" && same) {
+      _setRowTag(row, "new", "新增軸", "這個軸媒體庫還沒有");
+    }
+  }
+  let note = "";
+  if (merge) note = `🗂 影片已在媒體庫「${escapeAttr(work.base)}」：只下載腳本，併入該作品`;
+  else if (same) note = `🗂 媒體庫已有「${escapeAttr(work.base)}」（相同影片）；送出後會併入`;
+  else if (panel._lookup.same_content === false) note = `媒體庫有同名作品「${escapeAttr(work.base)}」但長度不同，視為不同作品`;
+  else note = `媒體庫有同名作品「${escapeAttr(work.base)}」（長度未知，未合併）`;
+  _setPanelNote(panel, note);
+  panel.dispatchEvent(new CustomEvent("fpdl-lookup"));
+}
+
+// ── other scripters' groups follow the setting ──
+function _applyAuthorPolicy(panel, parsed, prefs) {
+  if (!parsed || parsed.mode !== "single") return;
+  const op = (parsed.opUsername || "").toLowerCase();
+  const collect = prefs.collect_other_authors !== false;
+  for (const g of parsed.autoGroups || []) {
+    if (g.name === "Main" || !g.username) continue;
+    if (op && g.username.toLowerCase() === op) continue;  // the OP's own follow-up
+    const body = panel.querySelector(`.funpairdl-group-body[data-group="${g.name}"]`);
+    if (!body) continue;
+    body.querySelectorAll('.funpairdl-item input[type="checkbox"][name="script"]').forEach((cb) => {
+      const row = cb.closest(".funpairdl-item");
+      if (row && row.dataset.touched) return;
+      _setChecked(panel, cb, collect);
+    });
+    const header = panel.querySelector(`.funpairdl-group-block[data-group="${g.name}"] .funpairdl-group-header`);
+    if (header) {
+      let tag = header.querySelector(".funpairdl-tag-vrole");
+      if (!tag) {
+        tag = document.createElement("span");
+        tag.className = "funpairdl-tag-vrole";
+        const src = header.querySelector(".funpairdl-group-source");
+        if (src) src.after(tag); else header.appendChild(tag);
+      }
+      tag.className = `funpairdl-tag-vrole funpairdl-vrole-${collect ? "variant" : "unrelated"}`;
+      tag.textContent = collect ? "其他作者 → 變體" : "其他作者（未收）";
+    }
+  }
+}
+
+// ── batch assessment: what still needs the user ──
+// Pure: the open questions for one card, from a plain summary of its state.
+function _batchDecisions(st) {
+  const out = [];
+  const weak = (b) => !!b && (_BASIS_RANK[b] ?? 0) <= _BASIS_RANK.duration;
+  for (const a of st.ambiguous || []) {
+    out.push({ kind: "ambiguous", text: `「${a.name || a.url}」是同一影片的另一編碼，還是另一個版本？（該列下方有按鈕）` });
+  }
+  if (st.workPlanSplit && weak(st.workBasis)) {
+    out.push({ kind: "pairing", text: "這帖會拆成多個作品，但腳本與影片的配對是用順序或相似度猜的，請核對工作計畫" });
+  }
+  if ((st.bundleBasis || []).some(weak)) {
+    out.push({ kind: "bundle", text: "合集裡的檔案分組是猜的，請核對子組" });
+  }
+  if (st.hasVideos && !st.checkedVideos && !st.mergeInto) {
+    out.push({ kind: "novideo", text: st.probeFailedAll
+      ? "所有影片來源都探測失敗，沒有可下載的影片"
+      : "沒有勾選任何影片來源" });
+  }
+  if (st.otherAuthorCommentScripts > 0) {
+    out.push({ kind: "comments", text: `留言區有 ${st.otherAuthorCommentScripts} 支腳本（合集帖），請拖到所屬作品或略過` });
+  }
+  return out;
+}
+
+// Pure: "dead" (unusable), "done" (library has it all), "ask", "auto".
+function _batchTier(decisions, flags) {
+  if (flags.dead) return "dead";
+  if (flags.nothingSelected) return flags.libraryHasWork ? "done" : "ask";
+  return decisions.length ? "ask" : "auto";
+}
+
+function _batchScheduleAssess(card) {
+  if (card._assessTimer) clearTimeout(card._assessTimer);
+  card._assessTimer = setTimeout(() => _batchAssess(card), 250);
+}
+
+function _batchAssess(card) {
+  const panel = card._panel;
+  const parsed = card._parsed;
+  if (!panel || !parsed || !panel.parentNode) return;
+  const overlay = card.closest("#funpairdl-batch-overlay");
+  const statusEl = card.querySelector(".funpairdl-batch-card-status");
+  const summaryEl = card.querySelector(".funpairdl-batch-card-summary");
+  const prefs = _currentPrefs(overlay && overlay._prefs);
+
+  const rows = _videoRowsForPlan(panel, parsed);
+  const roles = (panel._videoPlan && panel._videoPlan.roles) || {};
+  const decided = panel._encodeDecisions || {};
+  const nameOf = (u) => { const r = rows.find((x) => x.v.url === u); return r ? (r.v.probedFilename || r.v.label || u) : u; };
+  const ambiguous = ((panel._videoPlan && panel._videoPlan.ambiguous) || [])
+    .filter((a) => !decided[a.url]).map((a) => ({ url: a.url, name: nameOf(a.url), tag: a.tag }));
+  const checkedVideos = rows.filter(({ row }) => {
+    const cb = row.querySelector('input[type="checkbox"][name]');
+    return cb && cb.checked;
+  }).length;
+  const bundleCbs = [...panel.querySelectorAll(".funpairdl-bundle-cb:checked")];
+  const bundleChecked = bundleCbs.filter((cb) => !/\.funscript$/i.test(cb.dataset.fileName || "")).length;
+  const bundleScripts = bundleCbs.length - bundleChecked;
+  const st = {
+    ambiguous,
+    workPlanSplit: !!panel._workPlanSplit,
+    workBasis: _weakestBasis(Object.values(panel._workScriptBasis || {})),
+    bundleBasis: [...panel.querySelectorAll(".funpairdl-bundle-group[data-basis]")].map((el) => el.dataset.basis),
+    hasVideos: rows.length > 0,
+    checkedVideos: checkedVideos + bundleChecked,
+    mergeInto: panel._mergeInto || "",
+    probeFailedAll: rows.length > 0 && rows.every(({ v }) => v.probeFailed),
+    otherAuthorCommentScripts: parsed.mode === "collection" && prefs.collect_other_authors !== false
+      ? (parsed.commentScripts || []).length : 0,
+  };
+  const decisions = _batchDecisions(st);
+  // "Selected" means a file will go: a plain row ticked, or a bundle file
+  // ticked — a ticked bundle ROW whose files are all unticked sends nothing.
+  const anyChecked = [...panel.querySelectorAll('.funpairdl-item input[type="checkbox"][name]:checked')]
+    .some((cb) => {
+      const row = cb.closest(".funpairdl-item");
+      const key = row ? row.dataset.key : "";
+      return !key || !panel.querySelector(`.funpairdl-bundle-cb[data-probe-key="${key}"]`);
+    }) || bundleCbs.length > 0;
+  const tier = panel._probesSettled
+    ? _batchTier(decisions, { nothingSelected: !anyChecked, libraryHasWork: !!(panel._lookup && panel._lookup.work && panel._lookup.same_content === true) })
+    : "pending";
+  card.dataset.tier = tier;
+
+  // Header: a one-line summary of what will be sent.
+  const checkedScripts = panel.querySelectorAll('.funpairdl-item[data-kind="script"] input[type="checkbox"][name]:checked').length + bundleScripts;
+  const variants = rows.filter(({ v, row }) => roles[v.url] === "variant" && row.querySelector('input[type="checkbox"][name]:checked')).length;
+  const alternates = rows.reduce((n, { v, row }) => {
+    const cb = row.querySelector('input[type="checkbox"][name]');
+    return n + ((cb && cb.checked && panel._alternates && panel._alternates[v.url]) ? panel._alternates[v.url].length : 0);
+  }, 0);
+  const parts = [];
+  if (panel._mergeInto) parts.push("影片已在庫，併入既有作品");
+  else parts.push(`${st.checkedVideos} 影片`);
+  parts.push(`${checkedScripts} 腳本`);
+  if (variants) parts.push(`變體 ${variants}`);
+  if (alternates) parts.push(`備援 ${alternates}`);
+  if ((panel._skippedIdentical || []).length) parts.push(`略過相同 ${panel._skippedIdentical.length}`);
+  if (summaryEl) summaryEl.textContent = parts.join(" · ");
+  const tierText = { pending: "判斷中…", auto: "✔ 可直接送出", ask: `需要決定 (${decisions.length})`, done: "已在庫，無新內容", dead: "" }[tier] || "";
+  if (statusEl && !card.classList.contains("funpairdl-batch-card-sent")) statusEl.textContent = tierText;
+
+  // Open questions banner at the top of the body.
+  const body = panel.querySelector(".funpairdl-panel-body") || panel;
+  let banner = body.querySelector(":scope > .funpairdl-batch-ask");
+  if (tier === "ask" && decisions.length) {
+    if (!banner) { banner = document.createElement("div"); banner.className = "funpairdl-batch-ask"; body.prepend(banner); }
+    banner.innerHTML = `<b>需要你決定：</b><ul>${decisions.map((d) => `<li>${escapeAttr(d.text)}</li>`).join("")}</ul>`;
+  } else if (banner) {
+    banner.remove();
+  }
+
+  // Settled cards fold to their summary; questions stay open.
+  if (tier !== "pending" && !card._userExpanded) {
+    const collapse = tier === "auto" || tier === "done";
+    card.classList.toggle("funpairdl-batch-card-collapsed", collapse);
+    const t = card.querySelector(".funpairdl-batch-card-toggle");
+    if (t) t.textContent = collapse ? "展開" : "收合";
+  }
+  if (tier === "done" && !card._doneApplied) {
+    card._doneApplied = true;
+    const cb = card.querySelector(".funpairdl-batch-card-cb");
+    if (cb) cb.checked = false;
+  }
+  if (overlay) _batchRefreshSummary(overlay);
+}
+
+function _batchRefreshSummary(overlay) {
+  const cards = overlay._cards || [];
+  const count = (t) => cards.filter((c) => c.dataset.tier === t).length;
+  const auto = cards.filter((c) => c.dataset.tier === "auto" && !c.classList.contains("funpairdl-batch-card-sent")
+    && (c.querySelector(".funpairdl-batch-card-cb") || {}).checked).length;
+  const sent = cards.filter((c) => c.classList.contains("funpairdl-batch-card-sent")).length;
+  const el = overlay.querySelector(".funpairdl-batch-summary");
+  if (el) {
+    const bits = [
+      `<span class="funpairdl-batch-tier" style="color:#2e9e6a">可直接送出 ${count("auto")}</span>`,
+      `<span class="funpairdl-batch-tier" style="color:#c2842a">需要決定 ${count("ask")}</span>`,
+      `<span>已在庫 ${count("done")}</span>`,
+      `<span>無法讀取 ${count("dead")}</span>`,
+    ];
+    if (count("pending")) bits.push(`<span>判斷中 ${count("pending")}</span>`);
+    if (sent) bits.push(`<span>已送出 ${sent}</span>`);
+    el.innerHTML = bits.join(" · ");
+  }
+  const btn = overlay.querySelector(".funpairdl-batch-send-auto");
+  if (btn && !btn._busy) {
+    btn.disabled = auto === 0;
+    btn.textContent = `送出可直接送出的 ${auto} 帖`;
+  }
+  // One notice for everything left out because the library already has it.
+  const skipped = [];
+  for (const c of cards) {
+    for (const name of ((c._panel && c._panel._skippedIdentical) || [])) {
+      skipped.push({ topic: (c._parsed && c._parsed.title) || c._url, name });
+    }
+  }
+  const box = overlay.querySelector(".funpairdl-batch-skipped");
+  if (box) {
+    if (skipped.length === 0) { box.hidden = true; box.innerHTML = ""; }
+    else {
+      box.hidden = false;
+      box.innerHTML = `<b>已略過 ${skipped.length} 個媒體庫裡已有、內容相同的檔案</b>（要重抓就到該帖展開勾回）<ul>` +
+        skipped.map((x) => `<li>${escapeAttr(x.topic)}：${escapeAttr(x.name)}</li>`).join("") + `</ul>`;
+    }
+  }
 }
 
 // ─── Batch overlay (Qt "⬇All") ───
@@ -3109,6 +3679,35 @@ const _BATCH_OVERLAY_CSS = `
   font-size: 12px; font-weight: 400; color: #9aa5b1; cursor: pointer;
 }
 .funpairdl-batch-close-after input { accent-color: #4a90d9; width: 14px; height: 14px; }
+.funpairdl-batch-summary {
+  flex-basis: 100%; font-size: 12px; color: #b8c4d6;
+  display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+}
+.funpairdl-batch-tier { font-weight: 700; }
+.funpairdl-batch-send-auto { width: auto !important; padding: 8px 14px !important; }
+.funpairdl-batch-send-auto:disabled { opacity: 0.5; }
+.funpairdl-batch-skipped {
+  margin: 10px 14px 0; font-size: 12px; color: #9aa5b1;
+  border: 1px dashed #3a4a6a; border-radius: 6px; padding: 6px 10px;
+}
+.funpairdl-batch-skipped ul { margin: 4px 0 0 16px; padding: 0; }
+.funpairdl-batch-card[data-tier="ask"] { border-color: #c2842a; }
+.funpairdl-batch-card[data-tier="auto"] { border-color: #2e9e6a88; }
+.funpairdl-batch-card[data-tier="done"] { opacity: 0.6; }
+.funpairdl-batch-card-collapsed .funpairdl-batch-card-body { display: none; }
+.funpairdl-batch-card-summary {
+  font-size: 12px; color: #9aa5b1; font-weight: 400; flex-basis: 100%; padding-left: 26px;
+}
+.funpairdl-batch-card-summary:empty { display: none; }
+.funpairdl-batch-card-toggle {
+  font-size: 11px; padding: 2px 8px; border-radius: 4px; border: 1px solid #445;
+  background: #1c2540; color: #cbd5e1; cursor: pointer; flex-shrink: 0;
+}
+.funpairdl-batch-ask {
+  margin: 0 0 8px; padding: 8px 10px; border-left: 3px solid #c2842a;
+  background: rgba(194, 132, 42, 0.12); font-size: 12px; color: #f1e4c9; border-radius: 4px;
+}
+.funpairdl-batch-ask ul { margin: 4px 0 0 16px; padding: 0; }
 `;
 
 // ─── Per-topic selection persistence (localStorage, survives restarts) ───
@@ -3116,7 +3715,7 @@ const _BATCH_OVERLAY_CSS = `
 // include toggle, and the close-after-download toggle, keyed by topic id.
 // Restored when the overlay is reopened so half-finished curation isn't lost.
 
-const _BATCH_SEL_PREFIX = "fpdl_batch_sel_";
+const _BATCH_SEL_PREFIX = "fpdl_batch_sel2_";  // v2: saved states pre-date the decisions
 const _BATCH_SEL_TTL_MS = 30 * 24 * 3600 * 1000;
 
 function _batchSelKey(url) {
@@ -3145,9 +3744,15 @@ function _batchSaveCardState(card) {
       // empty work groups the user created.
       bundlePlan: { ...((card._panel && card._panel._bundlePlan) || {}) },
       workGroupsExtra: [...((card._panel && card._panel._workGroupsExtra) || [])],
+      // Re-encode-or-variant answers (url → choice).
+      encodeDecisions: { ...((card._panel && card._panel._encodeDecisions) || {}) },
     };
     if (card._panel) {
+      // Only rows the user (un)ticked are saved: what the plan decided is
+      // recomputed on reopen, so a stale decision never pins a row.
       card._panel.querySelectorAll('.funpairdl-item input[type="checkbox"][name]').forEach((cb) => {
+        const row = cb.closest(".funpairdl-item");
+        if (!row || !row.dataset.touched) return;
         if (/^(video|script|sv-\d+|ss-\d+|cv|cs)$/.test(cb.name)) {
           state.items[`${cb.name}-${cb.value}`] = cb.checked;
         }
@@ -3185,6 +3790,9 @@ function _batchApplyCardState(card, st) {
   if (!card._panel || !st) return;
   const items = st.items || {};
   const bundles = st.bundles || {};
+  if (st.encodeDecisions && Object.keys(st.encodeDecisions).length > 0) {
+    card._panel._encodeDecisions = { ...(card._panel._encodeDecisions || {}), ...st.encodeDecisions };
+  }
   // Replay drag moves first (no-op for rows already in place) so the
   // checkbox states below land on rows in their final sections.
   if (card._parsed && card._parsed.mode === "collection") {
@@ -3198,7 +3806,12 @@ function _batchApplyCardState(card, st) {
   }
   card._panel.querySelectorAll('.funpairdl-item input[type="checkbox"][name]').forEach((cb) => {
     const k = `${cb.name}-${cb.value}`;
-    if (k in items) cb.checked = items[k];
+    if (k in items) {
+      cb.checked = items[k];
+      // A saved choice is the user's: the video plan must not override it.
+      const row = cb.closest(".funpairdl-item");
+      if (row) row.dataset.touched = "1";
+    }
   });
   card._panel.querySelectorAll(".funpairdl-section-cb").forEach((cb) => {
     const k = `sec-${cb.dataset.section}`;
@@ -3310,6 +3923,13 @@ async function _batchBuildCard(card, url) {
   setupProbing(panel, parsed);
   panel.querySelector("#funpairdl-send")
     .addEventListener("click", () => _batchSendCard(card));
+  // Tiering: re-assess whenever the plan, the lookup or the user changes
+  // something.
+  card.dataset.tier = "pending";
+  for (const ev of ["fpdl-settled", "fpdl-plan-applied", "fpdl-lookup", "fpdl-decided"]) {
+    panel.addEventListener(ev, () => _batchScheduleAssess(card));
+  }
+  card.addEventListener("change", () => _batchScheduleAssess(card));
 
   // Restore the last saved selection for this topic, then keep re-applying
   // briefly (bundle checkboxes appear asynchronously after probes) until the
@@ -3397,7 +4017,7 @@ window.funpairdlBatchOpen = function (urls) {
       <div class="funpairdl-batch-header">
         <span class="funpairdl-batch-title">⬇ 批量下載(${(urls || []).length} 個帖子)</span>
         <div class="funpairdl-resolution-row" style="margin:0">
-          <label class="funpairdl-resolution-label">Resolution</label>
+          <label class="funpairdl-resolution-label" title="影片挑選的畫質下限；yt-dlp 來源也依此選格式">Resolution</label>
           <select id="funpairdl-resolution" class="funpairdl-resolution-select">
             <option value="best">Best</option>
             <option value="2160">2160p (4K)</option>
@@ -3406,19 +4026,50 @@ window.funpairdlBatchOpen = function (urls) {
             <option value="480">480p</option>
             <option value="360">360p</option>
           </select>
+          <select id="funpairdl-pick-mode" class="funpairdl-resolution-select"
+                  title="同一影片有多個來源時只下載一個，其餘做失敗備援">
+            <option value="smallest">省空間（達下限的最小檔）</option>
+            <option value="best_quality">最高畫質</option>
+          </select>
+          <label class="funpairdl-item" style="margin:0;padding:2px 6px" title="留言區／其他作者的腳本收成 (作者) 變體">
+            <input type="checkbox" id="funpairdl-other-authors" checked>
+            <span class="funpairdl-label">收其他作者腳本</span>
+          </label>
           <label class="funpairdl-item" style="margin:0;padding:2px 6px">
             <input type="checkbox" id="funpairdl-auto-rename" checked>
             <span class="funpairdl-label">Auto Rename</span>
           </label>
         </div>
+        <button class="funpairdl-batch-send-auto funpairdl-send-btn" type="button" disabled>送出可直接送出的帖子</button>
         <button class="funpairdl-batch-send-all funpairdl-send-btn" type="button">送出勾選的帖子</button>
         <button class="funpairdl-panel-close funpairdl-batch-close" type="button">✕</button>
+        <div class="funpairdl-batch-summary">解析中…</div>
       </div>
+      <div class="funpairdl-batch-skipped" hidden></div>
       <div class="funpairdl-batch-cards"></div>
     </div>`;
   document.body.appendChild(overlay);
   overlay.querySelector(".funpairdl-batch-close")
     .addEventListener("click", () => overlay.remove());
+  // Header controls start from the settings; changing one re-plans every card.
+  _loadSendPrefs().then((p) => {
+    const pick = overlay.querySelector("#funpairdl-pick-mode");
+    const oa = overlay.querySelector("#funpairdl-other-authors");
+    if (pick) pick.value = p.video_pick_mode || "smallest";
+    if (oa) oa.checked = p.collect_other_authors !== false;
+  });
+  overlay.querySelector("#funpairdl-pick-mode").addEventListener("change", () => {
+    for (const c of overlay._cards || []) {
+      if (c._panel && c._parsed) { c._panel._videoPlanKey = null; _scheduleVideoPlan(c._panel, c._parsed); }
+    }
+  });
+  overlay.querySelector("#funpairdl-other-authors").addEventListener("change", () => {
+    _loadSendPrefs().then((p) => {
+      for (const c of overlay._cards || []) {
+        if (c._panel && c._parsed) { _applyAuthorPolicy(c._panel, c._parsed, _currentPrefs(p)); _batchScheduleAssess(c); }
+      }
+    });
+  });
 
   const cardsEl = overlay.querySelector(".funpairdl-batch-cards");
   const cards = [];
@@ -3434,12 +4085,21 @@ window.funpairdlBatchOpen = function (urls) {
           <input type="checkbox" class="funpairdl-batch-close-cb" checked>完成後關分頁
         </label>
         <span class="funpairdl-batch-card-status">解析中…</span>
+        <button type="button" class="funpairdl-batch-card-toggle" title="展開／收合這一帖的細節">展開</button>
+        <span class="funpairdl-batch-card-summary"></span>
       </div>
       <div class="funpairdl-batch-card-body"></div>`;
     card._url = url;
+    card.querySelector(".funpairdl-batch-card-toggle").addEventListener("click", () => {
+      card._userExpanded = card.classList.contains("funpairdl-batch-card-collapsed");
+      card.classList.toggle("funpairdl-batch-card-collapsed");
+      card.querySelector(".funpairdl-batch-card-toggle").textContent =
+        card.classList.contains("funpairdl-batch-card-collapsed") ? "展開" : "收合";
+    });
     cardsEl.appendChild(card);
     cards.push(card);
   }
+  overlay._cards = cards;
 
   // Build cards sequentially — one JSON fetch each, gentle on the forum.
   (async () => {
@@ -3450,9 +4110,34 @@ window.funpairdlBatchOpen = function (urls) {
       } catch (e) {
         card.querySelector(".funpairdl-batch-card-status").textContent =
           "解析失敗: " + ((e && e.message) || e);
+        card.dataset.tier = "dead";
       }
+      _batchRefreshSummary(overlay);
     }
+    overlay._allBuilt = true;
+    _batchRefreshSummary(overlay);
   })();
+
+  // Send only the cards the system settled by itself (tier "auto").
+  const sendAutoBtn = overlay.querySelector(".funpairdl-batch-send-auto");
+  sendAutoBtn.addEventListener("click", async () => {
+    sendAutoBtn.disabled = true;
+    let sent = 0;
+    let failed = 0;
+    try {
+      for (const card of cards) {
+        if (!overlay.parentNode) return;
+        const cb = card.querySelector(".funpairdl-batch-card-cb");
+        if (card.dataset.tier !== "auto" || !cb || !cb.checked || !card._panel || !card._panel.parentNode) continue;
+        const res = await _batchSendCard(card);
+        sent += res.sent || 0;
+        failed += res.failed || 0;
+      }
+      sendAutoBtn.textContent = `完成:${sent} 組已進佇列` + (failed ? `,${failed} 組失敗` : "");
+    } finally {
+      setTimeout(() => _batchRefreshSummary(overlay), 6000);
+    }
+  });
 
   const sendAllBtn = overlay.querySelector(".funpairdl-batch-send-all");
   sendAllBtn.addEventListener("click", async () => {
@@ -3713,6 +4398,7 @@ function _bundleGroupEl(name, userMade, basis) {
   const el = document.createElement("div");
   el.className = "funpairdl-bundle-group";
   if (userMade) el.dataset.user = "1";
+  el.dataset.basis = basis || "";
   el.innerHTML = `<div class="funpairdl-bundle-group-header">
       <input type="text" class="funpairdl-alt-name-input funpairdl-bundle-group-name"
              placeholder="子組名稱(資料夾名)" value="${escapeAttr(name)}">
@@ -4084,6 +4770,9 @@ async function _refreshWorkPlan(panel, parsed) {
   if (rows.videos.length < 2 && panel._workGroupsExtra.length === 0) {
     block.hidden = true;
     for (const r of all) _setWorkBadge(r.row, null);
+    // One video = one work: nothing is split, nothing is guessed.
+    panel._workPlanSplit = false;
+    panel._workScriptBasis = {};
     return;
   }
   block.hidden = false;

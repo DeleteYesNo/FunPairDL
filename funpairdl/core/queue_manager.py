@@ -272,8 +272,15 @@ class QueueManager:
         sizes: dict | None = None,
         bundle_plan: dict[str, str] | None = None,
         source_url: str = "",
+        merge_into: str = "",
+        alternates: dict[str, list[str]] | None = None,
     ) -> Pair:
         """Add a Pair to the queue.
+
+        `merge_into` = an existing work folder (inside a library root) the
+        download lands in — the library already holds the video, so the
+        panel sends the scripts alone and organize reconciles them into
+        that work. Ignored when the folder is not a library work.
 
         Either pass `video_urls`/`script_urls` (everything lands in the Main
         group → root folder, legacy behavior), or pass `groups` — a list of
@@ -300,6 +307,7 @@ class QueueManager:
                 "script_authors": script_authors or {},
                 "filenames": filenames or {},
                 "sizes": sizes or {},
+                "alternates": alternates or {},
                 "inherit_multi_axis": False,
             }]
 
@@ -312,6 +320,10 @@ class QueueManager:
         # the default volume is full.
         root = Path(output_dir_override) if output_dir_override else self.download_dir
         target_dir = root / folder_name
+        merge_dir = self._merge_target(merge_into)
+        if merge_dir is not None:
+            target_dir = merge_dir
+            logger.info("Pair '%s' merges into existing work: %s", name, merge_dir)
 
         # A pair for this folder that is still queued/downloading: don't add
         # a second one. A FAILED one is re-queued below, with THIS
@@ -339,6 +351,8 @@ class QueueManager:
             # Probed sizes the extension already fetched — reusing them means
             # Size/ETA show immediately instead of waiting for a resolve slot.
             grp_sizes = grp.get("sizes") or {}
+            # Other links to the same video, tried only when the chosen fails.
+            grp_alternates = grp.get("alternates") or {}
 
             if grp_name != "Main":
                 pair.alt_group_config[grp_name] = {
@@ -371,6 +385,8 @@ class QueueManager:
                         total_bytes=int(grp_sizes.get(url) or 0),
                         group=grp_name,
                     )
+                    item.alternates = [str(u) for u in (grp_alternates.get(url) or [])
+                                       if u and u != url]
                 pair.items.append(item)
 
             for url in grp_scripts:
@@ -461,6 +477,27 @@ class QueueManager:
         self.request_metadata_probe(existing)
         self._ensure_pump_alive()
         self._wake_pump()
+
+    def _merge_target(self, merge_into: str) -> Path | None:
+        """`merge_into` as a Path when it is an existing work folder directly
+        under a library root (never an arbitrary path from the API)."""
+        if not (merge_into or "").strip():
+            return None
+        try:
+            d = Path(merge_into).resolve()
+        except OSError:
+            return None
+        if not d.is_dir() or lib.in_trash(d):
+            return None
+        for root in self._library_dirs():
+            try:
+                r = root.resolve()
+            except OSError:
+                continue
+            if d.parent == r or (d.parent.name == lib.NO_VIDEO_DIR and d.parent.parent == r):
+                return d
+        logger.warning("merge_into ignored (not a library work folder): %s", merge_into)
+        return None
 
     @staticmethod
     def _record_topic(pair: Pair) -> None:
@@ -1147,6 +1184,22 @@ class QueueManager:
                 self.on_item_updated(item)
             return None
 
+    @staticmethod
+    def _switch_to_alternate(item: PairItem, attempt: int) -> bool:
+        """After the plain retries, move a failed item onto its next fallback
+        link (a mirror / re-encode of the same video). The failed url is kept
+        in `tried_urls`; the item is otherwise reset like any retry."""
+        if attempt <= 2 or not item.alternates:
+            return False
+        nxt = item.alternates.pop(0)
+        item.tried_urls.append(item.url)
+        logger.info("Fallback: %s failed (%s) -> trying %s", item.url[:70],
+                    (item.error_message or "")[:60], nxt[:70])
+        item.url = nxt
+        item.provider_name = detect_provider(nxt)
+        item.headers = {}
+        return True
+
     async def _download_mega(self, item: PairItem, output_dir: Path) -> None:
         """Download a file from MEGA using built-in decryption (no mega.py)."""
         try:
@@ -1494,7 +1547,11 @@ class QueueManager:
             async with mega_sem:
                 return await self._download_mega(item, out_dir)
 
-        for attempt in range(MAX_ITEM_RETRIES + 1):
+        # A video with fallback links gets one extra round per link: when
+        # its url has failed for good, the next mirror/re-encode takes over.
+        max_rounds = MAX_ITEM_RETRIES + 1 + max(
+            (len(i.alternates) for i in pair.items), default=0)
+        for attempt in range(max_rounds):
             # Collect items that still need downloading
             items_pending = [
                 i for i in pair.items
@@ -1508,11 +1565,16 @@ class QueueManager:
                 failed_items = [i for i in items_pending if i.state == ItemState.FAILED]
                 if not failed_items:
                     break
+                # Past the plain retries, only items with a fallback left go on.
+                if attempt > MAX_ITEM_RETRIES:
+                    failed_items = [i for i in failed_items if i.alternates]
+                    if not failed_items:
+                        break
 
-                delay = 5 * (2 ** (attempt - 1))
+                delay = 5 * (2 ** (min(attempt, MAX_ITEM_RETRIES) - 1))
                 logger.info(
                     "Retrying %d failed item(s) in %ds (attempt %d/%d): %s",
-                    len(failed_items), delay, attempt + 1, MAX_ITEM_RETRIES + 1,
+                    len(failed_items), delay, attempt + 1, max_rounds,
                     pair.name,
                 )
                 await asyncio.sleep(delay)
@@ -1521,6 +1583,7 @@ class QueueManager:
                     break
 
                 for item in failed_items:
+                    self._switch_to_alternate(item, attempt)
                     # Clean up partial segment files from the failed attempt
                     for seg in item.segments:
                         try:
@@ -1585,7 +1648,7 @@ class QueueManager:
             if not tasks:
                 # No downloadable items this round — but there may be failed
                 # items worth retrying on the next attempt (e.g. resolve failures).
-                if attempt < MAX_ITEM_RETRIES and any(
+                if attempt < max_rounds - 1 and any(
                     i.state == ItemState.FAILED for i in pair.items
                 ):
                     continue

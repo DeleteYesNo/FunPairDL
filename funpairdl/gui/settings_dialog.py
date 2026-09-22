@@ -146,12 +146,73 @@ class SettingsDialog(QDialog):
 
         # ── Clipboard tab ───────────────────────────────────────────
         self.tabs.addTab(self._build_clipboard_tab(), "Clipboard")
+        self.tabs.addTab(self._build_decisions_tab(), "Send decisions")
 
         # Dialog buttons
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
+
+    def _build_decisions_tab(self) -> QWidget:
+        """What the panel / batch overlay decides on its own before a send.
+        Everything here is a default the overlay shows and the user can
+        still change per post."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        form = QFormLayout()
+
+        self.pick_mode_combo = QComboBox()
+        self.pick_mode_combo.addItem("Smallest file that meets the resolution", "smallest")
+        self.pick_mode_combo.addItem("Best quality", "best_quality")
+        idx = self.pick_mode_combo.findData(self.settings.video_pick_mode)
+        self.pick_mode_combo.setCurrentIndex(max(0, idx))
+        self.pick_mode_combo.setToolTip(
+            "Several links to the same video (mirrors, re-encodes): only one is "
+            "downloaded, the rest are tried if it fails. The panel's Resolution "
+            "is the floor for 'smallest'."
+        )
+        form.addRow("Which copy of a video:", self.pick_mode_combo)
+
+        self.encode_variant_combo = QComboBox()
+        self.encode_variant_combo.addItem("Ask me each time", "ask")
+        self.encode_variant_combo.addItem("Treat as a re-encode (one download)", "reencode")
+        self.encode_variant_combo.addItem("Treat as a variant (own file)", "variant")
+        idx = self.encode_variant_combo.findData(self.settings.encode_vs_variant)
+        self.encode_variant_combo.setCurrentIndex(max(0, idx))
+        self.encode_variant_combo.setToolTip(
+            "A link named only by a version word (v2, final, (1)) may be the "
+            "same video re-encoded or a different render."
+        )
+        form.addRow("Re-encode or variant, when unclear:", self.encode_variant_combo)
+
+        self.other_authors_check = QCheckBox()
+        self.other_authors_check.setChecked(self.settings.collect_other_authors)
+        self.other_authors_check.setToolTip(
+            "Scripts posted by someone other than the OP (comments, other "
+            "topics for the same video) are collected as (Author) variants."
+        )
+        form.addRow("Collect other scripters' scripts:", self.other_authors_check)
+
+        self.merge_library_check = QCheckBox()
+        self.merge_library_check.setChecked(self.settings.merge_into_library)
+        self.merge_library_check.setToolTip(
+            "When the library already holds the post's video, skip the video "
+            "and merge the scripts into that work."
+        )
+        form.addRow("Merge into a work already in the library:", self.merge_library_check)
+
+        self.skip_identical_check = QCheckBox()
+        self.skip_identical_check.setChecked(self.settings.batch_skip_identical)
+        self.skip_identical_check.setToolTip(
+            "Scripts identical to what the work already has are left out and "
+            "listed once in the batch overlay."
+        )
+        form.addRow("Skip files the library already has:", self.skip_identical_check)
+
+        layout.addLayout(form)
+        layout.addStretch(1)
+        return tab
 
     def _build_clipboard_tab(self) -> QWidget:
         s = self.settings
@@ -237,6 +298,13 @@ class SettingsDialog(QDialog):
         s.eroscripts_password = self.ero_pass_edit.text()
         s.mega_email = self.mega_email_edit.text()
         s.mega_password = self.mega_pass_edit.text()
+
+        # Send decisions tab
+        s.video_pick_mode = self.pick_mode_combo.currentData() or "smallest"
+        s.encode_vs_variant = self.encode_variant_combo.currentData() or "ask"
+        s.collect_other_authors = self.other_authors_check.isChecked()
+        s.merge_into_library = self.merge_library_check.isChecked()
+        s.batch_skip_identical = self.skip_identical_check.isChecked()
 
         # Clipboard tab
         s.clipboard_watch_enabled = self.clip_enabled.isChecked()

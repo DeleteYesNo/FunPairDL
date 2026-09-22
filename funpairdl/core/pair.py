@@ -59,6 +59,10 @@ class PairItem:
     # Group assignment within the parent Pair. "" or "Main" → root folder;
     # "Alt 1", "Alt 2", ... → .alt[N-1] subfolder at organize time.
     group: str = ""
+    # Other links to this same video (mirrors, re-encodes), tried in order
+    # when the current url fails for good. `tried_urls` keeps what failed.
+    alternates: list[str] = field(default_factory=list)
+    tried_urls: list[str] = field(default_factory=list)
 
     @property
     def progress(self) -> float:
@@ -81,6 +85,8 @@ class PairItem:
             "resolved_url": self.resolved_url,
             "author": self.author,
             "group": self.group,
+            "alternates": list(self.alternates),
+            "tried_urls": list(self.tried_urls),
             "error_message": self.error_message,
             "segments": [
                 {
@@ -111,6 +117,8 @@ class PairItem:
             group=d.get("group", ""),
             error_message=d.get("error_message", ""),
         )
+        item.alternates = [str(u) for u in (d.get("alternates") or []) if u]
+        item.tried_urls = [str(u) for u in (d.get("tried_urls") or []) if u]
         item.segments = [
             SegmentInfo(**s) for s in d.get("segments", [])
         ]
