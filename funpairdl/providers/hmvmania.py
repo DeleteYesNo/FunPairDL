@@ -13,9 +13,18 @@ from funpairdl.utils.filename import sanitize_filename
 
 logger = logging.getLogger("funpairdl.providers.hmvmania")
 
-# Direct mp4 hosted under WordPress uploads — captures the full URL.
+# Direct mp4 hosted under WordPress uploads — captures the full URL. The
+# ".mp4" must END the path: a related-video thumbnail is named
+# "<video>.mp4_snapshot_….jpg", and matching up to its ".mp4" once resolved
+# every page of a series to the sidebar's newest post (a 404).
 _MP4_RE = re.compile(
-    r"""https?://[^\s"'<>]*?hmvmania\.com/wp-content/uploads/[^\s"'<>]+?\.mp4""",
+    r"""https?://[^\s"'<>]*?hmvmania\.com/wp-content/uploads/[^\s"'<>]+?\.mp4(?=["'\s?#<]|$)""",
+    re.IGNORECASE,
+)
+# The page's own player / download link: these name THE video of the post,
+# anything else on the page (related posts) ranks after them.
+_OWN_VIDEO_RE = re.compile(
+    r"""(?:data-video-source\s*=\s*|<a\s[^>]*?href\s*=\s*)["']([^"']+?\.mp4)["'](?:[^>]*\bdownload\b)?""",
     re.IGNORECASE,
 )
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
@@ -55,18 +64,33 @@ class HmvManiaProvider(BaseProvider):
 
             candidates = parse_mp4_candidates(html, page_url)
             page_title = parse_page_title(html)
-            mp4_url = _select_by_resolution(candidates, preferred_resolution)
-            if not mp4_url:
+            if not candidates:
                 raise ValueError(f"No mp4 source found on HMV Mania page: {url}")
 
-            async with session.head(
-                mp4_url, headers=headers, allow_redirects=True,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as head:
-                head.raise_for_status()
-                final_url = str(head.url)
-                total_size = int(head.headers.get("Content-Length", 0))
-                supports_range = head.headers.get("Accept-Ranges", "").lower() == "bytes"
+            # Preferred pick first, then every other candidate: a dead link
+            # (removed upload) must not fail the post while another works.
+            order = [_select_by_resolution(candidates, preferred_resolution)]
+            order += [c for c in candidates if c not in order]
+            last_err: Exception | None = None
+            final_url = ""
+            total_size = 0
+            supports_range = False
+            for mp4_url in order:
+                try:
+                    async with session.head(
+                        mp4_url, headers=headers, allow_redirects=True,
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as head:
+                        head.raise_for_status()
+                        final_url = str(head.url)
+                        total_size = int(head.headers.get("Content-Length", 0))
+                        supports_range = head.headers.get("Accept-Ranges", "").lower() == "bytes"
+                    break
+                except Exception as e:  # noqa: BLE001 — try the next source
+                    last_err = e
+                    logger.info("HMV Mania source unavailable (%s): %s", e, mp4_url[:80])
+            if not final_url:
+                raise ValueError(f"No reachable mp4 on HMV Mania page: {last_err}")
 
         filename = self._build_filename(page_title, final_url)
 
@@ -106,6 +130,12 @@ def parse_mp4_candidates(html: str, page_url: str) -> list[str]:
     """
     seen: set[str] = set()
     out: list[str] = []
+    # The post's own sources (player playlist, "DL" link) come first.
+    for raw in _OWN_VIDEO_RE.findall(html):
+        full = urljoin(page_url, unescape(raw))
+        if _MP4_RE.fullmatch(full) and full not in seen:
+            seen.add(full)
+            out.append(full)
     for raw in _MP4_RE.findall(html):
         full = urljoin(page_url, unescape(raw))
         if full not in seen:
@@ -141,10 +171,14 @@ def _select_by_resolution(candidates: list[str], preferred_resolution: str) -> s
     if not candidates:
         return ""
 
+    # Stable: equal heights keep listing order, and the post's own video is
+    # listed first — so the sidebar's mp4 never outranks it.
     ranked = sorted(candidates, key=height_from_url)  # ascending by height
+    top = ranked[-1]
+    best = next(c for c in candidates if height_from_url(c) == height_from_url(top))
 
     if not preferred_resolution or preferred_resolution == "best":
-        return ranked[-1]
+        return best
 
     try:
         target = int(preferred_resolution)
@@ -153,5 +187,5 @@ def _select_by_resolution(candidates: list[str], preferred_resolution: str) -> s
 
     exact = [c for c in candidates if height_from_url(c) == target]
     if exact:
-        return exact[-1]
-    return ranked[-1]
+        return exact[0]
+    return best

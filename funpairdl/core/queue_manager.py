@@ -2022,7 +2022,23 @@ class QueueManager:
                 r"(?<![a-z0-9])(?:\d{3,4}p|[248]k|\d{1,3}fps|no[-_ ]?wm|wm)(?![a-z0-9])",
                 " ", s,
             )
-            return {t for t in _re.split(r"[^a-z0-9]+", s) if len(t) >= 3}
+            # "bds04" is the word "bds" and the number "04": split where
+            # letters meet digits so an abbreviated script name can meet the
+            # video's number and its acronym.
+            s = _re.sub(r"(?<=[a-z])(?=\d)|(?<=\d)(?=[a-z])", " ", s)
+            out = {t for t in _re.split(r"[^a-z0-9]+", s) if len(t) >= 3}
+            out |= {t for t in _re.split(r"[^a-z0-9]+", s) if t.isdigit() and len(t) == 2}
+            return out
+
+        def _acronym(name: str) -> set[str]:
+            """{"bds"} for "[Author] Bedroom Diary Series 04": the
+            initials of the title words (leading tag dropped), the way
+            scripters abbreviate a series."""
+            s = _re.sub(r"^\s*[\[\(【][^\]\)】]*[\]\)】]", " ", name)
+            words = [w for w in _re.split(r"[^A-Za-z0-9]+", s) if w and w[0].isalpha()]
+            if len(words) < 2:
+                return set()
+            return {"".join(w[0] for w in words).lower()}
 
         # Descriptive hints (an e621 post's scene tags) join the video's own
         # name tokens: a script called "fox shower" then finds the post
@@ -2030,7 +2046,8 @@ class QueueManager:
         # weighted by rarity like any token, so tags every post shares
         # ("sex", "oral") decide nothing.
         video_tokens = [
-            (v, _tokens(real) | _tokens(hints.get(v.url, "")))
+            (v, _tokens(real) | _tokens(hints.get(v.url, "")) | _acronym(real)
+             | _acronym(Path(v.filename).stem))
             for v, real, _ in video_info
         ]
         _df: dict[str, int] = {}
@@ -2417,6 +2434,59 @@ class QueueManager:
             pair.alt_group_config.setdefault(alt_name, {"inherit_multi_axis": True})
             for it in items:
                 it.group = alt_name
+
+    @staticmethod
+    def _adopt_lone_alt_video(pair: Pair, output_dir: Path) -> None:
+        """Main has no video but one Alt group brought one (the OP linked no
+        video; a commenter did): that video is the work's, so it moves to
+        Main instead of landing as "<work> (Alt).mp4" beside nothing."""
+        main_videos = [it for it in pair.items
+                       if (it.group or "Main") == "Main" and it.file_type == FileType.VIDEO
+                       and (output_dir / it.filename).exists()]
+        if main_videos:
+            return
+        alt_videos = [it for it in pair.items
+                      if (it.group or "Main") != "Main" and it.file_type == FileType.VIDEO
+                      and (output_dir / it.filename).exists()]
+        if len(alt_videos) != 1:
+            return
+        v = alt_videos[0]
+        logger.info("Lone video from %s adopted as Main's: %s", v.group, v.filename)
+        v.group = "Main"
+
+    _MERGED_SCRIPT_RE = re.compile(r"\.(?:merged|multi-?axis|multiaxis|combined|all-?axes)\.funscript$",
+                                   re.IGNORECASE)
+
+    def _drop_redundant_scripts(self, pair: Pair, output_dir: Path) -> None:
+        seen: dict[str, PairItem] = {}
+        seen_paths: set[str] = set()
+        scripts = [it for it in pair.items if it.file_type == FileType.FUNSCRIPT
+                   and (output_dir / it.filename).exists()]
+        has_axes = any(self._parse_axis(it.filename)[0] != "L0" for it in scripts)
+        for it in scripts:
+            path = output_dir / it.filename
+            # Two items on ONE file (a mirror skipped as already on disk):
+            # the file stays, the second item is redundant bookkeeping.
+            if path.name.lower() in seen_paths:
+                pair.items.remove(it)
+                continue
+            seen_paths.add(path.name.lower())
+            if has_axes and self._MERGED_SCRIPT_RE.search(it.filename):
+                path.unlink(missing_ok=True)
+                pair.items.remove(it)
+                logger.info("Dropped combined multi-axis file (axes present): %s", it.filename)
+                continue
+            try:
+                digest = self._file_sha256(path) + "|" + self._parse_axis(it.filename)[0]
+            except OSError:
+                continue
+            first = seen.get(digest)
+            if first is None:
+                seen[digest] = it
+                continue
+            path.unlink(missing_ok=True)
+            pair.items.remove(it)
+            logger.info("Dropped duplicate script (identical to %s): %s", first.filename, it.filename)
 
     def _autopromote_extra_main_videos(self, pair: Pair, output_dir: Path) -> None:
         """A second, different video in Main is a variant of the work
@@ -2861,6 +2931,14 @@ class QueueManager:
         # Save original filenames before renaming (for undo)
         if not pair.original_filenames:
             pair.original_filenames = {item.id: item.filename for item in pair.items}
+
+        # A post whose only video was linked in a comment: it is THE video,
+        # not a variant of nothing.
+        self._adopt_lone_alt_video(pair, output_dir)
+        # A pair that downloaded the same script twice (forum attachment +
+        # the same file in a pack) keeps one; a combined multi-axis file is
+        # redundant next to the axes it merges.
+        self._drop_redundant_scripts(pair, output_dir)
 
         # Backward compat: auto-promote axis/author collisions inside
         # Main into implicit Alt groups (legacy flat-list submissions

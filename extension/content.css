@@ -452,7 +452,15 @@
 }
 
 .funpairdl-resolution-select:hover { border-color: #4a90d9; }
-.funpairdl-resolution-select:focus { border-color: #4a90d9; box-shadow: 0 0 0 2px rgba(74, 144, 217, 0.3); }
+.funpairdl-resolution-select:focus { border-color: #4a90d9; box-shadow: none; }
+/* The host page animates focus rings on form controls (a white frame that
+   keeps growing); ours stay still. */
+.funpairdl-resolution-select, .funpairdl-item-group-select, .funpairdl-alt-name-input,
+.funpairdl-resolution-select:focus-visible, .funpairdl-item-group-select:focus,
+.funpairdl-item-group-select:focus-visible, .funpairdl-alt-name-input:focus {
+  outline: none !important; transition: none !important; animation: none !important;
+}
+.funpairdl-item-group-select:focus { border-color: #4a90d9; box-shadow: none; }
 
 .funpairdl-send-btn {
   width: 100%;

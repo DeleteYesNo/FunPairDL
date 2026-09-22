@@ -17,9 +17,11 @@ def _make_pair(output_dir: str, name: str, items: list[PairItem]) -> Pair:
 
 
 def _touch(path: Path, size: int = 100):
-    """Create a file with dummy content."""
+    """Create a file with dummy content that differs per file name — two
+    fixtures are byte-identical only when a test writes them so."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"x" * size)
+    seed = path.name.encode("utf-8") or b"x"
+    path.write_bytes((seed * (size // len(seed) + 1))[:size])
 
 
 def _organize(pair, variant_mode="flat"):
@@ -593,7 +595,8 @@ class TestSecondMainVideoIsVariant:
 
     def test_different_second_video_becomes_variant_with_copied_L0(self, tmp_path):
         out = tmp_path / "Work Title"
-        _touch(out / "Work Title (nude).mp4", size=100)
+        (out / "Work Title (nude).mp4").parent.mkdir(parents=True, exist_ok=True)
+        (out / "Work Title (nude).mp4").write_bytes(b"x" * 100)
         (out / "Work Title (stockings).mp4").write_bytes(b"y" * 150)
         (out / "Work Title.funscript").write_bytes(b'{"actions":[]}')
         _touch(out / "Work Title.pitch.funscript")
@@ -618,8 +621,9 @@ class TestSecondMainVideoIsVariant:
 
     def test_identical_second_video_is_still_dropped(self, tmp_path):
         out = tmp_path / "Work Title"
-        _touch(out / "Work Title (nude).mp4", size=100)
-        _touch(out / "Work Title (mirror).mp4", size=100)
+        (out / "Work Title (nude).mp4").parent.mkdir(parents=True, exist_ok=True)
+        (out / "Work Title (nude).mp4").write_bytes(b"x" * 100)
+        (out / "Work Title (mirror).mp4").write_bytes(b"x" * 100)
         _touch(out / "Work Title.funscript")
         _touch(out / "Work Title.pitch.funscript")
         _touch(out / "Work Title.surge.funscript")
@@ -643,3 +647,54 @@ class TestVariantTag:
 
     def test_nothing_distinguishing(self):
         assert QueueManager._variant_tag("Work.mp4", "Work (x).mp4") == ""
+
+
+class TestLoneCommentVideoAndRedundantScripts:
+    def test_lone_alt_video_becomes_main(self, tmp_path):
+        out = tmp_path / "Work Title"
+        _touch(out / "clip.mp4", size=100)
+        _touch(out / "Work Title.funscript")
+        _touch(out / "Work Title.surge.funscript")
+        pair = _make_pair(str(out), "Work Title", [
+            PairItem(url="https://h/s", filename="Work Title.funscript", file_type=FileType.FUNSCRIPT, group="Main"),
+            PairItem(url="https://h/sg", filename="Work Title.surge.funscript", file_type=FileType.FUNSCRIPT, group="Main"),
+            PairItem(url="https://mega.nz/file/x#y", filename="clip.mp4", file_type=FileType.VIDEO, group="Alt 1"),
+        ])
+        pair.alt_group_config = {"Alt 1": {"inherit_multi_axis": True}}
+        _organize(pair)
+        assert (out / "Work Title.mp4").exists()
+        assert not (out / "Work Title (Alt).mp4").exists() and not (out / "Work Title (Alt).funscript").exists()
+        v = _variants(out)
+        assert list(v) == ["Main"] and v["Main"]["video"] == "Work Title.mp4"
+
+    def test_identical_duplicate_and_merged_scripts_are_dropped(self, tmp_path):
+        out = tmp_path / "Work Title"
+        _touch(out / "Work Title.mp4", size=100)
+        (out / "Work Title.funscript").write_bytes(b"L0-DATA")
+        (out / "Work Title (2).funscript").write_bytes(b"L0-DATA")          # forum copy of the pack's L0
+        (out / "Work Title.pitch.funscript").write_bytes(b"PITCH")
+        (out / "Work Title.merged.funscript").write_bytes(b"ALL-AXES-IN-ONE")
+        pair = _make_pair(str(out), "Work Title", [
+            PairItem(url="https://h/v", filename="Work Title.mp4", file_type=FileType.VIDEO),
+            PairItem(url="https://h/a", filename="Work Title.funscript", file_type=FileType.FUNSCRIPT),
+            PairItem(url="https://h/b", filename="Work Title (2).funscript", file_type=FileType.FUNSCRIPT),
+            PairItem(url="https://h/c", filename="Work Title.pitch.funscript", file_type=FileType.FUNSCRIPT),
+            PairItem(url="https://h/d", filename="Work Title.merged.funscript", file_type=FileType.FUNSCRIPT),
+        ])
+        _organize(pair)
+        names = sorted(p.name for p in out.glob("*.funscript"))
+        assert names == ["Work Title.funscript", "Work Title.pitch.funscript"]
+        assert len(pair.items) == 3
+        assert list(_variants(out)) == ["Main"]
+
+    def test_merged_file_is_kept_when_it_is_the_only_script(self, tmp_path):
+        out = tmp_path / "Work Title"
+        _touch(out / "Work Title.mp4", size=100)
+        (out / "Work Title.merged.funscript").write_bytes(b"ALL-AXES-IN-ONE")
+        pair = _make_pair(str(out), "Work Title", [
+            PairItem(url="https://h/v", filename="Work Title.mp4", file_type=FileType.VIDEO),
+            PairItem(url="https://h/d", filename="Work Title.merged.funscript", file_type=FileType.FUNSCRIPT),
+        ])
+        _organize(pair)
+        assert (out / "Work Title.funscript").exists() or (out / "Work Title.merged.funscript").exists()
+        assert len(pair.items) == 2

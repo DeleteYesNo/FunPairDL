@@ -1000,3 +1000,18 @@ class TestVariantVideosStayOneWork:
             self._s("cccc3333", "Same Title.funscript"),
         ]
         assert QueueManager().plan_bundle_split(items, None, "Same Title") is not None
+
+
+class TestAbbreviatedScriptNames:
+    def test_acronym_and_number_meet_the_video(self):
+        v4 = PairItem(url="https://hmvmania.com/video/auth-bedroom-diary-series-04/",
+                      filename="[Auth] Bedroom Diary Series 04.mp4", file_type=FileType.VIDEO)
+        v1 = PairItem(url="https://hmvmania.com/video/auth-bedroom-diary-series-01/",
+                      filename="[Auth] Bedroom Diary Series 01.mp4", file_type=FileType.VIDEO)
+        s4 = _vi("BDS04.funscript", FileType.FUNSCRIPT)
+        s1 = _vi("BDS#01.funscript", FileType.FUNSCRIPT)
+        groups = QueueManager().plan_bundle_split([v4, v1, s4, s1], None, "Pack")
+        by_video = {g["videos"][0].url: g for g in groups}
+        assert [s.filename for s in by_video[v4.url]["scripts"]] == ["BDS04.funscript"]
+        assert [s.filename for s in by_video[v1.url]["scripts"]] == ["BDS#01.funscript"]
+        assert by_video[v4.url]["basis"] == "tokens"

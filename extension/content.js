@@ -2383,6 +2383,19 @@ function setupProbing(panel, parsed) {
     // Bundle dropdown (Pixeldrain lists, MEGA folders, GoFile folders)
     if (info.files && info.files.length > 0) {
       const item = sizeEl.closest(".funpairdl-item");
+      // Two folders listing the same files (name + size) are one pack on
+      // two hosts: only the first is downloaded, the other is its fallback.
+      if (item) {
+        const sig = info.files.map((f) => `${(f.name || "").toLowerCase()}|${f.size || 0}`).sort().join("\n");
+        panel._bundleSigs = panel._bundleSigs || {};
+        const twin = Object.entries(panel._bundleSigs).find(([k, v]) => v === sig && k !== probeKey);
+        panel._bundleSigs[probeKey] = sig;
+        if (twin) {
+          const cb = item.querySelector('input[type="checkbox"][name]');
+          if (cb && !item.dataset.touched) _setChecked(panel, cb, false);
+          _setRowTag(item, "alternate", "備援（同內容合集）", "和另一個合集列出一樣的檔案；首選失敗時再用");
+        }
+      }
       if (item && !item.nextElementSibling?.classList?.contains("funpairdl-bundle-files")) {
         const dropdown = document.createElement("div");
         dropdown.className = "funpairdl-bundle-files";
@@ -3241,6 +3254,10 @@ async function _refreshVideoPlan(panel, parsed) {
 function _applyVideoPlan(panel, parsed, rows, plan) {
   panel._videoPlan = plan;
   panel._alternates = {};
+  // Every video row, bundles included, for the "preview beside a pack" test.
+  const allVideos = (parsed.mode === "collection"
+    ? [...(parsed.sections || []).flatMap((sec) => sec.videos), ...(parsed.commentVideos || [])]
+    : (parsed.videos || [])).map((v) => ({ v }));
   const groupOf = {};
   for (const g of plan.groups || []) {
     for (const u of Object.keys(g.members || {})) groupOf[u] = g;
@@ -3257,9 +3274,17 @@ function _applyVideoPlan(panel, parsed, rows, plan) {
     else if (role === "ambiguous") { text = "待決定"; title = "另一編碼還是另一個版本？下方選一個"; }
     else if (role === "unrelated") { text = "非本作品?"; title = title || "名稱與帖子的作品對不上；要的話自己勾"; }
     if (panel._mergeInto) { text = "已在庫"; cls = "inlib"; title = "媒體庫已有這支影片，不下載"; }
+    let want = !panel._mergeInto && (role === "chosen" || role === "variant");
+    // A tweet linked beside a pack (folder) of the real files is a preview:
+    // yt-dlp finds no video in it, or a low-res clip.
+    if (want && /(^|\.)(x\.com|twitter\.com)$/i.test((() => { try { return new URL(v.url).hostname; } catch (e) { return ""; } })())
+        && allVideos.some(({ v: o }) => o !== v && (o.isBundle || o.probedIsBundle || isBundleUrl(o.url)))) {
+      want = false;
+      text = "預覽（合集在下）"; cls = "unrelated"; title = "推文旁邊有完整檔案的合集；要這支的話自己勾";
+    }
     _setRowTag(row, cls, text, title);
     if (cb && !row.dataset.touched) {
-      _setChecked(panel, cb, !panel._mergeInto && (role === "chosen" || role === "variant"));
+      _setChecked(panel, cb, want);
     }
     const ask = role === "ambiguous" ? (plan.ambiguous || []).find((a) => a.url === v.url) : null;
     _renderAskRow(panel, parsed, row, v, ask);
@@ -3440,6 +3465,7 @@ function _batchAssess(card) {
   const panel = card._panel;
   const parsed = card._parsed;
   if (!panel || !parsed || !panel.parentNode) return;
+  if (card.classList.contains("funpairdl-batch-card-sent")) return;
   const overlay = card.closest("#funpairdl-batch-overlay");
   const statusEl = card.querySelector(".funpairdl-batch-card-status");
   const summaryEl = card.querySelector(".funpairdl-batch-card-summary");
@@ -3542,8 +3568,24 @@ function _batchRefreshSummary(overlay) {
       `<span>無法讀取 ${count("dead")}</span>`,
     ];
     if (count("pending")) bits.push(`<span>判斷中 ${count("pending")}</span>`);
-    if (sent) bits.push(`<span>已送出 ${sent}</span>`);
+    if (sent) bits.push(`<span class="funpairdl-batch-tier" style="color:#2e9e6a">✓ 已送出 ${sent} 帖</span>`);
     el.innerHTML = bits.join(" · ");
+  }
+  // After a send: one line that says what happened, and stays.
+  let done = overlay.querySelector(".funpairdl-batch-sent-banner");
+  if (overlay._lastSend) {
+    if (!done) {
+      done = document.createElement("div");
+      done.className = "funpairdl-batch-sent-banner";
+      overlay.querySelector(".funpairdl-batch-header").after(done);
+    }
+    const { sent: n, failed: f } = overlay._lastSend;
+    const pending = cards.filter((c) => c.dataset.tier === "ask" || c.dataset.tier === "auto").length;
+    done.innerHTML = `✓ <b>${sent} 帖已送進佇列</b>（${n} 組${f ? `，${f} 組失敗` : ""}）。` +
+      `下載進度在 Downloads 分頁；勾了「完成後關分頁」的帖子會在下載完成後自動關閉。` +
+      (pending ? `還有 ${pending} 帖沒送。` : "");
+  } else if (done) {
+    done.remove();
   }
   const btn = overlay.querySelector(".funpairdl-batch-send-auto");
   if (btn && !btn._busy) {
@@ -3659,12 +3701,23 @@ const _BATCH_OVERLAY_CSS = `
 }
 .funpairdl-batch-card-header {
   display: flex; align-items: center; gap: 10px; padding: 10px 12px;
-  font-weight: 600; font-size: 14px;
+  font-weight: 600; font-size: 14px; flex-wrap: wrap;
 }
 .funpairdl-batch-card-cb { width: 16px; height: 16px; accent-color: #4a90d9; flex-shrink: 0; }
-.funpairdl-batch-card-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.funpairdl-batch-card-title { flex: 1 1 240px; min-width: 240px; overflow-wrap: anywhere; }
 .funpairdl-batch-card-status { color: #9aa5b1; font-size: 12px; font-weight: 400; flex-shrink: 0; }
-.funpairdl-batch-card-sent { opacity: 0.65; }
+.funpairdl-batch-card-sent { opacity: 0.8; border-color: #2e9e6a !important; background: #0f1f18; }
+.funpairdl-batch-card-sent .funpairdl-batch-card-status { color: #4fd18b; font-weight: 700; font-size: 13px; }
+.funpairdl-batch-sent-banner {
+  margin: 10px 14px 0; padding: 8px 12px; border-radius: 6px;
+  background: rgba(46, 158, 106, 0.18); border: 1px solid #2e9e6a; color: #d4f5e3; font-size: 13px;
+}
+#funpairdl-batch-overlay select, #funpairdl-batch-overlay select:focus,
+#funpairdl-batch-overlay select:focus-visible, #funpairdl-batch-overlay button:focus,
+#funpairdl-batch-overlay button:focus-visible, #funpairdl-batch-overlay input:focus-visible {
+  outline: none !important; box-shadow: none !important; transition: none !important; animation: none !important;
+}
+#funpairdl-batch-overlay .funpairdl-resolution-select { flex: 0 1 auto; width: auto; max-width: 260px; }
 .funpairdl-batch-card-dead { opacity: 0.5; }
 .funpairdl-batch-card-body { padding: 0 10px 10px; }
 .funpairdl-batch-panel .funpairdl-panel-body {
@@ -3973,8 +4026,12 @@ async function _batchSendCard(card) {
     if ((res.sent || 0) > 0 && !(res.failed || 0)) {
       statusEl.textContent = `✓ 已送出 ${res.sent} 組`;
       card.classList.add("funpairdl-batch-card-sent");
+      card.classList.add("funpairdl-batch-card-collapsed");
+      card.dataset.tier = "sent";
       const cb = card.querySelector(".funpairdl-batch-card-cb");
       if (cb) cb.checked = false;
+      const t = card.querySelector(".funpairdl-batch-card-toggle");
+      if (t) t.textContent = "展開";
       // Auto-close: hand the created pair ids to the app; it closes this
       // topic's tab(s) once every pair finishes downloading.
       const closeCb = card.querySelector(".funpairdl-batch-close-cb");
@@ -4133,8 +4190,10 @@ window.funpairdlBatchOpen = function (urls) {
         sent += res.sent || 0;
         failed += res.failed || 0;
       }
+      overlay._lastSend = { sent, failed, at: Date.now() };
       sendAutoBtn.textContent = `完成:${sent} 組已進佇列` + (failed ? `,${failed} 組失敗` : "");
     } finally {
+      _batchRefreshSummary(overlay);
       setTimeout(() => _batchRefreshSummary(overlay), 6000);
     }
   });
@@ -4158,6 +4217,8 @@ window.funpairdlBatchOpen = function (urls) {
       }
       sendAllBtn.textContent =
         `完成:${sent} 組已進佇列` + (failed ? `,${failed} 組失敗` : "");
+      overlay._lastSend = { sent, failed, at: Date.now() };
+      _batchRefreshSummary(overlay);
     } finally {
       setTimeout(() => {
         sendAllBtn.disabled = false;
@@ -4827,6 +4888,27 @@ async function _refreshWorkPlan(panel, parsed) {
       }
     }
     panel._workPlanSeeded = nextSeeded;
+    // When the post splits into works and only some have scripts, the
+    // script-less ones are other posts' videos linked for reference (a
+    // series' earlier parts): they stay home. A post with no scripts at all
+    // is a video-only post and is left alone.
+    panel._workPlanScriptless = 0;
+    if (plan && plan.split && Array.isArray(plan.groups)) {
+      const withScripts = plan.groups.filter((g) => (g.scripts || []).length > 0);
+      if (withScripts.length > 0 && withScripts.length < plan.groups.length) {
+        const bare = new Set();
+        for (const g of plan.groups) {
+          if ((g.scripts || []).length === 0) for (const u of (g.videos || [])) bare.add(u);
+        }
+        for (const r of rows.videos) {
+          if (!bare.has(r.url) || r.row.dataset.touched) continue;
+          const cb = r.row.querySelector('input[type="checkbox"][name]');
+          _setChecked(panel, cb, false);
+          _setRowTag(r.row, "unrelated", "無腳本，略過", "這支影片配不到帖子裡的任何腳本；要的話自己勾");
+          panel._workPlanScriptless += 1;
+        }
+      }
+    }
   }
   _renderWorkPlan(panel, parsed);
 }
