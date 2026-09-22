@@ -11,10 +11,13 @@ import argparse
 import os
 import re
 import sys
+from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-LIB = r"G:\Download\library"
+from funpairdl.persistence.settings import Settings  # noqa: E402
+
 VID = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".wmv", ".ts", ".flv"}
 AX = re.compile(r"\.(twist|surge|sway|roll|pitch|vibe|vibration|vib|pump|stroke|"
                 r"suck|valve|lube|L0|L1|L2|L3|R0|R1|R2|V0|V1|V2|A0|A1|A2)$", re.I)
@@ -36,10 +39,12 @@ def nkey(s: str) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true")
+    ap.add_argument("--lib", help="library root (default: download_dir in config.json)")
     args = ap.parse_args()
+    lib_root = args.lib or Settings.load().download_dir
 
-    files = [f for f in os.listdir(LIB) if os.path.isfile(os.path.join(LIB, f))]
-    dirs = [d for d in os.listdir(LIB) if os.path.isdir(os.path.join(LIB, d))
+    files = [f for f in os.listdir(lib_root) if os.path.isfile(os.path.join(lib_root, f))]
+    dirs = [d for d in os.listdir(lib_root) if os.path.isdir(os.path.join(lib_root, d))
             and d.lower() != "_trash" and not d.startswith("_dup_quarantine")]  # FunLib's bin is invisible
 
     from collections import defaultdict
@@ -69,10 +74,10 @@ def main() -> None:
         # so strip them here too or the rename target won't match.
         dest_dir = dest_dir.rstrip(" .") or "_untitled"
         moved = 0
-        os.makedirs(os.path.join(LIB, dest_dir), exist_ok=True)
+        os.makedirs(os.path.join(lib_root, dest_dir), exist_ok=True)
         for fn in fnames:
-            src = os.path.join(LIB, fn)
-            dst = os.path.join(LIB, dest_dir, fn)
+            src = os.path.join(lib_root, fn)
+            dst = os.path.join(lib_root, dest_dir, fn)
             if os.path.exists(dst):
                 print(f"    SKIP (exists): {dest_dir}/{fn[:40]}")
                 continue

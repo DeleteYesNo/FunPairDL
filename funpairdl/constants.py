@@ -4,7 +4,7 @@ APP_NAME = "FunPairDL"
 APP_VERSION = "0.1.0"
 
 # Default paths
-DEFAULT_DOWNLOAD_DIR = Path("G:/Download/library")
+DEFAULT_DOWNLOAD_DIR = Path.home() / "Downloads" / "FunPairDL"
 CONFIG_DIR = Path(__file__).resolve().parent.parent
 CONFIG_FILE = CONFIG_DIR / "config.json"
 QUEUE_FILE = CONFIG_DIR / "queue.json"
