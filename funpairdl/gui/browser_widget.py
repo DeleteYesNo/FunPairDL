@@ -1432,7 +1432,11 @@ class BrowserWidget(QWidget):
             logger.exception("Auto-close: failed to load registrations")
 
     def _persist_autoclose(self):
-        snapshot = {tid: dict(e) for tid, e in self._autoclose.items()}
+        # Only what a restart needs: the "_" keys are this session's state
+        # (the frozenset of failed ids made every save of a topic with a
+        # failed pair raise, so no registration change was ever written).
+        snapshot = {tid: {k: v for k, v in e.items() if not k.startswith("_")}
+                    for tid, e in self._autoclose.items()}
 
         def _apply(s, snap=snapshot):
             s.batch_autoclose = snap
