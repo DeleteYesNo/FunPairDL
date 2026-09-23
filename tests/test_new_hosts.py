@@ -1,5 +1,5 @@
-"""The JOI Database, WatchHentai and pixivFANBOX: the page parsing the providers and
-their probes share. Synthetic pages; no network."""
+"""New hosts (The JOI Database, WatchHentai, pixivFANBOX, PMVHaven, Faptap,
+MediaFire): the page parsing their providers and probes share. Synthetic pages; no network."""
 import base64
 
 from funpairdl.providers.joidb import (
@@ -118,3 +118,72 @@ class TestFanbox:
         assert file_name(post, vids[0], False) == "Garden Party.mp4"
         assert file_name(post, vids[1], True) == "Garden Party - Uncensored.mp4"
         assert "¥300" in paid_error(300) and paid_error(300).startswith("Paid content")
+
+
+class TestPmvHaven:
+    PAGE = "https://pmvhaven.com/video/garden-party_0123456789abcdef01234567"
+
+    def test_routing(self):
+        from funpairdl.providers.pmvhaven import PmvHavenProvider
+        assert PmvHavenProvider.can_handle(self.PAGE)
+        assert not PmvHavenProvider.can_handle("https://pmvhaven.com/profile/someone")
+        assert not YtdlpGenericProvider.can_handle(self.PAGE)
+        assert detect_provider(self.PAGE) == "pmvhaven"
+
+    def test_master_and_original(self):
+        from funpairdl.providers.pmvhaven import original_url, parse_master, parse_title, pick
+        esc = chr(92) + "u002F"
+        html = ('<title>Garden Party - PMVHaven</title><script>window.__NUXT__=["'
+                + "https:" + esc * 2 + "cloud.example" + esc + "videos" + esc
+                + 'someone_-_Garden_Party_17_abc.mp4' + esc + 'master.m3u8"]</script>')
+        m = parse_master(html)
+        assert m == "https://cloud.example/videos/someone_-_Garden_Party_17_abc.mp4/master.m3u8"
+        assert original_url(m) == "https://cloud.example/videos/someone_-_Garden_Party_17_abc.mp4"
+        assert parse_title(html) == "Garden Party"
+        v = [{"height": 720, "bandwidth": 1}, {"height": 1080, "bandwidth": 2}, {"height": 2160, "bandwidth": 9}]
+        assert pick(v, "1080")["height"] == 1080
+        assert pick(v, "2160") is None      # the top height is the original upload
+        assert pick(v, "best") is None
+        assert pick(v, "480") is None
+
+
+class TestFaptap:
+    def test_routing_and_sources(self):
+        from funpairdl.providers.faptap import FaptapProvider, parse_sources, select_source, video_id
+        url = "https://faptap.net/v/1234567890123456789"
+        assert FaptapProvider.can_handle(url) and video_id(url) == "1234567890123456789"
+        assert not YtdlpGenericProvider.can_handle(url)
+        src = parse_sources([
+            {"url": "stream?s=a", "quality": "720", "format": "mp4"},
+            {"url": "stream?s=b", "quality": "480", "format": "mp4"},
+            {"url": "stream?s=c", "quality": "1080", "format": "m3u8"},
+        ])
+        assert [s["height"] for s in src] == [480, 720]
+        assert src[1]["url"] == "https://faptap.net/api/stream?s=a"
+        assert select_source(src, "480")["height"] == 480
+        assert select_source(src, "1080")["height"] == 720
+
+
+class TestMediafire:
+    def test_routing(self):
+        from funpairdl.core.queue_manager import QueueManager
+        from funpairdl.providers.mediafire import MediafireProvider, file_key, folder_key, is_folder_url
+        f = "https://www.mediafire.com/file/abc123def456/Garden_Party.mp4/file"
+        d = "https://www.mediafire.com/folder/zyx987/Garden_Party"
+        assert MediafireProvider.can_handle(f) and file_key(f) == "abc123def456"
+        assert MediafireProvider.can_handle("https://www.mediafire.com/file_premium/abc123def456/x.mp4/file")
+        assert not MediafireProvider.can_handle(d)
+        assert is_folder_url(d) and folder_key(d) == "zyx987"
+        assert QueueManager._is_bundle_url(d) and not QueueManager._is_bundle_url(f)
+        assert not YtdlpGenericProvider.can_handle(f)
+        assert detect_provider(d) == "mediafire"
+
+    def test_download_button(self):
+        from funpairdl.providers.mediafire import name_from_link, parse_download_link
+        html = ('<a class="input popsok" aria-label="Download file" '
+                'href="https://download1234.mediafire.com/tok/abc123def456/Garden+Party.mp4" '
+                'id="downloadButton" rel="nofollow">')
+        link = parse_download_link(html)
+        assert link == "https://download1234.mediafire.com/tok/abc123def456/Garden+Party.mp4"
+        assert name_from_link(link) == "Garden Party.mp4"
+        assert parse_download_link("<p>nothing</p>") == ""

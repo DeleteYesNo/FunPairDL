@@ -281,6 +281,15 @@ async def _probe_uncached(
     if provider == "fanbox" and "/posts/" in url:
         return await _probe_fanbox(url, session)
 
+    if provider == "pmvhaven":
+        return await _probe_pmvhaven(url, session)
+
+    if provider == "faptap":
+        return await _probe_faptap(url, session)
+
+    if provider == "mediafire":
+        return await _probe_mediafire(url, session)
+
     # EroScripts short-urls: need cookies, skip probing
     if provider == "eroscripts":
         return {"success": True, "provider": "eroscripts", "size": 0}
@@ -759,6 +768,84 @@ async def _probe_fanbox(url: str, session: aiohttp.ClientSession) -> dict:
         }
     except Exception as e:
         logger.info("pixivFANBOX probe failed for %s: %s", url[:80], e)
+        return {"success": False, "error": str(e)}
+
+
+async def _probe_pmvhaven(url: str, session: aiohttp.ClientSession) -> dict:
+    """PMVHaven: the original upload's size, the stream's top height and the
+    mp4's own length."""
+    try:
+        from funpairdl.providers.pmvhaven import build_filename, fetch_video, ranged_size
+        from funpairdl.utils.media_duration import probe_media_duration
+
+        v = await fetch_video(url, session)
+        size = await ranged_size(v["mp4"], session)
+        duration = await probe_media_duration(v["mp4"], session,
+                                              headers={"User-Agent": BROWSER_USER_AGENT})
+        # The streams below the top height (sized bandwidth x length), and
+        # the original upload at the top — what resolve picks per setting.
+        formats = [{"height": x["height"], "size": int(x["bandwidth"] * duration / 8) if duration else 0,
+                    "format_id": f"{x['height']}p"}
+                   for x in v["variants"] if x["height"] < v["height"]]
+        if v["height"]:
+            formats.append({"height": v["height"], "size": size, "format_id": "original"})
+        return {
+            "success": True, "provider": "pmvhaven", "title": v["title"],
+            "filename": build_filename(v["title"], v["mp4"]), "size": size,
+            "formats": formats, "duration": duration,
+        }
+    except Exception as e:
+        logger.info("PMVHaven probe failed for %s: %s", url[:80], e)
+        return {"success": False, "error": str(e)}
+
+
+async def _probe_faptap(url: str, session: aiohttp.ClientSession) -> dict:
+    """Faptap: its proxied mp4 per quality, each sized with a ranged GET."""
+    try:
+        from funpairdl.providers.faptap import fetch_video, ranged_size
+
+        v = await fetch_video(url, session)
+
+        async def _size(u: str) -> int:
+            try:
+                return await ranged_size(u, session)
+            except Exception:
+                return 0
+
+        sizes = await asyncio.gather(*[_size(s["url"]) for s in v["sources"]])
+        return {
+            "success": True, "provider": "faptap", "title": v["name"],
+            "filename": (v["name"] + ".mp4") if v["name"] else "",
+            "formats": [{"height": s["height"], "size": sz, "format_id": f"{s['height']}p"}
+                        for s, sz in zip(v["sources"], sizes)],
+            "duration": v["duration"] or None,
+        }
+    except Exception as e:
+        logger.info("Faptap probe failed for %s: %s", url[:80], e)
+        return {"success": False, "error": str(e)}
+
+
+async def _probe_mediafire(url: str, session: aiohttp.ClientSession) -> dict:
+    """MediaFire: a folder lists its files (a pack); a file page gives its
+    real link, size and length."""
+    try:
+        from funpairdl.providers import mediafire as mf
+
+        if mf.is_folder_url(url):
+            files = await mf.list_folder(url, session)
+            if not files:
+                return {"success": False, "error": "Not a video: empty MediaFire folder"}
+            return {"success": True, "provider": "mediafire", "filename": f"{len(files)} files",
+                    "size": sum(f["size"] for f in files), "files": files}
+        link, filename, size = await mf.resolve_file(url, session)
+        from funpairdl.utils.media_duration import probe_media_duration
+        duration = await probe_media_duration(link, session,
+                                              headers={"User-Agent": BROWSER_USER_AGENT},
+                                              filename=filename)
+        return {"success": True, "provider": "mediafire", "filename": filename,
+                "size": size, "duration": duration}
+    except Exception as e:
+        logger.info("MediaFire probe failed for %s: %s", url[:80], e)
         return {"success": False, "error": str(e)}
 
 

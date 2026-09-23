@@ -24,6 +24,9 @@ _SKIP_DOMAINS = [
     "the-joi-database.com",
     "watchhentai.net",
     "fanbox.cc",
+    "pmvhaven.com",
+    "faptap.net",
+    "mediafire.com",
 ]
 
 

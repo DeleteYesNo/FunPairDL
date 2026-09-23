@@ -53,6 +53,10 @@ const VIDEO_PRIORITY = {
   "the-joi-database.com": 7,
   "watchhentai.net": 7,
   "fanbox.cc": 7,
+  "pmvhaven.com": 7,
+  "faptap.net": 7,
+  // File host: single files and folders (a folder is a pack)
+  "mediafire.com": 3,
   // Adult video sites (yt-dlp supported)
   "pornhub.com": 8,
   "xvideos.com": 8,
@@ -119,6 +123,7 @@ function isBundleUrl(url) {
     if (host.includes("pixeldrain.com") && /^\/(l|d)\//.test(path)) return true;
     if ((host.includes("mega.nz") || host.includes("mega.co.nz")) && path.includes("/folder/")) return true;
     if (host.includes("gofile.io") && /^\/d\//.test(path)) return true;
+    if (host.includes("mediafire.com") && path.includes("/folder/")) return true;
   } catch (e) {}
   return false;
 }
@@ -275,6 +280,9 @@ function getVideoLabel(url) {
     if (host.includes("the-joi-database")) return "The JOI Database";
     if (host.includes("watchhentai")) return "WatchHentai";
     if (host.includes("fanbox.cc")) return "pixivFANBOX";
+    if (host.includes("pmvhaven")) return "PMVHaven";
+    if (host.includes("faptap")) return "Faptap";
+    if (host.includes("mediafire")) return "MediaFire";
     if (host.includes("pornhub")) return "PornHub";
     if (host.includes("xvideos")) return "XVideos";
     if (host.includes("xnxx")) return "XNXX";

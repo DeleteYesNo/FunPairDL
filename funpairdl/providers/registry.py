@@ -13,6 +13,9 @@ from funpairdl.providers.hmvmania import HmvManiaProvider
 from funpairdl.providers.socigames import SociGamesProvider
 from funpairdl.providers.e621 import E621Provider
 from funpairdl.providers.fanbox import FanboxProvider
+from funpairdl.providers.faptap import FaptapProvider
+from funpairdl.providers.mediafire import MediafireProvider
+from funpairdl.providers.pmvhaven import PmvHavenProvider
 from funpairdl.providers.joidb import JoiDbProvider
 from funpairdl.providers.watchhentai import WatchHentaiProvider
 from funpairdl.providers.direct_http import DirectHTTPProvider
@@ -42,6 +45,9 @@ class ProviderRegistry:
             E621Provider(),
             JoiDbProvider(),
             FanboxProvider(),
+            PmvHavenProvider(),
+            FaptapProvider(),
+            MediafireProvider(),
             WatchHentaiProvider(),
             YtdlpGenericProvider(),
             DirectHTTPProvider(),  # fallback

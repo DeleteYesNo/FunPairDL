@@ -639,6 +639,8 @@ check("external script row shows its host", extRow.includes('<span class="funpai
   check("fanbox creator page is a credit link", ctx.isNonVideoPath("https://someone.fanbox.cc/"), true);
   check("fanbox post is not", ctx.isNonVideoPath("https://someone.fanbox.cc/posts/123"), false);
   check("fanbox download is not", ctx.isNonVideoPath("https://downloads.fanbox.cc/files/post/1/a.mp4"), false);
+  check("mediafire folder is a pack", ctx.isBundleUrl("https://www.mediafire.com/folder/abc/Name"), true);
+  check("mediafire file is not", ctx.isBundleUrl("https://www.mediafire.com/file/abc/x.mp4/file"), false);
   check("credits: title prefix + OP",
     ctx._postCredits({ title: "[Creator] Work - Part", opUsername: "poster" }).join("|"), "Creator|poster");
   check("credits: no prefix", ctx._postCredits({ title: "Work (Suggested)", opUsername: "" }).length, 0);

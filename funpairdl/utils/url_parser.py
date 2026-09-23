@@ -24,6 +24,9 @@ def detect_provider(url: str) -> str:
         "the-joi-database.com": "joidb",
         "watchhentai.net": "watchhentai",
         "fanbox.cc": "fanbox",
+        "pmvhaven.com": "pmvhaven",
+        "faptap.net": "faptap",
+        "mediafire.com": "mediafire",
     }
 
     for domain, provider in provider_map.items():
@@ -78,6 +81,9 @@ _PROVIDER_LABELS = {
     "joidb": "The JOI Database",
     "watchhentai": "WatchHentai",
     "fanbox": "pixivFANBOX",
+    "pmvhaven": "PMVHaven",
+    "faptap": "Faptap",
+    "mediafire": "MediaFire",
 }
 
 

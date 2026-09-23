@@ -623,6 +623,10 @@ class QueueManager:
                 and "/folder/" in url and "/file/" not in url):
             return True
 
+        # MediaFire folder: its files are listed and fetched one by one.
+        if (host == "mediafire.com" or host.endswith(".mediafire.com")) and "/folder/" in parsed.path:
+            return True
+
         return False
 
     def remove_pair(self, pair_id: str) -> None:
@@ -997,11 +1001,10 @@ class QueueManager:
             try:
                 url = bundle_item.url
                 provider = bundle_item.provider_name
-                if not provider:  # self-healed item may lack a provider name
-                    if "mega" in url:
-                        provider = "mega"
-                    elif "pixeldrain" in url:
-                        provider = "pixeldrain"
+                if provider not in ("pixeldrain", "mega", "mediafire"):
+                    # A self-healed item may lack a provider name, and one
+                    # queued before its host had a provider says "direct".
+                    provider = detect_provider(url)
                 resolved_files = []
 
                 if provider == "pixeldrain":
@@ -1031,6 +1034,17 @@ class QueueManager:
                         bundle_item.is_bundle = False
                         bundle_item.filename = self._guess_filename(url, "video")
                         continue
+                elif provider == "mediafire":
+                    # Each file stays a file-page URL: its download link
+                    # changes per visit, so the provider reads it at resolve.
+                    from funpairdl.providers.mediafire import list_folder
+                    async with aiohttp.ClientSession() as mf_session:
+                        for f in await list_folder(url, mf_session):
+                            resolved_files.append(ResolvedFile(
+                                direct_url=f["url"],
+                                filename=sanitize_filename(f["name"].replace("/", " - ")),
+                                total_size=f["size"],
+                            ))
                 else:
                     bundle_item.is_bundle = False
                     continue
@@ -1057,7 +1071,8 @@ class QueueManager:
                         provider_name=provider,
                         total_bytes=rf.total_size,
                         headers=rf.headers or {},
-                        resolved_url=rf.direct_url,
+                        # A MediaFire file page is resolved like any link.
+                        resolved_url="" if provider == "mediafire" else rf.direct_url,
                     )
                     new_items.append(new_item)
 

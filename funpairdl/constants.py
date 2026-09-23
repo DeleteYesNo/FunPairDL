@@ -80,6 +80,9 @@ VIDEO_HOSTS = [
     "the-joi-database.com",
     "watchhentai.net",
     "fanbox.cc",
+    "pmvhaven.com",
+    "faptap.net",
+    "mediafire.com",
 ]
 
 # Known script extensions
