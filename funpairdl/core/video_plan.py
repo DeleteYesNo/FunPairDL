@@ -15,7 +15,10 @@ decides for them:
 - a name that differs only by a version-ish word ("v2", "final", "(1)") is
   ambiguous — re-encode or variant? — and is returned for the user to
   decide, unless a preference settles it;
-- comment links whose name matches no OP video are left alone.
+- comment links whose name matches no OP video are left alone;
+- a link whose probe failed (unsupported site, 404) is never the pick while
+  a live link to the same video exists, and a video with no live link at
+  all is "dead" — nothing to download, the panel says so.
 
 Everything is name- and probe-driven (filename, size, height, duration);
 nothing is downloaded here.
@@ -61,6 +64,7 @@ class VideoSpec:
     height: int = 0              # best known height (yt-dlp formats) or 0
     duration: float = 0.0
     priority: float = 99.0       # host priority from the panel (lower = better)
+    failed: bool = False         # its probe failed: unsupported site, gone
     key: str = ""                # filled in: mirror key
     stem: str = ""               # filled in: comparison stem
     tokens: set[str] = field(default_factory=set)
@@ -124,15 +128,18 @@ def _duration_differs(a: float, b: float) -> bool:
     return abs(a - b) > max(3.0, 0.02 * max(a, b))
 
 
-def _classify(spec: VideoSpec, ref: VideoSpec) -> tuple[str, frozenset[str], str]:
+def _classify(spec: VideoSpec, ref: VideoSpec,
+              credits: frozenset[str] = frozenset()) -> tuple[str, frozenset[str], str]:
     """(kind, cluster key, tag) of `spec` relative to `ref`:
-    kind = "mirror" | "reencode" | "ambiguous" | "variant"."""
+    kind = "mirror" | "reencode" | "ambiguous" | "variant".
+    `credits` are the post's creator words: a host title that adds
+    "[Creator]" to the file's name is the same video, not a variant."""
     from funpairdl.core.queue_manager import QueueManager
     if _duration_differs(spec.duration, ref.duration):
         tag = QueueManager._variant_tag(spec.stem + ".mp4", ref.stem + ".mp4") or f"{int(round(spec.duration))}s"
         return "variant", frozenset({"__dur__", str(int(round(spec.duration)))}), tag
     diff = (spec.tokens - ref.tokens) | (ref.tokens - spec.tokens)
-    diff = {t for t in diff if not _ID_TOKEN_RE.match(t)}
+    diff = {t for t in diff if not _ID_TOKEN_RE.match(t) and t not in credits}
     if not diff:
         return "mirror", frozenset(), ""
     variant = {t for t in diff if not _ENCODE_TOKEN_RE.match(t) and not _OPAQUE_TOKEN_RE.match(t)}
@@ -156,8 +163,9 @@ def _qualifies(spec: VideoSpec, floor: str, top_height: int) -> bool:
 
 
 def _order(cands: list[VideoSpec], prefs: Prefs, pending: set[str] | None = None) -> list[VideoSpec]:
-    """Best pick first. An unanswered ambiguity (`pending`) is never the
-    pick — it rides last as a fallback until the user says what it is."""
+    """Best pick first. A dead link (failed probe) is never the pick while a
+    live one exists; an unanswered ambiguity (`pending`) is never the pick —
+    it rides last as a fallback until the user says what it is."""
     pending = pending or set()
     heights = [s.height or _height_from_name(s.stem) for s in cands]
     top = max(heights) if heights else 0
@@ -167,19 +175,20 @@ def _order(cands: list[VideoSpec], prefs: Prefs, pending: set[str] | None = None
 
     if prefs.pick_mode == "best_quality":
         def k(s: VideoSpec):
-            return (1 if s.url in pending else 0,
+            return (1 if s.failed else 0, 1 if s.url in pending else 0,
                     0 if _qualifies(s, prefs.min_resolution, top) else 1,
                     -h_of(s), -(s.size or 0), 0 if s.source == "OP" else 1, s.priority)
     else:
         def k(s: VideoSpec):
-            return (1 if s.url in pending else 0,
+            return (1 if s.failed else 0, 1 if s.url in pending else 0,
                     0 if _qualifies(s, prefs.min_resolution, top) else 1,
                     0 if s.size else 1, s.size or 0, 0 if s.source == "OP" else 1, s.priority)
     return sorted(cands, key=k)
 
 
 def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
-                decisions: dict[str, str] | None = None) -> dict:
+                decisions: dict[str, str] | None = None,
+                credits: list[str] | None = None) -> dict:
     """Group a post's video links and pick what to download.
 
     Returns::
@@ -188,14 +197,19 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
                      "chosen": url, "alternates": [url], "members": {url: role},
                      "reason": str}],
          "ambiguous": [{"url", "ref", "tag", "default": "reencode"}],
-         "roles": {url: "chosen"|"alternate"|"variant"|"ambiguous"|"unrelated"}}
+         "roles": {url: "chosen"|"alternate"|"variant"|"ambiguous"|"unrelated"|"dead"}}
 
     `decisions` = {url: "reencode" | "variant"} answers a previous call's
     ambiguities. With ``encode_vs_variant`` set, they are answered that way.
+    `credits` = the post's creator names (the title's "[Creator]" prefix, the
+    OP): words a host adds to a title that don't make another video.
+    A video whose every link failed its probe is "dead": its group has no
+    chosen link and every member's role is "dead".
     """
     from funpairdl.core.queue_manager import QueueManager
     prefs = prefs or Prefs()
     decisions = decisions or {}
+    credit_words = frozenset(t for c in (credits or []) for t in _tokens(c) if len(t) >= 3)
     for v in videos:
         v.stem = _stem_of(v)
         v.tokens = _tokens(v.stem)
@@ -274,15 +288,19 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
                            "alternates": [], "members": {v.url: "unrelated" for v in members},
                            "reason": "留言的影片與帖子的作品名稱對不上"})
             continue
-        # Reference: the OP link with the shortest name (fewest qualifiers).
+        # Reference: the live OP link with the shortest name (fewest qualifiers).
         ops = [v for v in members if v.source == "OP"] or members
-        ref = min(ops, key=lambda v: (len(v.tokens), v.priority))
+        ref = min(ops, key=lambda v: (v.failed, len(v.tokens), v.priority))
         clusters: dict[frozenset, dict] = {}
         for v in members:
             if v is ref:
                 kind, ckey, tag = "mirror", frozenset(), ""
             else:
-                kind, ckey, tag = _classify(v, ref)
+                kind, ckey, tag = _classify(v, ref, credit_words)
+            if kind == "ambiguous" and (v.failed or ref.failed):
+                # Nothing to ask about a link that can't be downloaded: it
+                # only ever serves as a fallback.
+                kind, ckey = "reencode", frozenset()
             if kind == "ambiguous":
                 choice = decisions.get(v.url) or (
                     prefs.encode_vs_variant if prefs.encode_vs_variant in ("reencode", "variant") else "")
@@ -305,6 +323,18 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
                              {u for u, r in roles.items() if r == "ambiguous"})
             chosen, rest = ordered[0], ordered[1:]
             is_primary = ckey == frozenset()
+            if chosen.failed:
+                # The best link is dead only when every link is.
+                for v in c["members"]:
+                    roles[v.url] = "dead"
+                groups.append({
+                    "key": key, "kind": "primary" if is_primary else "variant",
+                    "tag": "" if is_primary else c["tag"], "dead": True,
+                    "chosen": "", "alternates": [],
+                    "members": {v.url: "dead" for v in c["members"]},
+                    "reason": "所有連結都無法下載",
+                })
+                continue
             member_roles = {}
             for v in c["members"]:
                 if v is chosen:

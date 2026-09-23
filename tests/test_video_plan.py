@@ -3,9 +3,9 @@ re-encodes, variants on their own, ambiguities surfaced."""
 from funpairdl.core.video_plan import Prefs, VideoSpec, plan_videos
 
 
-def _v(url, name="", source="OP", size=0, height=0, duration=0.0, priority=5.0):
+def _v(url, name="", source="OP", size=0, height=0, duration=0.0, priority=5.0, failed=False):
     return VideoSpec(url=url, name=name, source=source, size=size, height=height,
-                     duration=duration, priority=priority)
+                     duration=duration, priority=priority, failed=failed)
 
 
 def _group_of(res, url):
@@ -189,3 +189,57 @@ class TestCoreAliasing:
         g = res["groups"][0]
         assert g["chosen"] == "https://rule34video.com/video/1/hmv-channel-work-auth/"
         assert len(g["alternates"]) == 2
+
+
+class TestDeadLinks:
+    def test_live_mirror_wins_over_a_smaller_dead_one(self):
+        res = plan_videos([
+            _v("https://h/dead", "Work.mp4", size=10, failed=True),
+            _v("https://h/live", "Work.mp4", size=500),
+        ], Prefs(pick_mode="smallest"))
+        g = res["groups"][0]
+        assert g["chosen"] == "https://h/live"
+        assert res["roles"]["https://h/dead"] == "alternate"
+
+    def test_video_with_only_dead_links_is_dead(self):
+        res = plan_videos([
+            _v("https://www.the-joi-database.com/watch/aaaa1111bbbb2222", "", failed=True),
+        ])
+        assert res["roles"] == {"https://www.the-joi-database.com/watch/aaaa1111bbbb2222": "dead"}
+        g = res["groups"][0]
+        assert g["dead"] is True and g["chosen"] == ""
+
+    def test_dead_link_is_never_an_open_question(self):
+        res = plan_videos([
+            _v("https://h/op", "Work.mp4", size=300),
+            _v("https://h/c", "Work v2.mp4", size=100, source="comment", failed=True),
+        ], Prefs(encode_vs_variant="ask"))
+        assert res["ambiguous"] == []
+        assert res["groups"][0]["chosen"] == "https://h/op"
+
+    def test_dead_reference_does_not_block_a_live_link(self):
+        res = plan_videos([
+            _v("https://h/a", "Work.mp4", failed=True),
+            _v("https://h/b", "Work 1080p.mp4", size=100),
+        ])
+        assert res["roles"]["https://h/b"] == "chosen"
+
+
+class TestCredits:
+    def test_creator_tag_on_a_host_title_is_the_same_video(self):
+        vids = [
+            _v("https://mega.nz/file/x#y", "Garden Party - Night Shift.mp4", size=22_000_000),
+            _v("https://rule34video.com/video/1/garden-party-night-shift-creator/",
+               "Garden Party Night Shift [Creator]", size=22_000_000, height=1080),
+        ]
+        res = plan_videos(vids, credits=["Creator"])
+        assert len(res["groups"]) == 1
+        assert sorted(res["roles"].values()) == ["alternate", "chosen"]
+
+    def test_without_credits_the_tag_still_reads_as_a_variant(self):
+        vids = [
+            _v("https://h/a", "Work.mp4", size=100),
+            _v("https://h/b", "Work [Creator]", size=100),
+        ]
+        res = plan_videos(vids)
+        assert res["roles"]["https://h/b"] == "variant"

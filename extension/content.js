@@ -1476,6 +1476,7 @@ const PROBE_RETRY_DELAY_MS = 6000;
 const _probeCache = new Map();     // url → { ts, value } successful probe response
 const _probeInflight = new Map();  // url → pending Promise (dedup concurrent)
 const _probeSizeByUrl = new Map(); // url → { ts, value } probed byte size (send-pair "sizes")
+const _probeErrors = new Map();    // url → why its last probe failed ("Unsupported URL", "Status 404")
 let _probeActive = 0;
 const _probeWaiters = [];
 
@@ -1529,7 +1530,11 @@ async function _probeOnce(url) {
   await _probeAcquire();
   try {
     const response = await _sendMsg("probe-url", { url });
-    if (!response || !response.success) return null;
+    if (!response || !response.success) {
+      if (response && response.error) _probeErrors.set(url, String(response.error));
+      return null;
+    }
+    _probeErrors.delete(url);
     _recordProbeSizes(url, response);
     // Only cache results that carried something useful — failures may be
     // transient and should be retried on the next panel open.
@@ -2446,11 +2451,16 @@ function setupProbing(panel, parsed) {
       if (!info) {
         sizeEl.textContent = "?";
         v.probeFailed = true;
+        v.probeError = _probeErrors.get(v.url) || "";
+        if (v.probeError) sizeEl.title = v.probeError;
         _retryLater(probeKey, () => probeVideo(v, probeKey));
         _probeEnd(panel, parsed, probeKey);
+        // The plan hears about the failure too: a dead link never wins.
+        _scheduleVideoPlan(panel, parsed);
         return;
       }
       v.probeFailed = false;
+      v.probeError = "";
       // A folder/list link: its files are planned in their own dropdown.
       v.probedIsBundle = Array.isArray(info.files) && info.files.length > 0;
       probeResults[probeKey] = info;
@@ -2464,6 +2474,7 @@ function setupProbing(panel, parsed) {
       // What the video plan compares: bytes and the best height on offer.
       v.probedSize = Number(info.size) || 0;
       v.probedHeight = Math.max(0, ...((info.formats || []).map((f) => Number(f.height) || 0)));
+      v.probedFormats = (info.formats || []).map((f) => ({ height: Number(f.height) || 0, size: Number(f.size) || 0 }));
       updateVideoSize(probeKey, info);
       showProbeExtras(sizeEl, probeKey, info);
       _attachMediaHints(sizeEl.closest(".funpairdl-item"), info);
@@ -2526,6 +2537,11 @@ function setupProbing(panel, parsed) {
   // has answered, or after 20 s regardless.
   if (panel._probeSettleTimer) clearTimeout(panel._probeSettleTimer);
   panel._probeSettleTimer = setTimeout(() => _onProbesSettled(panel, parsed), PROBE_SETTLE_TIMEOUT_MS);
+  // A batch of topics shares 4 probe slots, so a card's probes can wait
+  // minutes; past this they stop holding its decisions back.
+  panel._probeDeadline = Date.now() + PROBE_HARD_DEADLINE_MS;
+  if (panel._probeDeadlineTimer) clearTimeout(panel._probeDeadlineTimer);
+  panel._probeDeadlineTimer = setTimeout(() => _onProbesSettled(panel, parsed), PROBE_HARD_DEADLINE_MS + 100);
   if (!panel._probePending || panel._probePending.size === 0) _onProbesSettled(panel, parsed);
 
   // Resolution change → update all video sizes
@@ -2730,6 +2746,9 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
           if (realName) b.filenames[bcb.dataset.fileUrl] = realName;
           if (fn.endsWith(".funscript")) b.scriptUrls.push(bcb.dataset.fileUrl);
           else b.videoUrls.push(bcb.dataset.fileUrl);
+          // The pack's video won the video plan: the other links are its fallbacks.
+          const alts = panel._alternates && panel._alternates[bcb.dataset.fileUrl];
+          if (alts && alts.length) b.alternates[bcb.dataset.fileUrl] = [...alts];
           // The sub-group this file was placed in (see _renderBundleGroups).
           if (bundlePlan[bcb.dataset.fileUrl]) b.bundlePlan[bcb.dataset.fileUrl] = bundlePlan[bcb.dataset.fileUrl];
         }
@@ -2943,6 +2962,8 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
             if (realName) filenameMap[bcb.dataset.fileUrl] = realName;
             if (fn.endsWith(".funscript")) scriptUrls.push(bcb.dataset.fileUrl);
             else videoUrls.push(bcb.dataset.fileUrl);
+            const alts = panel._alternates && panel._alternates[bcb.dataset.fileUrl];
+            if (alts && alts.length) alternates[bcb.dataset.fileUrl] = [...alts];
             if (bundlePlanAll[bcb.dataset.fileUrl]) bundlePlan[bcb.dataset.fileUrl] = bundlePlanAll[bcb.dataset.fileUrl];
           }
         });
@@ -2972,6 +2993,14 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
       if (script.filename && !script.isExternal) filenameMap[script.url] = script.filename;
     }
 
+    // The library already holds this section's video: only its scripts go,
+    // into that work.
+    const mergeInto = (panel._sectionMerge || {})[target] || "";
+    if (mergeInto) {
+      videoUrls.length = 0;
+      for (const k of Object.keys(alternates)) delete alternates[k];
+    }
+
     if (videoUrls.length === 0 && scriptUrls.length === 0) continue;
 
     const pairName = _collectionPairName(parsed, target);
@@ -2985,8 +3014,9 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
       Object.assign(existing.filenameMap, filenameMap);
       Object.assign(existing.bundlePlan, bundlePlan);
       Object.assign(existing.alternates, alternates);
+      if (!existing.mergeInto) existing.mergeInto = mergeInto;
     } else {
-      pairs.push({ name: pairName, videoUrls, scriptUrls, scriptAuthorMap, filenameMap, bundlePlan, alternates });
+      pairs.push({ name: pairName, videoUrls, scriptUrls, scriptAuthorMap, filenameMap, bundlePlan, alternates, mergeInto });
     }
   }
 
@@ -3041,6 +3071,7 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
       sizes: resolvedSizes,
       bundlePlan: p.bundlePlan || {},
       alternates: resolvedAlternates,
+      mergeInto: p.mergeInto || "",
       sourceUrl: parsed.sourceUrl || location.href,
     });
 
@@ -3084,6 +3115,7 @@ const _SEND_PREF_DEFAULTS = {
   merge_into_library: true, batch_skip_identical: true,
 };
 const PROBE_SETTLE_TIMEOUT_MS = 20000;
+const PROBE_HARD_DEADLINE_MS = 300000;
 const VIDEO_PLAN_DEBOUNCE_MS = 700;
 let _sendPrefsPromise = null;
 
@@ -3125,7 +3157,7 @@ function _watchUserTouches(panel) {
   panel._touchWatch = true;
   panel.addEventListener("change", (e) => {
     if (panel._silent) return;
-    const row = e.target && e.target.closest && e.target.closest(".funpairdl-item");
+    const row = e.target && e.target.closest && e.target.closest(".funpairdl-item, .funpairdl-bundle-file");
     if (row) row.dataset.touched = "1";
   });
 }
@@ -3168,51 +3200,117 @@ function _probeEnd(panel, parsed, key) {
   if (panel._probePending.size === 0) _onProbesSettled(panel, parsed);
 }
 
+// Probes still out, until the hard deadline: a slow host's answer can
+// change the pick, so nothing is settled before it arrives; one that never
+// answers stops blocking at the deadline.
+function _probesPending(panel) {
+  return !!(panel._probePending && panel._probePending.size > 0
+            && Date.now() < (panel._probeDeadline || 0));
+}
+
 function _onProbesSettled(panel, parsed) {
   if (panel._settleTimer) clearTimeout(panel._settleTimer);
   panel._settleTimer = setTimeout(async () => {
     if (!panel.parentNode) return;
-    panel._probesSettled = true;
     try { await _refreshVideoPlan(panel, parsed); } catch (e) {}
+    // The early timeout shows a first plan; the decisions wait for the rest.
+    if (_probesPending(panel)) return;
+    panel._probesSettled = true;
     try { await _runLibraryLookup(panel, parsed); } catch (e) {}
+    // The attachments' sizes may land after the last plan: check again.
+    try { _dedupePackScripts(panel, parsed); } catch (e) {}
     panel.dispatchEvent(new CustomEvent("fpdl-settled"));
   }, 900);
 }
 
 // ── video plan: one download per video ──
+// Candidates: every plain video row, a folder/list link whose probe failed
+// (it can't be opened, so it is one dead link), and the video file of a
+// folder/list that holds exactly one — a pack of "Work.mp4 + its scripts"
+// next to a streaming link of the same Work is two sources of one video.
+// A pack of several videos is several works: it is planned in its own
+// dropdown. `section` is the collection section a row was parsed into.
 function _videoRowsForPlan(panel, parsed) {
   const out = [];
-  const push = (v, key) => {
+  const push = (v, key, section) => {
     if (!v) return;
     const row = panel.querySelector(`.funpairdl-item[data-key="${key}"]`);
     if (!row) return;
-    // A bundle (folder/list) is planned inside its own dropdown — never as
-    // one video, even before its probe has listed the files.
-    if (v.isBundle || v.probedIsBundle || isBundleUrl(v.url)) return;
-    if (panel.querySelector(`.funpairdl-bundle-cb[data-probe-key="${key}"]`)) return;
-    out.push({ v, row, key });
+    const bundleCbs = [...panel.querySelectorAll(`.funpairdl-bundle-cb[data-probe-key="${key}"]`)];
+    if (bundleCbs.length) {
+      const vids = bundleCbs.filter((cb) => !/\.funscript$/i.test(cb.dataset.fileName || ""));
+      if (vids.length !== 1) return;
+      const cb = vids[0];
+      const fileUrl = cb.dataset.fileUrl || "";
+      out.push({
+        v: { url: fileUrl, probedFilename: cb.dataset.fileName || "", label: cb.dataset.fileName || "",
+             probedSize: _probeSizeEntry(fileUrl), source: v.source, priority: v.priority },
+        row, key, section, bundleCb: cb,
+      });
+      return;
+    }
+    if ((v.isBundle || v.probedIsBundle || isBundleUrl(v.url)) && !v.probeFailed) return;
+    out.push({ v, row, key, section });
   };
   if (parsed.mode === "collection") {
-    (parsed.sections || []).forEach((sec, si) => sec.videos.forEach((v, vi) => push(v, `sv-${si}-${vi}`)));
-    (parsed.commentVideos || []).forEach((v, i) => push(v, `cv-${i}`));
+    (parsed.sections || []).forEach((sec, si) => sec.videos.forEach((v, vi) => push(v, `sv-${si}-${vi}`, String(si))));
+    (parsed.commentVideos || []).forEach((v, i) => push(v, `cv-${i}`, "comments"));
   } else {
-    (parsed.videos || []).forEach((v, i) => push(v, `video-${i}`));
+    (parsed.videos || []).forEach((v, i) => push(v, `video-${i}`, ""));
   }
+  return out;
+}
+
+// The checkbox that decides whether a plan candidate is downloaded.
+function _candidateCb(r) {
+  return r.bundleCb || r.row.querySelector('input[type="checkbox"][name]');
+}
+
+// Pure: the bytes a download of this link will fetch at the resolution
+// setting — the format of exactly that height, else the best one (what the
+// yt-dlp provider picks). 0 when the probe listed no sized formats.
+function _expectedSize(formats, pref) {
+  const fmts = (formats || []).filter((f) => Number(f.size) > 0);
+  if (!fmts.length) return 0;
+  const target = parseInt(pref, 10);
+  if (target) {
+    const exact = fmts.filter((f) => Number(f.height) === target);
+    if (exact.length) return Number(exact[exact.length - 1].size);
+  }
+  return Number(fmts[fmts.length - 1].size);
+}
+
+// Plain words for why a link can't be downloaded.
+function _deadReason(err) {
+  const e = String(err || "");
+  if (/unsupported url/i.test(e)) return "不支援的網站";
+  if (/\b(404|410)\b|not found|no longer|removed|deleted/i.test(e)) return "連結已失效";
+  if (/\b403\b|forbidden/i.test(e)) return "被拒絕存取";
+  return "無法讀取";
+}
+
+// The post's creator names: the title's leading "[Creator]" and the OP.
+// A host title that adds one of them to the file's name is the same video.
+function _postCredits(parsed) {
+  const out = [];
+  const m = /^\s*[\[【]([^\]】]{2,40})[\]】]/.exec((parsed && parsed.title) || "");
+  if (m) out.push(m[1].trim());
+  if (parsed && parsed.opUsername) out.push(parsed.opUsername);
   return out;
 }
 
 function _scriptRowsForLookup(panel, parsed) {
   const out = [];
-  const push = (s, key) => {
+  const push = (s, key, section) => {
     if (!s) return;
     const row = panel.querySelector(`.funpairdl-item[data-key="${key}"]`);
-    if (row) out.push({ s, row, key });
+    if (row) out.push({ s, row, key, section });
   };
   if (parsed.mode === "collection") {
-    (parsed.sections || []).forEach((sec, si) => sec.scripts.forEach((s, i) => push(s, `ss-${si}-${i}`)));
-    (parsed.commentScripts || []).forEach((s, i) => push(s, `cs-${i}`));
+    (parsed.sections || []).forEach((sec, si) => sec.scripts.forEach((s, i) => push(s, `ss-${si}-${i}`, String(si))));
+    (parsed.commentScripts || []).forEach((s, i) => push(s, `cs-${i}`, "comments"));
   } else {
-    (parsed.scripts || []).forEach((s, i) => push(s, `script-${i}`));
+    (parsed.scripts || []).forEach((s, i) => push(s, `script-${i}`, ""));
   }
   return out;
 }
@@ -3222,74 +3320,188 @@ function _scheduleVideoPlan(panel, parsed) {
   panel._videoPlanTimer = setTimeout(() => { _refreshVideoPlan(panel, parsed); }, VIDEO_PLAN_DEBOUNCE_MS);
 }
 
+// Pure: the candidate sets planned separately. A single post is one plan;
+// a collection plans each OP section alone — each section is its own work,
+// and a cross-section "mirror" would strip a section of its video. The
+// comment blocks of a collection are left to the user.
+function _videoPlanScopes(rows, mode) {
+  if (mode !== "collection") return rows.length ? [rows] : [];
+  const by = new Map();
+  for (const r of rows) {
+    if (r.section === "comments") continue;
+    if (!by.has(r.section)) by.set(r.section, []);
+    by.get(r.section).push(r);
+  }
+  return [...by.values()];
+}
+
 async function _refreshVideoPlan(panel, parsed) {
   const rows = _videoRowsForPlan(panel, parsed);
-  if (rows.length === 0) return;
+  const scopes = _videoPlanScopes(rows, parsed.mode);
+  if (scopes.length === 0) return;
   const prefs = _currentPrefs(await _loadSendPrefs());
-  const videos = rows.map(({ v }) => ({
+  const spec = (v) => ({
     url: v.url, name: v.probedFilename || "",
     source: v.source === "OP" ? "OP" : "comment",
-    size: v.probedSize || _probeSizeEntry(v.url) || 0,
+    size: _expectedSize(v.probedFormats, prefs.min_resolution) || v.probedSize || _probeSizeEntry(v.url) || 0,
     height: v.probedHeight || 0,
     duration: v.probedDuration || null,
     priority: Number(v.priority) || 99,
-  }));
+    failed: !!v.probeFailed,
+  });
+  const credits = _postCredits(parsed);
   const decisions = panel._encodeDecisions || {};
-  const key = JSON.stringify([videos, prefs.video_pick_mode, prefs.min_resolution,
-                              prefs.encode_vs_variant, decisions, !!panel._mergeInto]);
+  const specs = scopes.map((sc) => sc.map(({ v }) => spec(v)));
+  const key = JSON.stringify([specs, prefs.video_pick_mode, prefs.min_resolution,
+                              prefs.encode_vs_variant, decisions, !!panel._mergeInto,
+                              Object.keys(panel._sectionMerge || {}), credits]);
   if (panel._videoPlanKey === key) return;
   const seq = (panel._videoPlanSeq = (panel._videoPlanSeq || 0) + 1);
-  let plan = null;
-  try {
-    plan = await _sendMsg("video-plan", {
-      videos, pick_mode: prefs.video_pick_mode, min_resolution: prefs.min_resolution,
-      encode_vs_variant: prefs.encode_vs_variant, decisions,
-    });
-  } catch (e) { plan = null; }
-  if (seq !== panel._videoPlanSeq || !plan || !plan.roles) return;
+  const plans = [];
+  for (let i = 0; i < scopes.length; i++) {
+    let plan = null;
+    try {
+      plan = await _sendMsg("video-plan", {
+        videos: specs[i], pick_mode: prefs.video_pick_mode, min_resolution: prefs.min_resolution,
+        encode_vs_variant: prefs.encode_vs_variant, decisions, credits,
+      });
+    } catch (e) { plan = null; }
+    if (seq !== panel._videoPlanSeq) return;
+    if (!plan || !plan.roles) return;
+    plans.push({ rows: scopes[i], plan });
+  }
   panel._videoPlanKey = key;
-  _applyVideoPlan(panel, parsed, rows, plan);
+  _applyVideoPlan(panel, parsed, plans);
 }
 
-function _applyVideoPlan(panel, parsed, rows, plan) {
-  panel._videoPlan = plan;
+// Pure: the candidates of one scope the plan may act on. A collection
+// section starts with only its first video ticked (the rest are usually a
+// music source or a preview), so the plan only settles that video: its
+// mirrors become fallbacks, a dead link is unticked; other links are left
+// as they are.
+function _planScopeRows(rows, plan, mode) {
+  if (mode !== "collection") return rows;
+  const def = rows.find((r) => /^sv-\d+-0$/.test(r.key));
+  if (!def) return [];
+  const g = (plan.groups || []).find((gr) => gr.members && Object.prototype.hasOwnProperty.call(gr.members, def.v.url));
+  if (!g) return [def];
+  return rows.filter((r) => Object.prototype.hasOwnProperty.call(g.members, r.v.url));
+}
+
+function _applyVideoPlan(panel, parsed, plans) {
+  const merged = { roles: {}, ambiguous: [], groups: [] };
   panel._alternates = {};
   // Every video row, bundles included, for the "preview beside a pack" test.
   const allVideos = (parsed.mode === "collection"
     ? [...(parsed.sections || []).flatMap((sec) => sec.videos), ...(parsed.commentVideos || [])]
     : (parsed.videos || [])).map((v) => ({ v }));
-  const groupOf = {};
-  for (const g of plan.groups || []) {
-    for (const u of Object.keys(g.members || {})) groupOf[u] = g;
-    if (g.chosen && (g.alternates || []).length) panel._alternates[g.chosen] = [...g.alternates];
-  }
-  for (const { v, row } of rows) {
-    const role = plan.roles[v.url] || "chosen";
-    const g = groupOf[v.url] || {};
-    const cb = row.querySelector('input[type="checkbox"][name]');
-    let text = "", cls = role, title = g.reason || "";
-    if (role === "chosen") text = (g.alternates || []).length ? "✔ 下載這個" : "";
-    else if (role === "alternate") { text = "備援"; title = title || "同一影片的另一個來源；首選失敗時才會用"; }
-    else if (role === "variant") text = g.tag ? `變體 (${g.tag})` : "變體";
-    else if (role === "ambiguous") { text = "待決定"; title = "另一編碼還是另一個版本？下方選一個"; }
-    else if (role === "unrelated") { text = "非本作品?"; title = title || "名稱與帖子的作品對不上；要的話自己勾"; }
-    if (panel._mergeInto) { text = "已在庫"; cls = "inlib"; title = "媒體庫已有這支影片，不下載"; }
-    let want = !panel._mergeInto && (role === "chosen" || role === "variant");
-    // A tweet linked beside a pack (folder) of the real files is a preview:
-    // yt-dlp finds no video in it, or a low-res clip.
-    if (want && /(^|\.)(x\.com|twitter\.com)$/i.test((() => { try { return new URL(v.url).hostname; } catch (e) { return ""; } })())
-        && allVideos.some(({ v: o }) => o !== v && (o.isBundle || o.probedIsBundle || isBundleUrl(o.url)))) {
-      want = false;
-      text = "預覽（合集在下）"; cls = "unrelated"; title = "推文旁邊有完整檔案的合集；要這支的話自己勾";
+  for (const { rows, plan } of plans) {
+    const scoped = _planScopeRows(rows, plan, parsed.mode);
+    const inScope = new Set(scoped.map((r) => r.v.url));
+    const groupOf = {};
+    for (const g of plan.groups || []) {
+      if (!Object.keys(g.members || {}).some((u) => inScope.has(u))) continue;
+      merged.groups.push(g);
+      for (const u of Object.keys(g.members || {})) groupOf[u] = g;
+      if (g.chosen && (g.alternates || []).length) panel._alternates[g.chosen] = [...g.alternates];
     }
-    _setRowTag(row, cls, text, title);
-    if (cb && !row.dataset.touched) {
-      _setChecked(panel, cb, want);
+    for (const a of plan.ambiguous || []) if (inScope.has(a.url)) merged.ambiguous.push(a);
+    for (const r of scoped) {
+      const { v, row } = r;
+      const role = plan.roles[v.url] || "chosen";
+      merged.roles[v.url] = role;
+      // The work plan set a script-less video aside: that stands.
+      if (row.dataset.scriptless && role !== "dead") continue;
+      const g = groupOf[v.url] || {};
+      let text = "", cls = role, title = g.reason || "";
+      if (role === "chosen") text = (g.alternates || []).length ? "✔ 下載這個" : "";
+      else if (role === "alternate") { text = "備援"; title = title || "同一影片的另一個來源；首選失敗時才會用"; }
+      else if (role === "variant") text = g.tag ? `變體 (${g.tag})` : "變體";
+      else if (role === "ambiguous") { text = "待決定"; title = "另一編碼還是另一個版本？下方選一個"; }
+      else if (role === "unrelated") { text = "非本作品?"; title = title || "名稱與帖子的作品對不上；要的話自己勾"; }
+      else if (role === "dead" || (role === "unrelated" && v.probeFailed)) {
+        text = `無法下載（${_deadReason(v.probeError)}）`; cls = "unrelated";
+        title = v.probeError || "探測失敗，下載也會失敗";
+      }
+      if (r.bundleCb) {
+        // The pack's video file: its row stays (the pack's scripts still go).
+        if (role === "chosen") text = (g.alternates || []).length ? "✔ 下載合集裡的影片" : "";
+        else if (role === "alternate") { text = "合集影片＝備援"; title = "合集裡的影片和另一個連結是同一支；首選失敗時才會用"; }
+      }
+      // The library holds this work (a collection: this section's work).
+      const inLib = panel._mergeInto || (panel._sectionMerge || {})[r.section] || "";
+      if (inLib) { text = "已在庫"; cls = "inlib"; title = "媒體庫已有這支影片，不下載"; }
+      let want = !inLib && (role === "chosen" || role === "variant");
+      // A tweet linked beside a pack (folder) of the real files is a preview:
+      // yt-dlp finds no video in it, or a low-res clip.
+      if (want && !r.bundleCb && /(^|\.)(x\.com|twitter\.com)$/i.test((() => { try { return new URL(v.url).hostname; } catch (e) { return ""; } })())
+          && allVideos.some(({ v: o }) => o !== v && (o.isBundle || o.probedIsBundle || isBundleUrl(o.url)))) {
+        want = false;
+        text = "預覽（合集在下）"; cls = "unrelated"; title = "推文旁邊有完整檔案的合集；要這支的話自己勾";
+      }
+      _setRowTag(row, cls, text, title);
+      if (r.bundleCb) {
+        const fileRow = r.bundleCb.closest(".funpairdl-bundle-file");
+        if (!(fileRow && fileRow.dataset.touched)) _setChecked(panel, r.bundleCb, want);
+        const rowCb = row.querySelector('input[type="checkbox"][name]');
+        if (want && rowCb && !rowCb.checked && !row.dataset.touched) _setChecked(panel, rowCb, true);
+      } else {
+        const cb = row.querySelector('input[type="checkbox"][name]');
+        if (cb && !row.dataset.touched) _setChecked(panel, cb, want);
+      }
+      const ask = role === "ambiguous" ? (plan.ambiguous || []).find((a) => a.url === v.url) : null;
+      _renderAskRow(panel, parsed, row, v, ask);
     }
-    const ask = role === "ambiguous" ? (plan.ambiguous || []).find((a) => a.url === v.url) : null;
-    _renderAskRow(panel, parsed, row, v, ask);
   }
+  panel._videoPlan = merged;
+  _dedupePackScripts(panel, parsed);
   panel.dispatchEvent(new CustomEvent("fpdl-plan-applied"));
+}
+
+// The parsed script behind a row key ("script-3", "ss-1-0", "cs-2").
+function _scriptForKey(parsed, key) {
+  let m = /^script-(\d+)$/.exec(key || "");
+  if (m) return (parsed.scripts || [])[+m[1]];
+  m = /^ss-(\d+)-(\d+)$/.exec(key || "");
+  if (m) return ((parsed.sections || [])[+m[1]] || { scripts: [] }).scripts[+m[2]];
+  m = /^cs-(\d+)$/.exec(key || "");
+  if (m) return (parsed.commentScripts || [])[+m[1]];
+  return null;
+}
+
+// Pure: which pack scripts repeat a ticked attachment — same axis, same
+// byte size (funscript sizes are exact, so that is the same file).
+// attached/pack: [{ axis, size }]; returns the pack entries' indexes.
+function _duplicatePackScripts(attached, pack) {
+  const have = new Set(attached.filter((a) => a.size > 0).map((a) => `${a.axis}|${a.size}`));
+  const out = [];
+  pack.forEach((p, i) => { if (p.size > 0 && have.has(`${p.axis}|${p.size}`)) out.push(i); });
+  return out;
+}
+
+// A pack (folder/list) that repeats the post's attached scripts: the
+// attachment is sent, the pack's copy stays home.
+function _dedupePackScripts(panel, parsed) {
+  const attached = [];
+  panel.querySelectorAll('.funpairdl-item[data-kind="script"]').forEach((row) => {
+    const cb = row.querySelector('input[type="checkbox"][name]');
+    if (!cb || !cb.checked) return;
+    const s = _scriptForKey(parsed, row.dataset.key);
+    if (!s) return;
+    const size = s.probedSize || _probeSizeEntry(s.resolvedUrl || "") || _probeSizeEntry(s.url) || 0;
+    attached.push({ axis: detectAxis(s.filename || ""), size });
+  });
+  if (attached.length === 0) return;
+  const packCbs = [...panel.querySelectorAll(".funpairdl-bundle-cb")]
+    .filter((cb) => /\.funscript$/i.test(cb.dataset.fileName || ""));
+  const pack = packCbs.map((cb) => ({ axis: detectAxis(cb.dataset.fileName || ""), size: _probeSizeEntry(cb.dataset.fileUrl || "") }));
+  for (const i of _duplicatePackScripts(attached, pack)) {
+    const cb = packCbs[i];
+    const fileRow = cb.closest(".funpairdl-bundle-file");
+    if (fileRow && fileRow.dataset.touched) continue;
+    _setChecked(panel, cb, false);
+    if (fileRow) fileRow.title = `${cb.dataset.fileName || ""}\n和帖子附件的腳本相同，略過`;
+  }
 }
 
 // A link named only by a version word: the user says whether it is the same
@@ -3325,6 +3537,10 @@ async function _runLibraryLookup(panel, parsed) {
   panel._lookupDone = true;
   const prefs = _currentPrefs(await _loadSendPrefs());
   if (!prefs.merge_into_library && !prefs.batch_skip_identical) return;
+  if (parsed.mode === "collection") {
+    await _runCollectionLookup(panel, parsed, prefs);
+    return;
+  }
   const rows = _videoRowsForPlan(panel, parsed);
   const roles = (panel._videoPlan && panel._videoPlan.roles) || {};
   const videos = rows
@@ -3345,14 +3561,16 @@ async function _runLibraryLookup(panel, parsed) {
     return;
   }
   const work = panel._lookup.work;
-  const same = panel._lookup.same_content === true;
-  const merge = same && prefs.merge_into_library && parsed.mode === "single";
+  // A folder that holds only scripts (the video failed last time) does not
+  // have this work: the video is downloaded as usual and lands there.
+  const same = panel._lookup.same_content === true && !!work.video;
+  const merge = same && prefs.merge_into_library;
   if (merge) {
     panel._mergeInto = work.dir;
-    for (const { row } of rows) {
-      _setChecked(panel, row.querySelector('input[type="checkbox"][name]'), false);
-      _setRowTag(row, "inlib", "已在庫", `媒體庫已有：${work.base}`);
-      _renderAskRow(panel, parsed, row, {}, null);
+    for (const r of rows) {
+      _setChecked(panel, _candidateCb(r), false);
+      _setRowTag(r.row, "inlib", "已在庫", `媒體庫已有：${work.base}`);
+      _renderAskRow(panel, parsed, r.row, {}, null);
     }
     // A bundle's video files stay home too; its scripts go unless the
     // folder already holds one of exactly that size (funscript sizes are
@@ -3374,10 +3592,14 @@ async function _runLibraryLookup(panel, parsed) {
     const verdict = panel._lookup.scripts[s.url] || "";
     const cb = row.querySelector('input[type="checkbox"][name]');
     if (verdict === "identical") {
-      _setRowTag(row, "skip", "相同，略過", "媒體庫裡已有一模一樣的檔案");
       if (same && prefs.batch_skip_identical) {
+        _setRowTag(row, "skip", "相同，略過", "媒體庫裡已有一模一樣的檔案");
         _setChecked(panel, cb, false);
         panel._skippedIdentical.push(s.filename || s.url);
+      } else {
+        // Sent with the rest (the work still needs its video); a finished
+        // item of the earlier attempt is kept, not fetched again.
+        _setRowTag(row, "skip", "資料夾已有", "媒體庫資料夾裡已有一模一樣的檔案；這個作品還缺影片，照常一起送出");
       }
     } else if (verdict === "changed" && same) {
       _setRowTag(row, "changed", "不同 → 變體", "同一軸已有另一版本，會存成 (作者) 變體");
@@ -3388,9 +3610,69 @@ async function _runLibraryLookup(panel, parsed) {
   let note = "";
   if (merge) note = `🗂 影片已在媒體庫「${escapeAttr(work.base)}」：只下載腳本，併入該作品`;
   else if (same) note = `🗂 媒體庫已有「${escapeAttr(work.base)}」（相同影片）；送出後會併入`;
+  else if (panel._lookup.same_content === true) note = `🗂 媒體庫的「${escapeAttr(work.base)}」只有腳本、沒有影片（上次影片沒下載成功）：照常下載，補上影片`;
   else if (panel._lookup.same_content === false) note = `媒體庫有同名作品「${escapeAttr(work.base)}」但長度不同，視為不同作品`;
   else note = `媒體庫有同名作品「${escapeAttr(work.base)}」（長度未知，未合併）`;
   _setPanelNote(panel, note);
+  panel.dispatchEvent(new CustomEvent("fpdl-lookup"));
+}
+
+// A collection is one work per section: each section is looked up alone.
+// A section whose video the library already holds sends only its new
+// scripts, into that work; with nothing new it sends nothing.
+async function _runCollectionLookup(panel, parsed, prefs) {
+  const rows = _videoRowsForPlan(panel, parsed);
+  const scriptRows = _scriptRowsForLookup(panel, parsed);
+  panel._sectionMerge = {};
+  panel._skippedIdentical = panel._skippedIdentical || [];
+  const found = [];
+  for (let si = 0; si < (parsed.sections || []).length; si++) {
+    const sec = String(si);
+    const vids = rows.filter((r) => r.section === sec && (_candidateCb(r) || {}).checked);
+    if (vids.length === 0) continue;
+    const scr = scriptRows.filter((x) => x.section === sec);
+    const name = _collectionPairName(parsed, sec);
+    let res = null;
+    try {
+      res = await _sendMsg("library-lookup", {
+        title: name,
+        videos: vids.map(({ v }) => ({ url: v.url, resolved: v.resolvedUrl || "", duration: v.probedDuration || null })),
+        scripts: scr.map(({ s }) => ({
+          url: s.url, resolved: s.resolvedUrl || "", name: s.filename || "",
+          size: s.probedSize || _probeSizeEntry(s.url) || 0, duration: s.probedDuration || null,
+        })),
+      });
+    } catch (e) { res = null; }
+    if (!panel.parentNode) return;
+    if (!res || res._error || !res.work || res.same_content !== true || !res.work.video) continue;
+    found.push(res.work.base);
+    if (prefs.merge_into_library) {
+      panel._sectionMerge[sec] = res.work.dir;
+      for (const r of vids) {
+        _setChecked(panel, _candidateCb(r), false);
+        _setRowTag(r.row, "inlib", "已在庫", `媒體庫已有：${res.work.base}`);
+      }
+    }
+    for (const { s, row } of scr) {
+      const verdict = (res.scripts || {})[s.url] || "";
+      const cb = row.querySelector('input[type="checkbox"][name]');
+      if (verdict === "identical") {
+        _setRowTag(row, "skip", "相同，略過", "媒體庫裡已有一模一樣的檔案");
+        if (prefs.batch_skip_identical && cb && cb.checked) {
+          _setChecked(panel, cb, false);
+          panel._skippedIdentical.push(`${name}：${s.filename || s.url}`);
+        }
+      } else if (verdict === "changed") {
+        _setRowTag(row, "changed", "不同 → 變體", "同一軸已有另一版本，會存成 (作者) 變體");
+      } else if (verdict === "new") {
+        _setRowTag(row, "new", "新增軸", "這個軸媒體庫還沒有");
+      }
+    }
+  }
+  if (found.length) {
+    const names = found.slice(0, 3).map((b) => `「${escapeAttr(b)}」`).join("、") + (found.length > 3 ? "…" : "");
+    _setPanelNote(panel, `🗂 ${found.length} 個作品已在媒體庫 ${names}：影片不重抓，只補新的腳本`);
+  }
   panel.dispatchEvent(new CustomEvent("fpdl-lookup"));
 }
 
@@ -3439,14 +3721,44 @@ function _batchDecisions(st) {
     out.push({ kind: "bundle", text: "合集裡的檔案分組是猜的，請核對子組" });
   }
   if (st.hasVideos && !st.checkedVideos && !st.mergeInto) {
-    out.push({ kind: "novideo", text: st.probeFailedAll
-      ? "所有影片來源都探測失敗，沒有可下載的影片"
-      : "沒有勾選任何影片來源" });
+    let text = "沒有勾選任何影片來源";
+    if (st.probeFailedAll) {
+      text = `影片來源都無法下載${st.deadReasons ? `（${st.deadReasons}）` : ""}：只要腳本就送出這帖，不要就取消勾選`;
+    } else if (st.deadReasons && st.otherLive) {
+      text = `帖子的影片連結無法下載（${st.deadReasons}）；另有 ${st.otherLive} 個來源沒勾，確認是同一支影片就勾選，否則只送腳本`;
+    }
+    out.push({ kind: "novideo", text });
+  }
+  if ((st.scriptLens || []).length >= 2) {
+    const lens = st.scriptLens.map((c) => `${c.n} 支 ${formatDuration(c.dur)}`).join("、");
+    const vid = st.videoDuration ? `，影片 ${formatDuration(st.videoDuration)}` : "";
+    out.push({ kind: "scriptlen", text: `腳本長度不一致（${lens}${vid}）：不是同一支影片的腳本，請取消不屬於這支影片的` });
   }
   if (st.otherAuthorCommentScripts > 0) {
     out.push({ kind: "comments", text: `留言區有 ${st.otherAuthorCommentScripts} 支腳本（合集帖），請拖到所屬作品或略過` });
   }
   return out;
+}
+
+// Pure: script lengths grouped — lengths within max(10 s, 5 %) of each
+// other are one. Two groups under one video means some of the scripts
+// belong to another cut (a "Full" version next to the "Free" one).
+function _durationClusters(durs) {
+  const sorted = (durs || []).map(Number).filter((d) => d > 0).sort((a, b) => a - b);
+  const out = [];
+  for (const d of sorted) {
+    const last = out[out.length - 1];
+    if (last && d - last.max <= Math.max(10, 0.05 * d)) { last.max = d; last.n += 1; }
+    else out.push({ dur: d, max: d, n: 1 });
+  }
+  return out.map((c) => ({ dur: c.dur, n: c.n }));
+}
+
+// The pack (folder/list) row a pack file belongs to is ticked.
+function _packRowTicked(panel, cb) {
+  const row = panel.querySelector(`.funpairdl-item[data-key="${cb.dataset.probeKey}"]`);
+  const rc = row && row.querySelector('input[type="checkbox"][name]');
+  return !!(rc && rc.checked);
 }
 
 // Pure: "dead" (unusable), "done" (library has it all), "ask", "auto".
@@ -3477,13 +3789,36 @@ function _batchAssess(card) {
   const nameOf = (u) => { const r = rows.find((x) => x.v.url === u); return r ? (r.v.probedFilename || r.v.label || u) : u; };
   const ambiguous = ((panel._videoPlan && panel._videoPlan.ambiguous) || [])
     .filter((a) => !decided[a.url]).map((a) => ({ url: a.url, name: nameOf(a.url), tag: a.tag }));
-  const checkedVideos = rows.filter(({ row }) => {
-    const cb = row.querySelector('input[type="checkbox"][name]');
-    return cb && cb.checked;
-  }).length;
-  const bundleCbs = [...panel.querySelectorAll(".funpairdl-bundle-cb:checked")];
-  const bundleChecked = bundleCbs.filter((cb) => !/\.funscript$/i.test(cb.dataset.fileName || "")).length;
-  const bundleScripts = bundleCbs.length - bundleChecked;
+  // A planned pack video counts only while its pack row is ticked too.
+  const ticked = (r) => {
+    const cb = _candidateCb(r);
+    return !!(cb && cb.checked && (!r.bundleCb || _packRowTicked(panel, r.bundleCb)));
+  };
+  const checkedVideos = rows.filter(ticked).length;
+  const planned = new Set(rows.filter((r) => r.bundleCb).map((r) => r.bundleCb));
+  const bundleCbs = [...panel.querySelectorAll(".funpairdl-bundle-cb:checked")].filter((cb) => _packRowTicked(panel, cb));
+  const bundleChecked = bundleCbs.filter((cb) => !/\.funscript$/i.test(cb.dataset.fileName || "") && !planned.has(cb)).length;
+  const bundleScripts = bundleCbs.filter((cb) => /\.funscript$/i.test(cb.dataset.fileName || "")).length;
+  const isDead = ({ v }) => roles[v.url] === "dead" || !!v.probeFailed;
+  const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ""); } catch (e) { return ""; } };
+  const deadReasons = [...new Set(rows.filter(isDead).map(({ v }) => `${hostOf(v.url)} ${_deadReason(v.probeError)}`))].join("、");
+  const sectionMerges = Object.keys(panel._sectionMerge || {}).length;
+  // Main's scripts (one work, not split) whose lengths disagree.
+  let scriptLens = [];
+  let videoDuration = 0;
+  if (parsed.mode === "single" && !panel._workPlanSplit) {
+    const durs = [];
+    panel.querySelectorAll('.funpairdl-group-body[data-group="Main"] .funpairdl-item[data-kind="script"]').forEach((row) => {
+      const cb = row.querySelector('input[type="checkbox"][name]');
+      if (!cb || !cb.checked) return;
+      const s = _scriptForKey(parsed, row.dataset.key);
+      if (s && detectAxis(s.filename || "") === "main" && s.probedDuration) durs.push(Number(s.probedDuration));
+    });
+    const cl = _durationClusters(durs);
+    if (cl.length >= 2) scriptLens = cl;
+    const chosen = rows.find((r) => ticked(r) && r.v.probedDuration);
+    videoDuration = chosen ? Number(chosen.v.probedDuration) : 0;
+  }
   const st = {
     ambiguous,
     workPlanSplit: !!panel._workPlanSplit,
@@ -3491,36 +3826,42 @@ function _batchAssess(card) {
     bundleBasis: [...panel.querySelectorAll(".funpairdl-bundle-group[data-basis]")].map((el) => el.dataset.basis),
     hasVideos: rows.length > 0,
     checkedVideos: checkedVideos + bundleChecked,
-    mergeInto: panel._mergeInto || "",
-    probeFailedAll: rows.length > 0 && rows.every(({ v }) => v.probeFailed),
+    mergeInto: panel._mergeInto || (sectionMerges ? "sections" : ""),
+    probeFailedAll: rows.length > 0 && rows.every(isDead),
+    deadReasons,
+    otherLive: rows.filter((r) => !isDead(r) && !ticked(r)).length,
+    scriptLens, videoDuration,
     otherAuthorCommentScripts: parsed.mode === "collection" && prefs.collect_other_authors !== false
       ? (parsed.commentScripts || []).length : 0,
   };
   const decisions = _batchDecisions(st);
-  // "Selected" means a file will go: a plain row ticked, or a bundle file
-  // ticked — a ticked bundle ROW whose files are all unticked sends nothing.
+  // "Selected" means a file will go: a plain row ticked, or a pack file
+  // ticked in a ticked pack row — a pack row whose files are all unticked
+  // sends nothing.
   const anyChecked = [...panel.querySelectorAll('.funpairdl-item input[type="checkbox"][name]:checked')]
     .some((cb) => {
       const row = cb.closest(".funpairdl-item");
       const key = row ? row.dataset.key : "";
       return !key || !panel.querySelector(`.funpairdl-bundle-cb[data-probe-key="${key}"]`);
     }) || bundleCbs.length > 0;
-  const tier = panel._probesSettled
-    ? _batchTier(decisions, { nothingSelected: !anyChecked, libraryHasWork: !!(panel._lookup && panel._lookup.work && panel._lookup.same_content === true) })
+  const lk = panel._lookup;
+  const libraryHasWork = parsed.mode === "collection"
+    ? sectionMerges > 0
+    : !!(lk && lk.work && lk.work.video && lk.same_content === true);
+  const tier = panel._probesSettled && !_probesPending(panel)
+    ? _batchTier(decisions, { nothingSelected: !anyChecked, libraryHasWork })
     : "pending";
   card.dataset.tier = tier;
 
   // Header: a one-line summary of what will be sent.
   const checkedScripts = panel.querySelectorAll('.funpairdl-item[data-kind="script"] input[type="checkbox"][name]:checked').length + bundleScripts;
-  const variants = rows.filter(({ v, row }) => roles[v.url] === "variant" && row.querySelector('input[type="checkbox"][name]:checked')).length;
-  const alternates = rows.reduce((n, { v, row }) => {
-    const cb = row.querySelector('input[type="checkbox"][name]');
-    return n + ((cb && cb.checked && panel._alternates && panel._alternates[v.url]) ? panel._alternates[v.url].length : 0);
-  }, 0);
+  const variants = rows.filter((r) => roles[r.v.url] === "variant" && ticked(r)).length;
+  const alternates = rows.reduce((n, r) => n + ((ticked(r) && panel._alternates && panel._alternates[r.v.url]) ? panel._alternates[r.v.url].length : 0), 0);
   const parts = [];
   if (panel._mergeInto) parts.push("影片已在庫，併入既有作品");
   else parts.push(`${st.checkedVideos} 影片`);
   parts.push(`${checkedScripts} 腳本`);
+  if (sectionMerges) parts.push(`${sectionMerges} 作品已在庫`);
   if (variants) parts.push(`變體 ${variants}`);
   if (alternates) parts.push(`備援 ${alternates}`);
   if ((panel._skippedIdentical || []).length) parts.push(`略過相同 ${panel._skippedIdentical.length}`);
@@ -4754,8 +5095,11 @@ function _mainWorkRows(panel, parsed) {
     if (row.dataset.kind === "video") {
       const v = parsed.videos[idx];
       if (!v) return;
-      // A bundle row is planned inside its own dropdown.
+      // A bundle row is planned inside its own dropdown — also before its
+      // listing has arrived (a pack of "Work.mp4 + scripts" is not a
+      // script-less work of its own).
       if (panel.querySelector(`.funpairdl-bundle-cb[data-probe-key="${row.dataset.key}"]`)) return;
+      if (v.isBundle || v.probedIsBundle || isBundleUrl(v.url)) return;
       videos.push({
         url: v.url, name: v.probedFilename || "", row,
         hints: (v.probedTags || []).join(" "),
@@ -4831,6 +5175,12 @@ async function _refreshWorkPlan(panel, parsed) {
   if (rows.videos.length < 2 && panel._workGroupsExtra.length === 0) {
     block.hidden = true;
     for (const r of all) _setWorkBadge(r.row, null);
+    // Labels an earlier (larger) preview seeded are no plan any more.
+    for (const [u, name] of Object.entries(panel._workPlanSeeded || {})) {
+      if (panel._bundlePlan[u] === name) delete panel._bundlePlan[u];
+    }
+    panel._workPlanSeeded = {};
+    panel._workPlanKey = "";
     // One video = one work: nothing is split, nothing is guessed.
     panel._workPlanSplit = false;
     panel._workScriptBasis = {};
@@ -4904,6 +5254,7 @@ async function _refreshWorkPlan(panel, parsed) {
           if (!bare.has(r.url) || r.row.dataset.touched) continue;
           const cb = r.row.querySelector('input[type="checkbox"][name]');
           _setChecked(panel, cb, false);
+          r.row.dataset.scriptless = "1";
           _setRowTag(r.row, "unrelated", "無腳本，略過", "這支影片配不到帖子裡的任何腳本；要的話自己勾");
           panel._workPlanScriptless += 1;
         }

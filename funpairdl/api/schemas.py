@@ -45,6 +45,7 @@ class VideoCandidate(BaseModel):
     height: int = 0
     duration: float | None = None
     priority: float = 99.0
+    failed: bool = False          # the panel's probe of it failed
 
 
 class VideoPlanRequest(BaseModel):
@@ -54,6 +55,7 @@ class VideoPlanRequest(BaseModel):
     min_resolution: str = ""      # "" = the setting's default resolution
     encode_vs_variant: str = ""   # "" = the setting
     decisions: dict[str, str] = {}  # {url: "reencode" | "variant"}
+    credits: list[str] = []         # the post's creator names (title "[X]" prefix, OP)
 
 
 class LookupVideo(BaseModel):

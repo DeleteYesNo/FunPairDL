@@ -542,9 +542,77 @@ check("external script row shows its host", extRow.includes('<span class="funpai
   const comments = ctx._batchDecisions({ hasVideos: true, checkedVideos: 1, otherAuthorCommentScripts: 2 });
   check("tier: collection comment scripts ask", comments[0].kind, "comments");
 
+  const dead = ctx._batchDecisions({ hasVideos: true, checkedVideos: 0, probeFailedAll: true,
+    deadReasons: "the-joi-database.com 不支援的網站" });
+  check("tier: dead links name the site", dead[0].text.includes("the-joi-database.com"), true);
+  const lens = ctx._batchDecisions({ hasVideos: true, checkedVideos: 1,
+    scriptLens: [{ dur: 778, n: 4 }, { dur: 1061, n: 4 }] });
+  check("tier: scripts of two lengths ask", lens.map((d) => d.kind).join(","), "scriptlen");
+  check("tier: script lengths shown", lens[0].text.includes("12:58") && lens[0].text.includes("17:41"), true);
+
   check("tier: dead", ctx._batchTier([], { dead: true }), "dead");
   check("tier: library has it all -> done", ctx._batchTier([], { nothingSelected: true, libraryHasWork: true }), "done");
   check("tier: nothing selected without a library hit -> ask", ctx._batchTier([], { nothingSelected: true }), "ask");
+}
+
+// ── script lengths: one cluster per cut ──
+{
+  const c = ctx._durationClusters([777.9, 777.9, 1061.5, 780, 1061.5, 0]);
+  check("lengths: two cuts", c.length, 2);
+  check("lengths: counts", c.map((x) => x.n).join(","), "3,2");
+  check("lengths: filler variants are one cut", ctx._durationClusters([984, 984.4, 990]).length, 1);
+}
+
+// ── video plan scopes: a collection plans each section alone ──
+{
+  const rows = [
+    { key: "sv-0-0", section: "0", v: { url: "a" } }, { key: "sv-0-1", section: "0", v: { url: "music" } },
+    { key: "sv-1-0", section: "1", v: { url: "b" } }, { key: "cv-0", section: "comments", v: { url: "c" } },
+  ];
+  const sc = ctx._videoPlanScopes(rows, "collection");
+  check("scopes: one per OP section", sc.length, 2);
+  check("scopes: comments left out", sc.flat().some((r) => r.section === "comments"), false);
+  check("scopes: single post is one plan", ctx._videoPlanScopes(rows, "single").length, 1);
+  check("scopes: nothing to plan", ctx._videoPlanScopes([], "single").length, 0);
+
+  // Only the section's first video and its mirrors are settled by the plan.
+  const plan = { groups: [
+    { members: { a: "chosen", mirror: "mirror" } }, { members: { music: "chosen" } }] };
+  const secRows = [
+    { key: "sv-0-0", v: { url: "a" } }, { key: "sv-0-1", v: { url: "music" } }, { key: "sv-0-2", v: { url: "mirror" } }];
+  const scoped = ctx._planScopeRows(secRows, plan, "collection");
+  check("scope rows: first video + its mirror", scoped.map((r) => r.v.url).join(","), "a,mirror");
+  check("scope rows: single post takes all", ctx._planScopeRows(secRows, plan, "single").length, 3);
+}
+
+// ── pack scripts that repeat an attachment stay home ──
+{
+  const dup = ctx._duplicatePackScripts(
+    [{ axis: "main", size: 15155 }, { axis: "pitch", size: 9011 }],
+    [{ axis: "main", size: 15155 }, { axis: "pitch", size: 9000 }, { axis: "main", size: 0 }]);
+  check("pack dupes: same axis + size only", dup.join(","), "0");
+}
+
+// ── expected download size follows the resolution setting ──
+{
+  const fmts = [{ height: 360, size: 12 }, { height: 1080, size: 51 }, { height: 2160, size: 148 }];
+  check("size: exact height", ctx._expectedSize(fmts, "1080"), 51);
+  check("size: no exact height → best", ctx._expectedSize(fmts, "720"), 148);
+  check("size: best", ctx._expectedSize(fmts, "best"), 148);
+  check("size: unknown", ctx._expectedSize([{ height: 1080, size: 0 }], "1080"), 0);
+  const other = ctx._batchDecisions({ hasVideos: true, checkedVideos: 0, probeFailedAll: false,
+    deadReasons: "pixeldrain.com 連結已失效", otherLive: 1 });
+  check("tier: dead OP link with other sources says so", other[0].text.includes("另有 1 個來源"), true);
+}
+
+// ── dead-link wording and creator credits ──
+{
+  check("dead: unsupported", ctx._deadReason("ERROR: Unsupported URL: https://x"), "不支援的網站");
+  check("dead: 404", ctx._deadReason("Status 404"), "連結已失效");
+  check("dead: other", ctx._deadReason(""), "無法讀取");
+  check("credits: title prefix + OP",
+    ctx._postCredits({ title: "[Creator] Work - Part", opUsername: "poster" }).join("|"), "Creator|poster");
+  check("credits: no prefix", ctx._postCredits({ title: "Work (Suggested)", opUsername: "" }).length, 0);
 }
 
 // ── send prefs: header controls override the settings ──
