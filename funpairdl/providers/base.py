@@ -14,6 +14,9 @@ class ResolvedFile:
     headers: dict[str, str] | None = None
     # For HLS streams
     is_hls: bool = False
+    # The stream yt-dlp should read when it can't open the page itself
+    # (a site it has no extractor for); "" = give yt-dlp the page URL.
+    manifest_url: str = ""
     # For MEGA - delegate to library
     is_mega: bool = False
     mega_url: str = ""

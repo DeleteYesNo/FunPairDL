@@ -1,0 +1,120 @@
+"""The JOI Database, WatchHentai and pixivFANBOX: the page parsing the providers and
+their probes share. Synthetic pages; no network."""
+import base64
+
+from funpairdl.providers.joidb import (
+    JoiDbProvider, estimate_size, parse_title as joi_title, parse_variants,
+    playlist_duration, select_variant, video_id,
+)
+from funpairdl.providers.watchhentai import (
+    WatchHentaiProvider, build_filename, decode_source, parse_duration,
+    parse_player_url, parse_sources, parse_title as wh_title, select_source,
+)
+from funpairdl.providers.ytdlp_generic import YtdlpGenericProvider
+from funpairdl.utils.url_parser import detect_provider
+
+
+def _encode(url: str) -> str:
+    """Inverse of the player's decoder (for building fixtures)."""
+    inner = base64.b64encode(url.encode()).decode()[::-1]
+    x = bytes(ord(c) ^ ((13 + i % 17) & 255) for i, c in enumerate(inner))
+    return base64.b64encode(x).decode().replace("+", "-").replace("/", "_").rstrip("=")
+
+
+class TestJoiDb:
+    WATCH = "https://www.the-joi-database.com/watch/0123456789abcdef01234567"
+
+    def test_routing(self):
+        assert JoiDbProvider.can_handle(self.WATCH)
+        assert not JoiDbProvider.can_handle("https://www.the-joi-database.com/videos?search=x")
+        assert not YtdlpGenericProvider.can_handle(self.WATCH)
+        assert detect_provider(self.WATCH) == "joidb"
+        assert video_id(self.WATCH) == "0123456789abcdef01234567"
+
+    def test_title_from_download_button(self):
+        html = ('<title>Garden Party (JOI) - The joi Database</title>'
+                '<a data-video-title="Garden Party (JOI).mp4" data-video-id="x">')
+        assert joi_title(html) == "Garden Party (JOI)"
+        assert joi_title("<title>Garden Party - The joi Database</title>") == "Garden Party"
+
+    def test_variants_and_pick(self):
+        master = ('#EXTM3U\n#EXT-X-VERSION:3\n'
+                  '#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720,NAME="720"\n'
+                  'video_x_720p.m3u8\n'
+                  '#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=640x360,NAME="360"\n'
+                  'video_x_360p.m3u8\n'
+                  '#EXT-X-STREAM-INF:BANDWIDTH=4000000,RESOLUTION=1920x1080,NAME="1080"\n'
+                  'video_x_1080p.m3u8\n')
+        v = parse_variants(master, "https://www.the-joi-database.com/api/stream/x")
+        assert [x["height"] for x in v] == [360, 720, 1080]
+        assert v[2]["url"] == "https://www.the-joi-database.com/api/stream/video_x_1080p.m3u8"
+        assert select_variant(v, "720")["height"] == 720
+        assert select_variant(v, "480")["height"] == 1080
+        assert select_variant(v, "best")["height"] == 1080
+        assert estimate_size(v[2], 100.0) == 50_000_000
+
+    def test_playlist_duration(self):
+        pl = "#EXTM3U\n#EXTINF:10.5,\na.ts\n#EXTINF:4.5,\nb.ts\n#EXT-X-ENDLIST\n"
+        assert playlist_duration(pl) == 15.0
+
+
+class TestWatchHentai:
+    PAGE = "https://watchhentai.net/videos/garden-party-episode-2-id-01/"
+
+    def test_routing(self):
+        assert WatchHentaiProvider.can_handle(self.PAGE)
+        assert not WatchHentaiProvider.can_handle("https://watchhentai.net/series/garden-party/")
+        assert not YtdlpGenericProvider.can_handle(self.PAGE)
+        assert detect_provider(self.PAGE) == "watchhentai"
+
+    def test_decoder_roundtrip(self):
+        url = "https://storage.example/files/G/garden-party/garden-party-2_1080p.mp4"
+        assert decode_source(_encode(url)) == url
+
+    def test_player_and_sources(self):
+        page = '<iframe data-primary-player-url="https://watchhentai.net/player/1/1/mp4/" data-x="y">'
+        assert parse_player_url(page, self.PAGE) == "https://watchhentai.net/player/1/1/mp4/"
+        a = "https://storage.example/files/G/garden-party/garden-party-2_1080p.mp4"
+        b = "https://storage.example/files/G/garden-party/garden-party-2_720p.mp4"
+        player = ('var whJwSources = [{"file":"%s","type":"video\\/mp4","label":"1080p"},'
+                  '{"file":"%s","type":"video\\/mp4","label":"720p"}];\nwhJwSources.forEach(f);'
+                  % (_encode(a), _encode(b)))
+        src = parse_sources(player)
+        assert [s["height"] for s in src] == [720, 1080]
+        assert src[1]["url"] == a
+        assert select_source(src, "720")["url"] == b
+        assert select_source(src, "best")["url"] == a
+
+    def test_title_duration_filename(self):
+        html = ('<title>Garden Party - Episode 2 - Watch Hentai, Stream Online English Subbed</title>'
+                '<meta itemprop="duration" content="PT16M30S" />')
+        assert wh_title(html) == "Garden Party - Episode 2"
+        assert parse_duration(html) == 990.0
+        assert parse_duration("<p>none</p>") == 0.0
+        assert build_filename("Garden Party - Episode 2", "https://s/x.mp4") == "Garden Party - Episode 2.mp4"
+        assert build_filename("", "https://s/files/garden-party-2_1080p.mp4") == "garden-party-2_1080p.mp4"
+
+
+class TestFanbox:
+    def test_routing(self):
+        from funpairdl.providers.fanbox import FanboxProvider, post_id
+        post = "https://somecreator.fanbox.cc/posts/1234567"
+        assert FanboxProvider.can_handle(post)
+        assert post_id(post) == "1234567"
+        assert not FanboxProvider.can_handle("https://somecreator.fanbox.cc/")
+        assert not FanboxProvider.can_handle("https://downloads.fanbox.cc/files/post/1/abc.mp4")
+        assert not YtdlpGenericProvider.can_handle(post)
+        assert detect_provider(post) == "fanbox"
+
+    def test_files_and_names(self):
+        from funpairdl.providers.fanbox import file_name, paid_error, video_files
+        post = {"title": "Garden Party", "body": {
+            "files": [{"name": "Censored", "extension": "mp4", "size": 10, "url": "https://d/a.mp4"},
+                      {"name": "cover", "extension": "png", "size": 1, "url": "https://d/c.png"}],
+            "fileMap": {"x": {"name": "Uncensored", "extension": "mp4", "size": 20, "url": "https://d/b.mp4"}},
+        }}
+        vids = video_files(post)
+        assert [v["name"] for v in vids] == ["Censored", "Uncensored"]
+        assert file_name(post, vids[0], False) == "Garden Party.mp4"
+        assert file_name(post, vids[1], True) == "Garden Party - Uncensored.mp4"
+        assert "¥300" in paid_error(300) and paid_error(300).startswith("Paid content")

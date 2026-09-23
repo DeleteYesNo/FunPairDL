@@ -1292,8 +1292,11 @@ class QueueManager:
                 self.on_item_updated(item)
             raise
 
-    async def _download_hls(self, item: PairItem, output_dir: Path, preferred_resolution: str = "best") -> None:
-        """Download an HLS stream using yt-dlp."""
+    async def _download_hls(self, item: PairItem, output_dir: Path, preferred_resolution: str = "best",
+                            manifest_url: str = "") -> None:
+        """Download an HLS stream using yt-dlp — from the page URL, or from
+        `manifest_url` when the provider found the stream on a page yt-dlp
+        has no extractor for."""
         try:
             # Skip if the output file already exists with the expected size
             if item.total_bytes > 0:
@@ -1313,7 +1316,7 @@ class QueueManager:
             from funpairdl.persistence.settings import Settings
             settings = Settings.load()
 
-            original_url = item.url  # Use original page URL for yt-dlp
+            original_url = manifest_url or item.url  # yt-dlp reads the page, else the stream
 
             # yt-dlp runs in a worker thread, so its progress hook must hop
             # back to the event loop to touch UI callbacks safely. Capture the
@@ -1371,6 +1374,9 @@ class QueueManager:
                     ydl_opts["impersonate"] = ImpersonateTarget(client="chrome")
                 except ImportError:
                     pass
+                # A provider-found stream is fetched as its player would.
+                if manifest_url and (item.headers or {}).get("Referer"):
+                    ydl_opts["http_headers"] = {"Referer": item.headers["Referer"]}
 
                 # Apply resolution preference: exact match or best
                 if preferred_resolution and preferred_resolution != "best":
@@ -1624,7 +1630,8 @@ class QueueManager:
                 if resolved.is_mega:
                     task = asyncio.create_task(_mega_with_limit(item, output_dir))
                 elif resolved.is_hls:
-                    task = asyncio.create_task(self._download_hls(item, output_dir, pair.preferred_resolution))
+                    task = asyncio.create_task(self._download_hls(
+                        item, output_dir, pair.preferred_resolution, resolved.manifest_url))
                 else:
                     segments = self.num_segments
                     if item.provider_name == "gofile":

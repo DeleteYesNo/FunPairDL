@@ -270,6 +270,17 @@ async def _probe_uncached(
     if provider == "e621":
         return await _probe_e621(url, session)
 
+    if provider == "joidb":
+        return await _probe_joidb(url, session)
+
+    if provider == "watchhentai":
+        return await _probe_watchhentai(url, session)
+
+    # A post page; the attachments themselves (downloads.fanbox.cc) are
+    # plain files and fall through to HEAD below.
+    if provider == "fanbox" and "/posts/" in url:
+        return await _probe_fanbox(url, session)
+
     # EroScripts short-urls: need cookies, skip probing
     if provider == "eroscripts":
         return {"success": True, "provider": "eroscripts", "size": 0}
@@ -714,6 +725,105 @@ async def _probe_e621(url: str, session: aiohttp.ClientSession) -> dict:
         }
     except Exception as e:
         logger.error("e621 probe failed for %s: %s", url[:80], e)
+        return {"success": False, "error": str(e)}
+
+
+async def _probe_fanbox(url: str, session: aiohttp.ClientSession) -> dict:
+    """pixivFANBOX: a free post's attachments (several videos list as a
+    pack); a supporter-only post or a creator page says why it can't go."""
+    try:
+        from funpairdl.providers.fanbox import fetch_post, file_name, video_files
+        from funpairdl.utils.media_duration import probe_media_duration
+
+        post = await fetch_post(url)
+        vids = video_files(post)
+        if not vids:
+            return {"success": False, "error": "Not a video: no video attached to the pixivFANBOX post"}
+        if len(vids) > 1:
+            return {
+                "success": True, "provider": "fanbox",
+                "filename": f"{len(vids)} files", "size": sum(f["size"] for f in vids),
+                "files": [{"name": file_name(post, f, True), "size": f["size"], "url": f["url"]}
+                          for f in vids],
+            }
+        f = vids[0]
+        duration = await probe_media_duration(
+            f["url"], session, headers={"User-Agent": BROWSER_USER_AGENT,
+                                        "Referer": "https://www.fanbox.cc/"})
+        return {
+            "success": True, "provider": "fanbox",
+            "title": str(post.get("title") or ""),
+            "filename": file_name(post, f, False),
+            "size": f["size"],
+            "duration": duration,
+        }
+    except Exception as e:
+        logger.info("pixivFANBOX probe failed for %s: %s", url[:80], e)
+        return {"success": False, "error": str(e)}
+
+
+async def _probe_joidb(url: str, session: aiohttp.ClientSession) -> dict:
+    """The JOI Database: the HLS master lists the heights; sizes are
+    bandwidth × length (the stream has no byte count)."""
+    try:
+        from funpairdl.providers.joidb import estimate_size, fetch_stream_info
+
+        info = await fetch_stream_info(url, session)
+        formats = [
+            {"height": v["height"], "size": estimate_size(v, info["duration"]), "format_id": str(v["height"])}
+            for v in info["variants"]
+        ]
+        title = info["title"]
+        return {
+            "success": True,
+            "provider": "joidb",
+            "title": title,
+            "filename": (title + ".mp4") if title else "",
+            "formats": formats,
+            "duration": info["duration"] or None,
+        }
+    except Exception as e:
+        logger.error("The JOI Database probe failed for %s: %s", url[:80], e)
+        return {"success": False, "error": str(e)}
+
+
+async def _probe_watchhentai(url: str, session: aiohttp.ClientSession) -> dict:
+    """WatchHentai: decode the player's sources, size each with a ranged GET."""
+    try:
+        from funpairdl.providers.watchhentai import build_filename, fetch_episode, ranged_size
+
+        ep = await fetch_episode(url, session)
+
+        async def _size(u: str) -> int:
+            try:
+                return await ranged_size(u, session)
+            except ValueError:
+                raise
+            except Exception:
+                return 0
+
+        sizes = await asyncio.gather(*[_size(s["url"]) for s in ep["sources"]])
+        if not any(sizes):
+            return {"success": False, "error": "Video not found (404) on WatchHentai"}
+        formats = [{"height": s["height"], "size": sz, "format_id": s["label"]}
+                   for s, sz in zip(ep["sources"], sizes)]
+        best = ep["sources"][-1]
+        # The exact length from the mp4's own header (a script is checked
+        # against it); the page only gives whole minutes.
+        from funpairdl.utils.media_duration import probe_media_duration
+        duration = await probe_media_duration(
+            best["url"], session,
+            headers={"User-Agent": BROWSER_USER_AGENT, "Referer": "https://watchhentai.net/"})
+        return {
+            "success": True,
+            "provider": "watchhentai",
+            "title": ep["title"],
+            "filename": build_filename(ep["title"], best["url"]),
+            "formats": formats,
+            "duration": duration or ep["duration"] or None,
+        }
+    except Exception as e:
+        logger.error("WatchHentai probe failed for %s: %s", url[:80], e)
         return {"success": False, "error": str(e)}
 
 

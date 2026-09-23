@@ -12,6 +12,9 @@ from funpairdl.providers.eroscripts import EroScriptsProvider
 from funpairdl.providers.hmvmania import HmvManiaProvider
 from funpairdl.providers.socigames import SociGamesProvider
 from funpairdl.providers.e621 import E621Provider
+from funpairdl.providers.fanbox import FanboxProvider
+from funpairdl.providers.joidb import JoiDbProvider
+from funpairdl.providers.watchhentai import WatchHentaiProvider
 from funpairdl.providers.direct_http import DirectHTTPProvider
 
 logger = logging.getLogger("funpairdl.providers.registry")
@@ -37,6 +40,9 @@ class ProviderRegistry:
             HmvManiaProvider(),
             SociGamesProvider(),
             E621Provider(),
+            JoiDbProvider(),
+            FanboxProvider(),
+            WatchHentaiProvider(),
             YtdlpGenericProvider(),
             DirectHTTPProvider(),  # fallback
         ]

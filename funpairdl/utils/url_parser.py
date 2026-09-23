@@ -21,6 +21,9 @@ def detect_provider(url: str) -> str:
         "socigames.com": "socigames",
         "e621.net": "e621",
         "e926.net": "e621",
+        "the-joi-database.com": "joidb",
+        "watchhentai.net": "watchhentai",
+        "fanbox.cc": "fanbox",
     }
 
     for domain, provider in provider_map.items():
@@ -72,6 +75,9 @@ _PROVIDER_LABELS = {
     "hmvmania": "HMV Mania",
     "socigames": "SociGames",
     "e621": "e621",
+    "joidb": "The JOI Database",
+    "watchhentai": "WatchHentai",
+    "fanbox": "pixivFANBOX",
 }
 
 

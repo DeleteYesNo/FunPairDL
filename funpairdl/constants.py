@@ -77,6 +77,9 @@ VIDEO_HOSTS = [
     "socigames.com",
     "e621.net",
     "e926.net",
+    "the-joi-database.com",
+    "watchhentai.net",
+    "fanbox.cc",
 ]
 
 # Known script extensions
