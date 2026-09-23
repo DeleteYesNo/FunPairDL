@@ -49,6 +49,10 @@ const VIDEO_PRIORITY = {
   // Booru animation posts (webm + mp4 transcodes via JSON API)
   "e621.net": 7,
   "e926.net": 7,
+  // Own providers: JOI HLS streams, hentai episodes, free creator posts
+  "the-joi-database.com": 7,
+  "watchhentai.net": 7,
+  "fanbox.cc": 7,
   // Adult video sites (yt-dlp supported)
   "pornhub.com": 8,
   "xvideos.com": 8,
@@ -95,6 +99,12 @@ function isNonVideoPath(url) {
     if ((host === "x.com" || host === "twitter.com" ||
          host.endsWith(".x.com") || host.endsWith(".twitter.com")) &&
         !path.includes("/status/")) {
+      return true;
+    }
+    // pixivFANBOX: only a /posts/<id> page carries files; the creator's
+    // front page is a credit link like an X profile.
+    if ((host === "fanbox.cc" || host.endsWith(".fanbox.cc")) && !path.includes("/posts/") &&
+        host !== "downloads.fanbox.cc") {
       return true;
     }
     return /^\/(members|users|channels?|model|pornstar|profile|account)\b/.test(path);
@@ -262,6 +272,9 @@ function getVideoLabel(url) {
     if (host.includes("hmvmania")) return "HMV Mania";
     if (host.includes("socigames")) return "SociGames";
     if (host.includes("e621") || host.includes("e926")) return "e621";
+    if (host.includes("the-joi-database")) return "The JOI Database";
+    if (host.includes("watchhentai")) return "WatchHentai";
+    if (host.includes("fanbox.cc")) return "pixivFANBOX";
     if (host.includes("pornhub")) return "PornHub";
     if (host.includes("xvideos")) return "XVideos";
     if (host.includes("xnxx")) return "XNXX";
@@ -777,6 +790,23 @@ function parseOPSections(cookedEl) {
     .map((s) => ({ name: s.name, videos: s.videos, scripts: s.scripts }));
 }
 
+// Pure: whether the OP's sections are separate works (collection mode).
+// Two or more sections must each carry a video of their own AND scripts. A
+// link repeated under a later heading ("Video link" then again beside the
+// script) is the same video, and a section that only links other works (a
+// series' earlier episodes under "Notes") is not a work of this post —
+// single mode's work plan sorts those out by name and length.
+function _isCollectionLayout(sections) {
+  const seen = new Set();
+  let works = 0;
+  for (const sec of sections || []) {
+    const own = (sec.videos || []).filter((v) => !seen.has(v.url));
+    for (const v of sec.videos || []) seen.add(v.url);
+    if (own.length > 0 && (sec.scripts || []).length > 0) works += 1;
+  }
+  return works >= 2;
+}
+
 // ─── Cloaked post recovery ───
 
 function _getPreloadedPosts() {
@@ -1289,13 +1319,13 @@ function parseAllPosts(rootOverride, titleOverride, metaMapOverride) {
   // Who posted the topic: scripts from anyone else are "other authors'".
   const _opUsername = ((perPost.find((p) => p.isOP) || {}).username) || _username(posts[0]) || "";
 
-  // Collection mode: only when 2+ sections each have their own video(s).
-  // Multiple video URLs within the SAME section are mirrors (same video, different hosts),
-  // not separate content. Posts with 1 video section + multiple script sections should
-  // stay in single mode so everything becomes ONE pair.
+  // Collection mode: only when 2+ sections are works of their own (see
+  // _isCollectionLayout). Multiple video URLs within the SAME section are
+  // mirrors (same video, different hosts), not separate content. Posts with
+  // 1 video section + multiple script sections stay in single mode so
+  // everything becomes ONE pair.
   if (sections.length >= 2) {
-    const sectionsWithVideos = sections.filter(s => s.videos.length > 0);
-    if (sectionsWithVideos.length >= 2) {
+    if (_isCollectionLayout(sections)) {
       const cVideos = dedupArr(commentVideos);
       const cScripts = dedupArr(commentScripts);
       return {
@@ -3113,6 +3143,7 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
 const _SEND_PREF_DEFAULTS = {
   video_pick_mode: "smallest", encode_vs_variant: "ask", collect_other_authors: true,
   merge_into_library: true, batch_skip_identical: true,
+  dead_video_action: "delete",
 };
 const PROBE_SETTLE_TIMEOUT_MS = 20000;
 const PROBE_HARD_DEADLINE_MS = 300000;
@@ -3216,6 +3247,11 @@ function _onProbesSettled(panel, parsed) {
     // The early timeout shows a first plan; the decisions wait for the rest.
     if (_probesPending(panel)) return;
     panel._probesSettled = true;
+    // Now the work plan may set script-less videos aside, and the video
+    // plan re-reads which rows are in play.
+    try { await _refreshWorkPlan(panel, parsed); } catch (e) {}
+    panel._videoPlanKey = null;
+    try { await _refreshVideoPlan(panel, parsed); } catch (e) {}
     try { await _runLibraryLookup(panel, parsed); } catch (e) {}
     // The attachments' sizes may land after the last plan: check again.
     try { _dedupePackScripts(panel, parsed); } catch (e) {}
@@ -3280,13 +3316,26 @@ function _expectedSize(formats, pref) {
   return Number(fmts[fmts.length - 1].size);
 }
 
+// Pure: why a link can't be downloaded, from its probe error —
+// "gone" (the video no longer exists there), "paid" (supporters/subscribers
+// only), "unsupported" (the downloader has no way into that site yet),
+// "notvideo" (a page that holds no video), else "error" (possibly transient).
+function _deadKind(err) {
+  const e = String(err || "");
+  if (/paid content|supporters? only|subscription|supporter plan/i.test(e)) return "paid";
+  if (/not a video/i.test(e)) return "notvideo";
+  if (/unsupported url/i.test(e)) return "unsupported";
+  if (/\b(404|410)\b|not found|no longer|removed|deleted|expired|no video could be found/i.test(e)) return "gone";
+  if (/\b403\b|forbidden/i.test(e)) return "forbidden";
+  return "error";
+}
+
 // Plain words for why a link can't be downloaded.
 function _deadReason(err) {
-  const e = String(err || "");
-  if (/unsupported url/i.test(e)) return "不支援的網站";
-  if (/\b(404|410)\b|not found|no longer|removed|deleted/i.test(e)) return "連結已失效";
-  if (/\b403\b|forbidden/i.test(e)) return "被拒絕存取";
-  return "無法讀取";
+  return {
+    gone: "影片已失效", paid: "付費內容", unsupported: "下載器還不支援這個網站",
+    notvideo: "不是影片頁", forbidden: "被拒絕存取", error: "無法讀取",
+  }[_deadKind(err)];
 }
 
 // The post's creator names: the title's leading "[Creator]" and the OP.
@@ -3720,7 +3769,7 @@ function _batchDecisions(st) {
   if ((st.bundleBasis || []).some(weak)) {
     out.push({ kind: "bundle", text: "合集裡的檔案分組是猜的，請核對子組" });
   }
-  if (st.hasVideos && !st.checkedVideos && !st.mergeInto) {
+  if (st.hasVideos && !st.checkedVideos && !st.mergeInto && !(st.gone && st.goneAction === "keep")) {
     let text = "沒有勾選任何影片來源";
     if (st.probeFailedAll) {
       text = `影片來源都無法下載${st.deadReasons ? `（${st.deadReasons}）` : ""}：只要腳本就送出這帖，不要就取消勾選`;
@@ -3761,9 +3810,11 @@ function _packRowTicked(panel, cb) {
   return !!(rc && rc.checked);
 }
 
-// Pure: "dead" (unusable), "done" (library has it all), "ask", "auto".
+// Pure: "dead" (unusable), "gone" (every video gone/paid and the setting
+// deletes such posts), "done" (library has it all), "ask", "auto".
 function _batchTier(decisions, flags) {
   if (flags.dead) return "dead";
+  if (flags.gone && flags.goneAction !== "keep") return "gone";
   if (flags.nothingSelected) return flags.libraryHasWork ? "done" : "ask";
   return decisions.length ? "ask" : "auto";
 }
@@ -3802,11 +3853,21 @@ function _batchAssess(card) {
   const isDead = ({ v }) => roles[v.url] === "dead" || !!v.probeFailed;
   const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ""); } catch (e) { return ""; } };
   const deadReasons = [...new Set(rows.filter(isDead).map(({ v }) => `${hostOf(v.url)} ${_deadReason(v.probeError)}`))].join("、");
+  // Every video link is gone (404, deleted) or paid-only: nothing to wait
+  // for. A site the downloader can't open yet, or a probe that just failed,
+  // is not "gone" — that post still asks.
+  const goneKinds = rows.filter(isDead).map(({ v }) => _deadKind(v.probeError));
+  const gone = rows.length > 0 && rows.every(isDead) && !panel._mergeInto
+    && goneKinds.every((k) => k === "gone" || k === "paid");
   const sectionMerges = Object.keys(panel._sectionMerge || {}).length;
-  // Main's scripts (one work, not split) whose lengths disagree.
+  // Main's scripts whose lengths disagree, when they all go to one work (a
+  // split where the other works are script-less still has one).
+  const wp = panel._workPlanLast;
+  const scriptWorks = panel._workPlanSplit && wp && Array.isArray(wp.groups)
+    ? wp.groups.filter((g) => (g.scripts || []).length > 0).length : 1;
   let scriptLens = [];
   let videoDuration = 0;
-  if (parsed.mode === "single" && !panel._workPlanSplit) {
+  if (parsed.mode === "single" && scriptWorks <= 1) {
     const durs = [];
     panel.querySelectorAll('.funpairdl-group-body[data-group="Main"] .funpairdl-item[data-kind="script"]').forEach((row) => {
       const cb = row.querySelector('input[type="checkbox"][name]');
@@ -3829,6 +3890,7 @@ function _batchAssess(card) {
     mergeInto: panel._mergeInto || (sectionMerges ? "sections" : ""),
     probeFailedAll: rows.length > 0 && rows.every(isDead),
     deadReasons,
+    gone, goneAction: prefs.dead_video_action || "delete",
     otherLive: rows.filter((r) => !isDead(r) && !ticked(r)).length,
     scriptLens, videoDuration,
     otherAuthorCommentScripts: parsed.mode === "collection" && prefs.collect_other_authors !== false
@@ -3849,7 +3911,8 @@ function _batchAssess(card) {
     ? sectionMerges > 0
     : !!(lk && lk.work && lk.work.video && lk.same_content === true);
   const tier = panel._probesSettled && !_probesPending(panel)
-    ? _batchTier(decisions, { nothingSelected: !anyChecked, libraryHasWork })
+    ? _batchTier(decisions, { nothingSelected: !anyChecked, libraryHasWork,
+                              gone, goneAction: st.goneAction })
     : "pending";
   card.dataset.tier = tier;
 
@@ -3859,6 +3922,7 @@ function _batchAssess(card) {
   const alternates = rows.reduce((n, r) => n + ((ticked(r) && panel._alternates && panel._alternates[r.v.url]) ? panel._alternates[r.v.url].length : 0), 0);
   const parts = [];
   if (panel._mergeInto) parts.push("影片已在庫，併入既有作品");
+  else if (gone) parts.push(`影片${goneKinds.every((k) => k === "paid") ? "需付費" : "已失效"}（${deadReasons}）`);
   else parts.push(`${st.checkedVideos} 影片`);
   parts.push(`${checkedScripts} 腳本`);
   if (sectionMerges) parts.push(`${sectionMerges} 作品已在庫`);
@@ -3866,7 +3930,9 @@ function _batchAssess(card) {
   if (alternates) parts.push(`備援 ${alternates}`);
   if ((panel._skippedIdentical || []).length) parts.push(`略過相同 ${panel._skippedIdentical.length}`);
   if (summaryEl) summaryEl.textContent = parts.join(" · ");
-  const tierText = { pending: "判斷中…", auto: "✔ 可直接送出", ask: `需要決定 (${decisions.length})`, done: "已在庫，無新內容", dead: "" }[tier] || "";
+  const tierText = { pending: "判斷中…", auto: gone ? "✔ 只送腳本（影片已失效）" : "✔ 可直接送出",
+    ask: `需要決定 (${decisions.length})`, done: "已在庫，無新內容", dead: "",
+    gone: "✗ 影片已失效：刪除（送出時關閉分頁）" }[tier] || "";
   if (statusEl && !card.classList.contains("funpairdl-batch-card-sent")) statusEl.textContent = tierText;
 
   // Open questions banner at the top of the body.
@@ -3881,17 +3947,30 @@ function _batchAssess(card) {
 
   // Settled cards fold to their summary; questions stay open.
   if (tier !== "pending" && !card._userExpanded) {
-    const collapse = tier === "auto" || tier === "done";
+    const collapse = tier === "auto" || tier === "done" || tier === "gone";
     card.classList.toggle("funpairdl-batch-card-collapsed", collapse);
     const t = card.querySelector(".funpairdl-batch-card-toggle");
     if (t) t.textContent = collapse ? "展開" : "收合";
   }
-  if (tier === "done" && !card._doneApplied) {
+  if ((tier === "done" || tier === "gone") && !card._doneApplied) {
     card._doneApplied = true;
     const cb = card.querySelector(".funpairdl-batch-card-cb");
     if (cb) cb.checked = false;
   }
   if (overlay) _batchRefreshSummary(overlay);
+}
+
+// Posts whose every video is gone, under the "delete" setting: their cards
+// leave the overlay and their tabs close (never the one showing the overlay).
+function _batchDeleteGone(overlay) {
+  const gone = (overlay._cards || []).filter((c) => c.dataset.tier === "gone");
+  if (!gone.length) return 0;
+  _sendMsg("close-topic-tabs", { urls: gone.map((c) => c._url) }).catch(() => {});
+  overlay._cards = overlay._cards.filter((c) => !gone.includes(c));
+  for (const c of gone) c.remove();
+  overlay._deleted = (overlay._deleted || 0) + gone.length;
+  _batchRefreshSummary(overlay);
+  return gone.length;
 }
 
 function _batchRefreshSummary(overlay) {
@@ -3908,6 +3987,8 @@ function _batchRefreshSummary(overlay) {
       `<span>已在庫 ${count("done")}</span>`,
       `<span>無法讀取 ${count("dead")}</span>`,
     ];
+    if (count("gone")) bits.push(`<span class="funpairdl-batch-tier" style="color:#c25454">影片已失效 ${count("gone")}（送出時刪除）</span>`);
+    if (overlay._deleted) bits.push(`<span>已刪除 ${overlay._deleted} 帖</span>`);
     if (count("pending")) bits.push(`<span>判斷中 ${count("pending")}</span>`);
     if (sent) bits.push(`<span class="funpairdl-batch-tier" style="color:#2e9e6a">✓ 已送出 ${sent} 帖</span>`);
     el.innerHTML = bits.join(" · ");
@@ -3930,8 +4011,9 @@ function _batchRefreshSummary(overlay) {
   }
   const btn = overlay.querySelector(".funpairdl-batch-send-auto");
   if (btn && !btn._busy) {
-    btn.disabled = auto === 0;
-    btn.textContent = `送出可直接送出的 ${auto} 帖`;
+    const gone = cards.filter((c) => c.dataset.tier === "gone").length;
+    btn.disabled = auto === 0 && gone === 0;
+    btn.textContent = `送出可直接送出的 ${auto} 帖` + (gone ? `，刪除失效的 ${gone} 帖` : "");
   }
   // One notice for everything left out because the library already has it.
   const skipped = [];
@@ -4450,7 +4532,9 @@ window.funpairdlBatchOpen = function (urls) {
   overlay.querySelector(".funpairdl-batch-close")
     .addEventListener("click", () => overlay.remove());
   // Header controls start from the settings; changing one re-plans every card.
-  _loadSendPrefs().then((p) => {
+  _loadSendPrefs(true).then((p) => {
+    overlay._prefs = p;
+    for (const c of overlay._cards || []) _batchScheduleAssess(c);
     const pick = overlay.querySelector("#funpairdl-pick-mode");
     const oa = overlay.querySelector("#funpairdl-other-authors");
     if (pick) pick.value = p.video_pick_mode || "smallest";
@@ -4532,7 +4616,9 @@ window.funpairdlBatchOpen = function (urls) {
         failed += res.failed || 0;
       }
       overlay._lastSend = { sent, failed, at: Date.now() };
-      sendAutoBtn.textContent = `完成:${sent} 組已進佇列` + (failed ? `,${failed} 組失敗` : "");
+      const deleted = _batchDeleteGone(overlay);
+      sendAutoBtn.textContent = `完成:${sent} 組已進佇列` + (failed ? `,${failed} 組失敗` : "")
+        + (deleted ? `，刪除 ${deleted} 帖` : "");
     } finally {
       _batchRefreshSummary(overlay);
       setTimeout(() => _batchRefreshSummary(overlay), 6000);
@@ -5090,7 +5176,12 @@ function _mainWorkRows(panel, parsed) {
   if (!body) return { videos, scripts };
   body.querySelectorAll(".funpairdl-item[data-key]").forEach((row) => {
     const cb = row.querySelector('input[type="checkbox"][name]');
-    if (cb && !cb.checked) { _setWorkBadge(row, null); return; }
+    // A video the plan itself set aside (script-less) stays in view, so a
+    // later plan can give it its scripts back.
+    if (cb && !cb.checked && !(row.dataset.scriptless && !row.dataset.touched)) {
+      _setWorkBadge(row, null);
+      return;
+    }
     const idx = parseInt(row.dataset.index);
     if (row.dataset.kind === "video") {
       const v = parsed.videos[idx];
@@ -5238,30 +5329,51 @@ async function _refreshWorkPlan(panel, parsed) {
       }
     }
     panel._workPlanSeeded = nextSeeded;
-    // When the post splits into works and only some have scripts, the
-    // script-less ones are other posts' videos linked for reference (a
-    // series' earlier parts): they stay home. A post with no scripts at all
-    // is a video-only post and is left alone.
-    panel._workPlanScriptless = 0;
-    if (plan && plan.split && Array.isArray(plan.groups)) {
-      const withScripts = plan.groups.filter((g) => (g.scripts || []).length > 0);
-      if (withScripts.length > 0 && withScripts.length < plan.groups.length) {
-        const bare = new Set();
-        for (const g of plan.groups) {
-          if ((g.scripts || []).length === 0) for (const u of (g.videos || [])) bare.add(u);
-        }
-        for (const r of rows.videos) {
-          if (!bare.has(r.url) || r.row.dataset.touched) continue;
-          const cb = r.row.querySelector('input[type="checkbox"][name]');
-          _setChecked(panel, cb, false);
-          r.row.dataset.scriptless = "1";
-          _setRowTag(r.row, "unrelated", "無腳本，略過", "這支影片配不到帖子裡的任何腳本；要的話自己勾");
-          panel._workPlanScriptless += 1;
-        }
+    panel._workPlanLast = plan;
+  }
+  _applyScriptless(panel, parsed, rows);
+  _renderWorkPlan(panel, parsed);
+}
+
+// When the post splits into works and only some have scripts, the
+// script-less ones are other posts' videos linked for reference (a series'
+// earlier parts): they stay home. A post with no scripts at all is a
+// video-only post and is left alone. Decided only once every probe has
+// answered — a plan made before the scripts' lengths and links arrive pairs
+// by order and would set the wrong video aside — and undone for a video
+// the settled plan gives scripts after all.
+function _applyScriptless(panel, parsed, rows) {
+  if (!panel._probesSettled) return;
+  const plan = panel._workPlanLast;
+  const bare = new Set();
+  if (plan && plan.split && Array.isArray(plan.groups)) {
+    const withScripts = plan.groups.filter((g) => (g.scripts || []).length > 0);
+    if (withScripts.length > 0 && withScripts.length < plan.groups.length) {
+      for (const g of plan.groups) {
+        if ((g.scripts || []).length === 0) for (const u of (g.videos || [])) bare.add(u);
       }
     }
   }
-  _renderWorkPlan(panel, parsed);
+  panel._workPlanScriptless = 0;
+  let restored = false;
+  for (const r of rows.videos) {
+    if (r.row.dataset.touched) continue;
+    const cb = r.row.querySelector('input[type="checkbox"][name]');
+    if (bare.has(r.url)) {
+      panel._workPlanScriptless += 1;
+      if (r.row.dataset.scriptless) continue;
+      r.row.dataset.scriptless = "1";
+      _setChecked(panel, cb, false);
+      _setRowTag(r.row, "unrelated", "無腳本，略過", "這支影片配不到帖子裡的任何腳本；要的話自己勾");
+    } else if (r.row.dataset.scriptless) {
+      delete r.row.dataset.scriptless;
+      _setRowTag(r.row, "", "");
+      _setChecked(panel, cb, true);
+      restored = true;
+    }
+  }
+  // A video back in play: the video plan tags and picks it again.
+  if (restored) { panel._videoPlanKey = null; _scheduleVideoPlan(panel, parsed); }
 }
 
 function _renderWorkPlan(panel, parsed) {

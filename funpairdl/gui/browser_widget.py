@@ -77,6 +77,9 @@ class _BridgeDispatcher(QObject):
     # from the worker loop, delivered queued on the GUI thread where
     # BrowserWidget tracks download completion and closes the topic's tabs.
     autocloseRequested = Signal(str, str)
+    # Batch overlay "close-topic-tabs": topic URLs (JSON list) of posts it
+    # deleted (every video gone) — their tabs close on the GUI thread.
+    closeTabsRequested = Signal(str)
 
     def __init__(self, bridges: dict, parent=None):
         super().__init__(parent)
@@ -638,6 +641,14 @@ class BridgeCore:
                 respond(callback_id, {"success": True})
                 return
 
+            if msg_type == "close-topic-tabs":
+                # Batch overlay deleted these posts (their video is gone):
+                # close their tabs (never the one the user is looking at).
+                urls = [str(u) for u in (data.get("urls") or []) if u]
+                self._dispatcher.closeTabsRequested.emit(json.dumps(urls))
+                respond(callback_id, {"success": True})
+                return
+
             if msg_type in ("topic-status", "topic-visited"):
                 # Topic-list badges: what was opened / sent from each topic.
                 path = "topics/status" if msg_type == "topic-status" else "topics/visited"
@@ -800,6 +811,8 @@ class BrowserWidget(QWidget):
         self._load_autoclose_registrations()
         self._bridge_core._dispatcher.autocloseRequested.connect(
             self._on_autoclose_registered)
+        self._bridge_core._dispatcher.closeTabsRequested.connect(
+            self._on_close_tabs_requested)
         self._setup_ui()
         self._inject_scripts()
         # Restore previous session or open default tab
@@ -1462,6 +1475,20 @@ class BrowserWidget(QWidget):
             self._autoclose[tid] = {"url": url, "pair_ids": ids}
         self._persist_autoclose()
         logger.info("Auto-close: registered topic %s with %d pair(s)", tid, len(ids))
+
+    def _on_close_tabs_requested(self, urls_json: str):
+        """Queued from the worker loop via the dispatcher (GUI thread)."""
+        try:
+            urls = [str(u) for u in json.loads(urls_json or "[]")]
+        except (TypeError, ValueError):
+            urls = []
+        closed = 0
+        for url in urls:
+            tid = _topic_id_from_url(url)
+            if tid:
+                closed += self._close_topic_tabs(tid)
+        if urls:
+            logger.info("Batch: closed %d tab(s) of %d deleted post(s) (video gone)", closed, len(urls))
 
     def on_pair_update_for_autoclose(self, pair_id: str):
         """Connected to MainWindow.sig_pair_updated (GUI thread)."""

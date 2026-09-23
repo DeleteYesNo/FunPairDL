@@ -67,6 +67,7 @@ async def get_config() -> dict:
         "collect_other_authors": settings.collect_other_authors,
         "merge_into_library": settings.merge_into_library,
         "batch_skip_identical": settings.batch_skip_identical,
+        "dead_video_action": settings.dead_video_action,
     }
 
 

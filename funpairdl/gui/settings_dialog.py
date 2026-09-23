@@ -210,6 +210,18 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Skip files the library already has:", self.skip_identical_check)
 
+        self.dead_video_combo = QComboBox()
+        self.dead_video_combo.addItem("Delete the post (don't send, close its tab)", "delete")
+        self.dead_video_combo.addItem("Keep it — download the scripts anyway", "keep")
+        idx = self.dead_video_combo.findData(self.settings.dead_video_action)
+        self.dead_video_combo.setCurrentIndex(max(0, idx))
+        self.dead_video_combo.setToolTip(
+            "Every video link of the post is gone (404, deleted) or paid-only. "
+            "A site the downloader doesn't support yet is not 'gone': that "
+            "post still asks."
+        )
+        form.addRow("When a post's video is gone:", self.dead_video_combo)
+
         layout.addLayout(form)
         layout.addStretch(1)
         return tab
@@ -305,6 +317,7 @@ class SettingsDialog(QDialog):
         s.collect_other_authors = self.other_authors_check.isChecked()
         s.merge_into_library = self.merge_library_check.isChecked()
         s.batch_skip_identical = self.skip_identical_check.isChecked()
+        s.dead_video_action = self.dead_video_combo.currentData() or "delete"
 
         # Clipboard tab
         s.clipboard_watch_enabled = self.clip_enabled.isChecked()

@@ -550,9 +550,26 @@ check("external script row shows its host", extRow.includes('<span class="funpai
   check("tier: scripts of two lengths ask", lens.map((d) => d.kind).join(","), "scriptlen");
   check("tier: script lengths shown", lens[0].text.includes("12:58") && lens[0].text.includes("17:41"), true);
 
+  check("tier: gone post is deleted by default", ctx._batchTier([], { nothingSelected: false, gone: true }), "gone");
+  check("tier: gone post kept for its scripts", ctx._batchTier([], { nothingSelected: false, gone: true, goneAction: "keep" }), "auto");
+  const keep = ctx._batchDecisions({ hasVideos: true, checkedVideos: 0, probeFailedAll: true, gone: true, goneAction: "keep" });
+  check("tier: kept gone post asks nothing about videos", keep.length, 0);
+
   check("tier: dead", ctx._batchTier([], { dead: true }), "dead");
   check("tier: library has it all -> done", ctx._batchTier([], { nothingSelected: true, libraryHasWork: true }), "done");
   check("tier: nothing selected without a library hit -> ask", ctx._batchTier([], { nothingSelected: true }), "ask");
+}
+
+// ── collection layout: 2+ sections that are works of their own ──
+{
+  const v = (u) => ({ url: u }); const sc = [{ url: "s" }];
+  check("collection: two works with scripts",
+    ctx._isCollectionLayout([{ videos: [v("a")], scripts: sc }, { videos: [v("b")], scripts: sc }]), true);
+  check("collection: same link repeated under the script heading is one video",
+    ctx._isCollectionLayout([{ videos: [v("a")], scripts: [] }, { videos: [v("a")], scripts: sc }]), false);
+  check("collection: a notes section listing other episodes is no work",
+    ctx._isCollectionLayout([{ videos: [v("e1"), v("e2")], scripts: [] }, { videos: [v("e3")], scripts: [] },
+                             { videos: [], scripts: sc }]), false);
 }
 
 // ── script lengths: one cluster per cut ──
@@ -607,9 +624,21 @@ check("external script row shows its host", extRow.includes('<span class="funpai
 
 // ── dead-link wording and creator credits ──
 {
-  check("dead: unsupported", ctx._deadReason("ERROR: Unsupported URL: https://x"), "不支援的網站");
-  check("dead: 404", ctx._deadReason("Status 404"), "連結已失效");
+  check("dead: unsupported", ctx._deadReason("ERROR: Unsupported URL: https://x"), "下載器還不支援這個網站");
+  check("dead: 404", ctx._deadReason("Status 404"), "影片已失效");
   check("dead: other", ctx._deadReason(""), "無法讀取");
+  check("kind: pixeldrain 404", ctx._deadKind("Status 404"), "gone");
+  check("kind: yt-dlp 404", ctx._deadKind("ERROR: [Rule34Video] 1: Unable to download webpage: HTTP Error 404: Not Found"), "gone");
+  check("kind: gofile expired", ctx._deadKind("GoFile content not found — the link has expired or was deleted."), "gone");
+  check("kind: tweet without video", ctx._deadKind("ERROR: [twitter] 1: No video could be found in this tweet"), "gone");
+  check("kind: paid fanbox", ctx._deadKind("Paid content: pixivFANBOX supporter plan (¥300) required"), "paid");
+  check("kind: paid joi", ctx._deadKind("Paid content: this video needs a The JOI Database subscription"), "paid");
+  check("kind: creator page", ctx._deadKind("Not a video: pixivFANBOX creator page"), "notvideo");
+  check("kind: unsupported", ctx._deadKind("ERROR: Unsupported URL: https://x"), "unsupported");
+  check("kind: timeout is not gone", ctx._deadKind("yt-dlp probe timed out after 60s"), "error");
+  check("fanbox creator page is a credit link", ctx.isNonVideoPath("https://someone.fanbox.cc/"), true);
+  check("fanbox post is not", ctx.isNonVideoPath("https://someone.fanbox.cc/posts/123"), false);
+  check("fanbox download is not", ctx.isNonVideoPath("https://downloads.fanbox.cc/files/post/1/a.mp4"), false);
   check("credits: title prefix + OP",
     ctx._postCredits({ title: "[Creator] Work - Part", opUsername: "poster" }).join("|"), "Creator|poster");
   check("credits: no prefix", ctx._postCredits({ title: "Work (Suggested)", opUsername: "" }).length, 0);

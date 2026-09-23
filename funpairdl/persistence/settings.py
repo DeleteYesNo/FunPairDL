@@ -144,6 +144,10 @@ class Settings:
     # Scripts identical to what the work already has are excluded from the
     # send and listed once in the batch overlay.
     batch_skip_identical: bool = True
+    # A post whose every video link is gone (404, deleted) or paid-only:
+    # "delete" = drop the post — it isn't sent and its tab is closed when the
+    # batch is sent; "keep" = send it anyway, the scripts without a video.
+    dead_video_action: str = "delete"
 
     @classmethod
     def load(cls, path: Path = CONFIG_FILE) -> Settings:
