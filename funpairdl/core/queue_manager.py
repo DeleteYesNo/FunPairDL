@@ -339,6 +339,7 @@ class QueueManager:
             return existing
 
         pair.output_dir = str(target_dir)
+        pair.foreign_files = self._folder_files(target_dir)
 
         for grp in groups:
             grp_name = grp.get("name", "Main") or "Main"
@@ -459,6 +460,10 @@ class QueueManager:
                 merged.append(it)
         dropped = [u for u in old_by_url if u not in {i.url for i in fresh.items}]
         existing.items = merged
+        # Everything in the folder except what this pair already finished.
+        own = {i.filename.lower() for i in merged if i.state == ItemState.COMPLETED and i.filename}
+        existing.foreign_files = [n for n in self._folder_files(Path(existing.output_dir))
+                                  if n.lower() not in own]
         existing.alt_group_config = dict(fresh.alt_group_config)
         existing.bundle_plan = dict(fresh.bundle_plan)
         existing.source_url = fresh.source_url or existing.source_url
@@ -477,6 +482,13 @@ class QueueManager:
         self.request_metadata_probe(existing)
         self._ensure_pump_alive()
         self._wake_pump()
+
+    @staticmethod
+    def _folder_files(d: Path) -> list[str]:
+        try:
+            return sorted(f.name for f in d.iterdir() if f.is_file())
+        except OSError:
+            return []
 
     def _merge_target(self, merge_into: str) -> Path | None:
         """`merge_into` as a Path when it is an existing work folder directly
@@ -1122,8 +1134,13 @@ class QueueManager:
         in one output folder made the second download overwrite the first
         (the surviving file was then filed as the .alt, the main was lost).
         Later duplicates become "<stem> (2).ext", "(3)", …; organize still
-        parses their axis and files the extras as variants."""
-        seen: dict[str, PairItem] = {}
+        parses their axis and files the extras as variants.
+
+        The names of files already in the folder that are not the pair's own
+        (pair.foreign_files) are taken too: downloading into an existing work
+        under the name of its script replaced that script before the library
+        reconcile could compare the two."""
+        seen: dict[str, PairItem | None] = {n.lower(): None for n in (pair.foreign_files or [])}
         for item in pair.items:
             if item.is_bundle or not item.filename:
                 continue
@@ -1513,10 +1530,11 @@ class QueueManager:
         # Phase 0: Mark items whose output files are already on disk as COMPLETED.
         # Must run BEFORE resolve — resolve may change item.filename, making
         # the file undetectable.
+        foreign = {n.lower() for n in (pair.foreign_files or [])}
         for item in pair.items:
             if item.state == ItemState.COMPLETED:
                 continue
-            if item.total_bytes > 0:
+            if item.total_bytes > 0 and item.filename.lower() not in foreign:
                 final = output_dir / item.filename
                 if self._already_on_disk(item, final):
                     item.downloaded_bytes = item.total_bytes
@@ -3284,17 +3302,16 @@ class QueueManager:
         and marks the item done — avoiding a pointless (and possibly
         impossible) re-download.
         """
+        foreign = {n.lower() for n in (pair.foreign_files or [])}
         for item in pair.items:
             if item.state == ItemState.COMPLETED:
                 continue
 
-            # Case 1: final output file already exists with correct size
+            # Case 1: final output file already exists with correct size (a
+            # script's size is exact; a file that was there before the pair
+            # is never this item's)
             final_file = output_dir / item.filename
-            if (
-                item.total_bytes > 0
-                and final_file.exists()
-                and final_file.stat().st_size >= item.total_bytes
-            ):
+            if item.filename.lower() not in foreign and self._already_on_disk(item, final_file):
                 item.downloaded_bytes = item.total_bytes
                 item.state = ItemState.COMPLETED
                 item.error_message = ""

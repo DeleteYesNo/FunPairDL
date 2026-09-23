@@ -442,6 +442,31 @@ class TestAlreadyOnDisk:
         assert QueueManager._already_on_disk(item, tmp_path / "missing.funscript") is False
 
 
+class TestForeignFiles:
+    """A pair downloading into an existing work must not take the name of a
+    file that was already there: the download replaced the library's script
+    (and a same-named larger file passed for the new one already done)."""
+
+    def test_download_never_takes_a_foreign_name(self):
+        new = _vi("Work [Artist].funscript", FileType.FUNSCRIPT)
+        pair = Pair(name="Work [Artist]", items=[new], foreign_files=["Work [Artist].funscript", "Work [Artist].mp4"])
+        QueueManager._dedupe_item_filenames(pair)
+        assert new.filename == "Work [Artist] (2).funscript"
+
+    def test_foreign_files_round_trip(self):
+        pair = Pair(name="W", foreign_files=["W.funscript"])
+        assert Pair.from_dict(pair.to_dict()).foreign_files == ["W.funscript"]
+        assert Pair.from_dict({"name": "old"}).foreign_files == []
+
+    def test_add_pair_records_the_folder(self, tmp_path):
+        qm = QueueManager(download_dir=tmp_path)
+        work = tmp_path / "Work"
+        work.mkdir()
+        (work / "Work.funscript").write_text("{}", encoding="utf-8")
+        pair = qm.add_pair(name="Work", video_urls=[], script_urls=["https://h/x.funscript"])
+        assert pair.foreign_files == ["Work.funscript"]
+
+
 class TestDedupeItemFilenames:
     """Two attachments of one post resolve to the same original upload name
     (the forum CDN serves the author's filename); in one folder the second

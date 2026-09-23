@@ -150,6 +150,12 @@ class Pair:
     # The forum topic (or other page) this pair was sent from — lets the
     # topic list show what has already been downloaded.
     source_url: str = ""
+    # Files that were in output_dir before this pair and are not its own
+    # (it downloads into an existing work: merge_into, or a re-send whose
+    # title folder already holds the work). No item may take one of these
+    # names — a download of the same name overwrote the library's script,
+    # and a same-named larger file passed for this item already downloaded.
+    foreign_files: list[str] = field(default_factory=list)
 
     @property
     def total_bytes(self) -> int:
@@ -214,6 +220,7 @@ class Pair:
             "alt_group_config": {k: dict(v) for k, v in self.alt_group_config.items()},
             "bundle_plan": dict(self.bundle_plan),
             "source_url": self.source_url,
+            "foreign_files": list(self.foreign_files),
             "error_message": self.error_message,
             "items": [i.to_dict() for i in self.items],
         }
@@ -233,6 +240,7 @@ class Pair:
             alt_group_config=d.get("alt_group_config", {}),
             bundle_plan=dict(d.get("bundle_plan") or {}),
             source_url=d.get("source_url", "") or "",
+            foreign_files=[str(n) for n in (d.get("foreign_files") or [])],
             error_message=d.get("error_message", ""),
         )
         pair.items = [PairItem.from_dict(i) for i in d.get("items", [])]
