@@ -1211,6 +1211,8 @@ class BrowserWidget(QWidget):
         # crawl — see _boost_view.
         page.loadStarted.connect(lambda v=view: self._on_page_load_started(v))
         page.loadFinished.connect(lambda ok, v=view: self._on_page_load_finished(v, ok))
+        page.renderProcessTerminated.connect(
+            lambda status, code, v=view: self._on_render_process_terminated(v, status, code))
         page._create_tab_func = self._create_tab_for_window
 
         if url:
@@ -1705,6 +1707,58 @@ class BrowserWidget(QWidget):
         QTimer.singleShot(
             self._LOAD_BOOST_SETTLE_MS, lambda v=view, g=gen: self._end_boost(v, g)
         )
+        if ok:
+            self._ensure_page_scripts(view)
+
+    def _ensure_page_scripts(self, view: QWebEngineView):
+        """Run the page scripts by hand when the profile's didn't.
+
+        A tab can end up in a renderer that never got the profile's user
+        scripts: after a reload the list page had no qwebchannel, no bridge
+        and no content.js — so no badges and no panel — while every other
+        tab was fine, and only a new renderer (a cross-site hop) fixed it.
+        After each EroScripts load the page is checked, and when content.js
+        is missing the same sources run in the main world directly.
+        """
+        try:
+            page = view.page()
+            url = view.url().toString()
+        except RuntimeError:
+            return
+        if page is None or not getattr(self, "_page_sources", None) or not is_eroscripts_page(url):
+            return
+
+        def _cb(kind, p=page):
+            if kind != "undefined":
+                return
+            try:
+                now = p.url().toString()
+            except RuntimeError:
+                return
+            if not is_eroscripts_page(now):
+                return
+            logger.warning("Page scripts missing after load (renderer without the "
+                           "profile's scripts) — running them directly: %s", now[:100])
+            for src in self._page_sources:
+                try:
+                    p.runJavaScript(src)
+                except RuntimeError:
+                    return
+
+        try:
+            page.runJavaScript("typeof window.funpairdlBatchOpen", _cb)
+        except RuntimeError:
+            pass
+
+    def _on_render_process_terminated(self, view: QWebEngineView, status, exit_code: int):
+        """A tab's renderer died (crash, killed, out of memory). Logged so a
+        tab that comes back without its scripts can be traced to it."""
+        try:
+            url = view.url().toString()
+        except RuntimeError:
+            url = "?"
+        logger.warning("Tab renderer ended (%s, exit code %s): %s",
+                       getattr(status, "name", status), exit_code, url[:100])
 
     def _view_boost_active(self, view: QWebEngineView) -> bool:
         if getattr(view, "_load_started_at", None) is not None:
@@ -1760,6 +1814,8 @@ class BrowserWidget(QWidget):
 
     def _inject_scripts(self):
         """Inject qwebchannel.js, bridge, CSS, and content.js into the profile."""
+        # The same sources in injection order, for _ensure_page_scripts.
+        self._page_sources: list[str] = []
         self._inject_qwebchannel_js()
         self._inject_bridge_script()
         self._inject_content_scripts()
@@ -1772,6 +1828,7 @@ class BrowserWidget(QWidget):
         script = QWebEngineScript()
         script.setName("qwebchannel")
         script.setSourceCode(qwc_file.read_text(encoding="utf-8"))
+        self._page_sources.append(script.sourceCode())
         script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
         script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
         script.setRunsOnSubFrames(False)
@@ -1825,6 +1882,7 @@ class BrowserWidget(QWidget):
         script = QWebEngineScript()
         script.setName("funpairdl-bridge")
         script.setSourceCode(bridge_js)
+        self._page_sources.append(bridge_js)
         script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
         script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
         script.setRunsOnSubFrames(False)
@@ -1854,6 +1912,7 @@ class BrowserWidget(QWidget):
             css_script = QWebEngineScript()
             css_script.setName("funpairdl-css")
             css_script.setSourceCode(css_inject_js)
+            self._page_sources.append(css_inject_js)
             css_script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentReady)
             css_script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
             css_script.setRunsOnSubFrames(False)
@@ -1863,6 +1922,7 @@ class BrowserWidget(QWidget):
             content_script = QWebEngineScript()
             content_script.setName("funpairdl-content")
             content_script.setSourceCode(js_file.read_text(encoding="utf-8"))
+            self._page_sources.append(content_script.sourceCode())
             content_script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentReady)
             content_script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
             content_script.setRunsOnSubFrames(False)
