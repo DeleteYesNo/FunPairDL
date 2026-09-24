@@ -27,6 +27,8 @@ def detect_provider(url: str) -> str:
         "pmvhaven.com": "pmvhaven",
         "faptap.net": "faptap",
         "mediafire.com": "mediafire",
+        "vik1ngfile.site": "vikingfile",
+        "vikingfile.com": "vikingfile",
     }
 
     for domain, provider in provider_map.items():
@@ -84,6 +86,7 @@ _PROVIDER_LABELS = {
     "pmvhaven": "PMVHaven",
     "faptap": "Faptap",
     "mediafire": "MediaFire",
+    "vikingfile": "ViKiNG FiLE",
 }
 
 

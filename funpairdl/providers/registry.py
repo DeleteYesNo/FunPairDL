@@ -16,6 +16,7 @@ from funpairdl.providers.fanbox import FanboxProvider
 from funpairdl.providers.faptap import FaptapProvider
 from funpairdl.providers.mediafire import MediafireProvider
 from funpairdl.providers.pmvhaven import PmvHavenProvider
+from funpairdl.providers.vikingfile import VikingFileProvider
 from funpairdl.providers.joidb import JoiDbProvider
 from funpairdl.providers.watchhentai import WatchHentaiProvider
 from funpairdl.providers.direct_http import DirectHTTPProvider
@@ -48,6 +49,7 @@ class ProviderRegistry:
             PmvHavenProvider(),
             FaptapProvider(),
             MediafireProvider(),
+            VikingFileProvider(),
             WatchHentaiProvider(),
             YtdlpGenericProvider(),
             DirectHTTPProvider(),  # fallback

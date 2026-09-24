@@ -1171,20 +1171,24 @@ class QueueManager:
             from funpairdl.persistence.settings import Settings
             settings = Settings.load()
 
+            # Outer timeout must stay ABOVE the providers' internal 120s
+            # budgets (yt-dlp/iwara) or their fallback paths dead-code; a
+            # provider that may wait for the user (a check in the browser)
+            # says how long.
+            timeout = getattr(registry.get_provider(item.url), "resolve_timeout", None) \
+                or RESOLVE_TIMEOUT_SECONDS
             try:
-                # Outer timeout must stay ABOVE the providers' internal 120s
-                # budgets (yt-dlp/iwara) or their fallback paths dead-code.
                 resolved = await asyncio.wait_for(
                     registry.resolve(
                         item.url,
                         cookies_from_browser=settings.cookies_from_browser,
                         preferred_resolution=preferred_resolution,
                     ),
-                    timeout=RESOLVE_TIMEOUT_SECONDS,
+                    timeout=timeout,
                 )
             except asyncio.TimeoutError:
                 raise TimeoutError(
-                    f"Resolve timed out after {RESOLVE_TIMEOUT_SECONDS}s: {item.url[:80]}"
+                    f"Resolve timed out after {timeout}s: {item.url[:80]}"
                 )
 
             item.resolved_url = resolved.direct_url

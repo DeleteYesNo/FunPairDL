@@ -83,6 +83,8 @@ VIDEO_HOSTS = [
     "pmvhaven.com",
     "faptap.net",
     "mediafire.com",
+    "vik1ngfile.site",
+    "vikingfile.com",
 ]
 
 # Known script extensions

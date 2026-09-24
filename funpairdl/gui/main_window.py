@@ -84,6 +84,7 @@ class MainWindow(QMainWindow):
             self.browser.attach_queue_manager(self.qm)
             self.sig_pair_updated.connect(self.browser.on_pair_update_for_autoclose)
             self.browser.sig_topic_download_failed.connect(self._on_topic_download_failed)
+            self.browser.sig_browser_check_needs_user.connect(self._on_browser_check_needs_user)
 
         # Populate tree with any pairs already loaded from queue store
         if self.qm.pairs:
@@ -625,6 +626,11 @@ class MainWindow(QMainWindow):
         if not self.tray.isVisible():
             return
         self.tray.showMessage(title, body, QSystemTrayIcon.Warning, 8000)
+
+    def _on_browser_check_needs_user(self, title: str, body: str):
+        """A download waits for the user to pass a check in its window."""
+        if self.tray.isVisible():
+            self.tray.showMessage(title, body, QSystemTrayIcon.Information, 10000)
 
     @Slot(list)
     def _on_clipboard_duplicates(self, urls: list):

@@ -57,6 +57,9 @@ const VIDEO_PRIORITY = {
   "faptap.net": 7,
   // File host: single files and folders (a folder is a pack)
   "mediafire.com": 3,
+  // File host whose link the page builds (read in the embedded browser)
+  "vik1ngfile.site": 3,
+  "vikingfile.com": 3,
   // Adult video sites (yt-dlp supported)
   "pornhub.com": 8,
   "xvideos.com": 8,
@@ -283,6 +286,7 @@ function getVideoLabel(url) {
     if (host.includes("pmvhaven")) return "PMVHaven";
     if (host.includes("faptap")) return "Faptap";
     if (host.includes("mediafire")) return "MediaFire";
+    if (host.includes("vik1ngfile") || host.includes("vikingfile")) return "ViKiNG FiLE";
     if (host.includes("pornhub")) return "PornHub";
     if (host.includes("xvideos")) return "XVideos";
     if (host.includes("xnxx")) return "XNXX";

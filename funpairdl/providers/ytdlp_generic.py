@@ -27,6 +27,8 @@ _SKIP_DOMAINS = [
     "pmvhaven.com",
     "faptap.net",
     "mediafire.com",
+    "vik1ngfile.site",
+    "vikingfile.com",
 ]
 
 

@@ -187,3 +187,49 @@ class TestMediafire:
         assert link == "https://download1234.mediafire.com/tok/abc123def456/Garden+Party.mp4"
         assert name_from_link(link) == "Garden Party.mp4"
         assert parse_download_link("<p>nothing</p>") == ""
+
+
+class TestVikingFile:
+    def test_routing_and_page(self):
+        from funpairdl.providers.vikingfile import VikingFileProvider, parse_page
+        page = "https://vik1ngfile.site/f/AbCdEf1234"
+        assert VikingFileProvider.can_handle(page)
+        assert VikingFileProvider.can_handle("https://vikingfile.com/f/AbCdEf1234")
+        assert not VikingFileProvider.can_handle("https://vikingfile.com/d/AbCd/x.mp4")
+        assert not YtdlpGenericProvider.can_handle(page)
+        assert detect_provider(page) == "vikingfile"
+        info = parse_page('<title>Garden_Party.mp4</title><a href="https://u.example/download/'
+                          'Garden_Party.mp4%20%5B1.37%20GB%5D">Download via Usenet</a>')
+        assert info["name"] == "Garden_Party.mp4"
+        assert info["size"] == int(1.37 * 1024 ** 3)
+
+
+class TestBrowserAssist:
+    def test_link_comes_back_from_another_thread(self):
+        import asyncio
+        import threading
+        from funpairdl.core.browser_assist import BrowserAssist
+
+        ba = BrowserAssist()
+        seen = []
+
+        def handler(req):
+            seen.append(req)
+            threading.Timer(0.05, lambda: ba.complete(req["id"], {"url": "https://h/d/x.mp4", "name": "x.mp4"})).start()
+
+        ba.set_handler(handler)
+        got = asyncio.run(ba.open("https://vik1ngfile.site/f/abc", "vikingfile", timeout=5))
+        assert got["url"] == "https://h/d/x.mp4"
+        assert seen[0]["site"] == "vikingfile" and "extract_js" in seen[0]
+
+    def test_cancel_and_no_gui(self):
+        import asyncio
+        import pytest
+        from funpairdl.core.browser_assist import BrowserAssist
+
+        ba = BrowserAssist()
+        with pytest.raises(ValueError, match="embedded browser"):
+            asyncio.run(ba.open("https://vik1ngfile.site/f/abc", "vikingfile"))
+        ba.set_handler(lambda req: ba.complete(req["id"], None, "Browser check cancelled by the user"))
+        with pytest.raises(ValueError, match="cancelled"):
+            asyncio.run(ba.open("https://vik1ngfile.site/f/abc", "vikingfile", timeout=5))

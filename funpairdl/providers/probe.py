@@ -290,6 +290,9 @@ async def _probe_uncached(
     if provider == "mediafire":
         return await _probe_mediafire(url, session)
 
+    if provider == "vikingfile":
+        return await _probe_vikingfile(url, session)
+
     # EroScripts short-urls: need cookies, skip probing
     if provider == "eroscripts":
         return {"success": True, "provider": "eroscripts", "size": 0}
@@ -846,6 +849,22 @@ async def _probe_mediafire(url: str, session: aiohttp.ClientSession) -> dict:
                 "size": size, "duration": duration}
     except Exception as e:
         logger.info("MediaFire probe failed for %s: %s", url[:80], e)
+        return {"success": False, "error": str(e)}
+
+
+async def _probe_vikingfile(url: str, session: aiohttp.ClientSession) -> dict:
+    """ViKiNG FiLE: name and (rounded) size from the page itself; the
+    download link needs the browser, so the probe never asks for it."""
+    try:
+        from funpairdl.providers.vikingfile import fetch_page, is_page
+
+        if not is_page(url):
+            return {"success": False, "error": "Not a video: ViKiNG FiLE page expected"}
+        info = await fetch_page(url, session)
+        return {"success": True, "provider": "vikingfile", "filename": info["name"],
+                "size": info["size"], "browser_check": True}
+    except Exception as e:
+        logger.info("ViKiNG FiLE probe failed for %s: %s", url[:80], e)
         return {"success": False, "error": str(e)}
 
 

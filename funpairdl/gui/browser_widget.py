@@ -785,6 +785,11 @@ class BrowserWidget(QWidget):
     # A registered topic has pair(s) that failed for good: (title, body) for
     # a tray notification. The tab itself stays open and is marked.
     sig_topic_download_failed = Signal(str, str)
+    # A download's host builds its link in the page (core.browser_assist):
+    # the request, as JSON, delivered to the GUI thread.
+    sig_browser_check_request = Signal(str)
+    # (title, body) — a browser-check window needs the user: tray message.
+    sig_browser_check_needs_user = Signal(str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -809,6 +814,14 @@ class BrowserWidget(QWidget):
         # page shows a banner, until the failed pairs are gone or complete.
         self._failed_tabs: dict = {}
         self._load_autoclose_registrations()
+        # Links that only a page in the browser can produce: one window at a
+        # time, the rest wait their turn.
+        self._check_queue: list[dict] = []
+        self._check_dialog = None
+        self.sig_browser_check_request.connect(self._on_browser_check_request)
+        from funpairdl.core.browser_assist import get_browser_assist
+        get_browser_assist().set_handler(
+            lambda req: self.sig_browser_check_request.emit(json.dumps(req)))
         self._bridge_core._dispatcher.autocloseRequested.connect(
             self._on_autoclose_registered)
         self._bridge_core._dispatcher.closeTabsRequested.connect(
@@ -1479,6 +1492,31 @@ class BrowserWidget(QWidget):
             self._autoclose[tid] = {"url": url, "pair_ids": ids}
         self._persist_autoclose()
         logger.info("Auto-close: registered topic %s with %d pair(s)", tid, len(ids))
+
+    # ─── Links built in the page (core.browser_assist) ───
+
+    def _on_browser_check_request(self, req_json: str):
+        """GUI thread: queue a request and open the next window."""
+        try:
+            self._check_queue.append(json.loads(req_json))
+        except (TypeError, ValueError):
+            return
+        self._next_browser_check()
+
+    def _next_browser_check(self):
+        if self._check_dialog is not None or not self._check_queue:
+            return
+        from funpairdl.gui.browser_check_dialog import BrowserCheckDialog
+        req = self._check_queue.pop(0)
+        dlg = BrowserCheckDialog(self._profile, req, self.window())
+        dlg.sig_needs_user.connect(self.sig_browser_check_needs_user)
+        dlg.sig_done.connect(self._on_browser_check_done)
+        self._check_dialog = dlg
+        dlg.start()
+
+    def _on_browser_check_done(self):
+        self._check_dialog = None
+        QTimer.singleShot(0, self._next_browser_check)
 
     def _on_close_tabs_requested(self, urls_json: str):
         """Queued from the worker loop via the dispatcher (GUI thread)."""
