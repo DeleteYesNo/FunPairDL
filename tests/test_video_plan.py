@@ -243,3 +243,83 @@ class TestCredits:
         ]
         res = plan_videos(vids)
         assert res["roles"]["https://h/b"] == "variant"
+
+
+def _p(url, name, pack="https://pixeldrain.com/l/packid01", size=100, source="OP"):
+    return VideoSpec(url=url, name=name, source=source, size=size, pack=pack)
+
+
+class TestPacks:
+    def test_each_streaming_link_joins_the_pack_file_it_names(self):
+        # A scripter's collection: one character by several studios, each
+        # animation in the pack and again on a streaming site.
+        res = plan_videos([
+            _p("https://pd/u/f1", "[StudioA] Heroine Nova.mp4", size=200),
+            _p("https://pd/u/f2", "[FortyTwo3D] Heroine Nova.mp4", size=100),
+            _p("https://pd/u/f3", "[StudioA] The Captain Heroine Nova.mp4", size=50),
+            _v("https://tube/v/1", "[StudioA][4K] Heroine Nova Full Animation", size=900),
+            _v("https://tube/v/2", "Heroine Nova [FortyTwo3D]", size=900),
+            _v("https://tube/v/3", "THE CAPTAIN HEROINE NOVA [StudioA]", size=900),
+        ], Prefs(pick_mode="smallest", min_resolution="1080"))
+        for pack_file, link in [("https://pd/u/f1", "https://tube/v/1"),
+                                ("https://pd/u/f2", "https://tube/v/2"),
+                                ("https://pd/u/f3", "https://tube/v/3")]:
+            g = _group_of(res, pack_file)
+            assert link in g["members"], (pack_file, g)
+            assert g["chosen"] == pack_file
+            assert res["roles"][link] == "alternate"
+
+    def test_slug_named_pack_file_keeps_the_tag_words(self):
+        res = plan_videos([
+            _p("https://pd/u/s1", "studiox-pip-ember-alt-scene-2-no-wm-4k_2160p.mp4"),
+            _p("https://pd/u/s2", "moss-ember-alt-scene-2-no-watermark-4k_2160p.mp4"),
+            _v("https://tube/v/s1", "[StudioX] Pip (Ember alt) scene 2: NO WM - 4K", size=900),
+            _v("https://tube/v/s2", "[StudioX] Moss (Ember alt) scene 2: NO WM 4K", size=900),
+        ], Prefs())
+        assert res["roles"]["https://tube/v/s1"] == "alternate"
+        assert res["roles"]["https://tube/v/s2"] == "alternate"
+        assert _group_of(res, "https://tube/v/s1")["chosen"] == "https://pd/u/s1"
+        assert _group_of(res, "https://tube/v/s2")["chosen"] == "https://pd/u/s2"
+
+    def test_two_encodes_in_a_pack_are_one_video(self):
+        res = plan_videos([
+            _p("https://pd/u/c1", "[Studio] Garden Party (1-3) uncompressed.mp4", size=1800, source="comment"),
+            _p("https://pd/u/c2", "[Studio] Garden Party (1-3).mp4", size=900, source="comment"),
+        ], Prefs(pick_mode="smallest"))
+        g = _group_of(res, "https://pd/u/c1")
+        assert g["chosen"] == "https://pd/u/c2"
+        assert g["alternates"] == ["https://pd/u/c1"]
+
+
+class TestNamesAndLengths:
+    def test_a_host_title_that_is_only_its_id_falls_back_to_the_slug(self):
+        res = plan_videos([
+            _v("https://tube.example/videos/1/garden-party-2020-night-shift/", failed=True),
+            _v("https://tube.example/74abc/video/garden+party+2020+night+shift60fps", "74abc",
+               source="comment", height=720),
+        ], Prefs())
+        assert res["roles"]["https://tube.example/74abc/video/garden+party+2020+night+shift60fps"] == "chosen"
+
+    def test_dead_op_page_is_a_fallback_of_the_live_comment_copy(self):
+        res = plan_videos([
+            _v("https://artist.example/films/stream-vid-garden-party", failed=True),
+            _v("https://tube.example/video/9/garden-party-artist/", "Garden Party [Artist]",
+               source="comment", height=2160),
+        ], Prefs())
+        assert res["roles"]["https://tube.example/video/9/garden-party-artist/"] == "chosen"
+        assert res["roles"]["https://artist.example/films/stream-vid-garden-party"] == "alternate"
+
+    def test_one_exact_length_under_unrelated_host_titles_is_one_video(self):
+        res = plan_videos([
+            _v("https://booru.example/view?id=1", "Booru - If it exists / tag one, tag two / 1 (1)", duration=727.6),
+            _v("https://dev.example/r/2", "Clip (Sound) Booru Video #2 | Dev (1)", duration=727.62),
+        ], Prefs())
+        assert len([g for g in res["groups"] if g.get("chosen")]) == 1
+
+    def test_ids_and_words_with_digits(self):
+        from funpairdl.core.video_plan import _is_id
+        assert _is_id("gu6l8lwb")
+        assert _is_id("zfmgl9bq")
+        assert _is_id("a1b2c3d4")
+        assert not _is_id("fortytwo3d")
+        assert not _is_id("studio2025")

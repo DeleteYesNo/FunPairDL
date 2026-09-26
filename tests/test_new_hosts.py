@@ -233,3 +233,10 @@ class TestBrowserAssist:
         ba.set_handler(lambda req: ba.complete(req["id"], None, "Browser check cancelled by the user"))
         with pytest.raises(ValueError, match="cancelled"):
             asyncio.run(ba.open("https://vik1ngfile.site/f/abc", "vikingfile", timeout=5))
+
+
+def test_duration_from_formats_needs_a_direct_file():
+    import asyncio
+    from funpairdl.providers.probe import _duration_from_formats
+    fmts = [{"url": "https://cdn.example/v/index.m3u8", "protocol": "m3u8_native"}]
+    assert asyncio.run(_duration_from_formats(fmts, None)) is None

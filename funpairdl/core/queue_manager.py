@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -324,6 +325,11 @@ class QueueManager:
         if merge_dir is not None:
             target_dir = merge_dir
             logger.info("Pair '%s' merges into existing work: %s", name, merge_dir)
+        else:
+            new_lens = [float(d) for g in groups
+                        for u, d in (g.get("durations") or {}).items()
+                        if d and u in (g.get("video_urls") or [])]
+            target_dir = self._work_dir_for(target_dir, new_lens)
 
         # A pair for this folder that is still queued/downloading: don't add
         # a second one. A FAILED one is re-queued below, with THIS
@@ -354,6 +360,7 @@ class QueueManager:
             grp_sizes = grp.get("sizes") or {}
             # Other links to the same video, tried only when the chosen fails.
             grp_alternates = grp.get("alternates") or {}
+            grp_durations = grp.get("durations") or {}
 
             if grp_name != "Main":
                 pair.alt_group_config[grp_name] = {
@@ -388,6 +395,7 @@ class QueueManager:
                     )
                     item.alternates = [str(u) for u in (grp_alternates.get(url) or [])
                                        if u and u != url]
+                    item.duration = float(grp_durations.get(url) or 0.0)
                 pair.items.append(item)
 
             for url in grp_scripts:
@@ -403,6 +411,7 @@ class QueueManager:
                     author=grp_authors.get(url, ""),
                     group=grp_name,
                 )
+                item.duration = float(grp_durations.get(url) or 0.0)
                 pair.items.append(item)
 
         # Bundle arrangement from the panel (per group and/or top level).
@@ -2033,7 +2042,10 @@ class QueueManager:
         # (video, identity stem for naming, match key) — longest key first so
         # the most specific video wins a containment match.
         video_info: list[tuple[PairItem, str, str]] = []
-        for v in h_videos:
+        # Every video is a target — a script the user did not place may be
+        # named after a video they did (a comment's pack video labelled, its
+        # attached scripts not): it joins that video's group.
+        for v in videos:
             real = _identity(v)
             video_info.append((v, real, _key(real)))
         video_info.sort(key=lambda x: len(x[2]), reverse=True)
@@ -2155,6 +2167,13 @@ class QueueManager:
                     hits.append(v)
             return hits[0] if len(hits) == 1 else None
 
+        def _lengths_disagree(v: PairItem, s: PairItem) -> bool:
+            dv = durations.get(v.url) or durations.get(v.resolved_url or "")
+            ds = durations.get(s.url)
+            if not dv or not ds:
+                return False
+            return ds - dv > max(5.0, 0.1 * dv) or (dv - ds > 120 and ds < dv / 4)
+
         for s in h_scripts:
             base = _strip_axis(s.filename)
             how = ""
@@ -2168,13 +2187,22 @@ class QueueManager:
                 if v is not None:
                     how = "link"
             if v is None:
+                # One video of exactly the script's length outranks shared
+                # words: "Work - Part 3" shares "Work" with the trailer and
+                # the compilation, its length only with Part 3.
+                v = _find_video_by_duration(s)
+                if v is not None:
+                    dv = durations.get(v.url) or durations.get(v.resolved_url or "")
+                    # Within a second is the same cut, not a guess.
+                    how = "length" if abs(dv - durations[s.url]) <= 1.0 else "duration"
+            if v is None:
                 v = _find_video_by_tokens(base)
                 if v is not None:
                     how = "tokens"
-            if v is None:
-                v = _find_video_by_duration(s)
-                if v is not None:
-                    how = "duration"
+                    if _lengths_disagree(v, s):
+                        # Shared words, but a twelve-minute script is no
+                        # trailer's: the length has the last word.
+                        v, how = None, ""
             if v is not None:
                 matched[id(v)].append(s)
                 basis[id(s)] = how
@@ -2218,7 +2246,7 @@ class QueueManager:
             still_unmatched: list[PairItem] = []
             for s in unmatched_scripts:
                 rs = srank.get(id(s), 0)
-                cand = [v for v, _, _ in video_info if not matched[id(v)]]
+                cand = [v for v, _, _ in video_info if not matched[id(v)] and not _label(v)]
                 if not cand:
                     still_unmatched.append(s)
                     continue
@@ -2238,10 +2266,12 @@ class QueueManager:
         # (Main) video inherits the post/bundle title. Fall back to the stem
         # only when neither is available (a plain multi-file folder, no alts).
         main_video_count = sum(
-            1 for vi, _, _ in video_info if (vi.group or "Main") == "Main"
+            1 for vi, _, _ in video_info if (vi.group or "Main") == "Main" and not _label(vi)
         )
         groups: list[dict] = []
         for video_item, real_stem, _ in video_info:
+            if _label(video_item):
+                continue  # the user's group holds it (below)
             grp = video_item.group or "Main"
             display = (alt_group_config.get(grp, {}).get("display_name") or "").strip()
             if display:
@@ -2250,10 +2280,17 @@ class QueueManager:
                 title_src = pair_name
             else:
                 title_src = real_stem
+            g_scripts = list(matched[id(video_item)])
+            if title_src == real_stem and g_scripts:
+                # A host title that shares no word with the scripts ("Booru -
+                # If it exists… / 1234567") names nothing: the scripter's
+                # file names the work.
+                s_base = _strip_axis(g_scripts[0].filename)
+                if not (_tokens(real_stem) & _tokens(s_base)):
+                    title_src = s_base
             name = sanitize_filename(self._clean_title(title_src))
             if not name:  # title cleaned away to nothing — fall back to the stem
                 name = sanitize_filename(self._clean_title(real_stem))
-            g_scripts = list(matched[id(video_item)])
             groups.append({
                 "name": name, "label": "",
                 "videos": [video_item], "scripts": g_scripts,
@@ -2261,16 +2298,48 @@ class QueueManager:
                 "script_basis": {s.url: basis.get(id(s), "") for s in g_scripts},
             })
 
+        # A script-less video of exactly a scripted video's length and named
+        # alike is that work's variant — the same animation with another
+        # character ("Pip (alt)" beside "Lumi"), played with its scripts —
+        # not a stray link to set aside. The length decides: two works of
+        # one name are never frame-for-frame the same length.
+        if durations:
+            scripted = [g for g in groups if g["scripts"]]
+            for g in [g for g in groups if not g["scripts"]]:
+                v = g["videos"][0]
+                dv = durations.get(v.url) or durations.get(v.resolved_url or "")
+                if not dv:
+                    continue
+                vt = _tokens(_identity(v))
+                hits = [sg for sg in scripted if any(
+                    abs((durations.get(sv.url) or durations.get(sv.resolved_url or "") or -99) - dv) <= 1.0
+                    and len(vt & _tokens(_identity(sv))) >= 2
+                    for sv in sg["videos"])]
+                if len(hits) == 1:
+                    hits[0]["videos"].append(v)
+                    g["merged"] = True
+            if any(g.get("merged") for g in groups):
+                groups = [g for g in groups if not g.get("merged")]
+                if len(groups) == 1 and not labels and pair_name:
+                    # All one work now: the post's title names it.
+                    groups[0]["name"] = sanitize_filename(self._clean_title(pair_name)) or groups[0]["name"]
+
         # User-labelled groups, in the order the labels first appear.
         for lb in labels:
             name = sanitize_filename(self._clean_title(lb)) or sanitize_filename(lb) or lb
+            g_videos = [v for v in videos if _label(v) == lb]
             g_scripts = [s for s in scripts if _label(s) == lb]
+            s_basis = {s.url: "plan" for s in g_scripts}
+            for v in g_videos:
+                for sc in matched.get(id(v), []):
+                    g_scripts.append(sc)
+                    s_basis[sc.url] = basis.get(id(sc), "")
             groups.append({
                 "name": name, "label": lb,
-                "videos": [v for v in videos if _label(v) == lb],
+                "videos": g_videos,
                 "scripts": g_scripts,
                 "others": [],
-                "script_basis": {s.url: "plan" for s in g_scripts},
+                "script_basis": s_basis,
             })
 
         if not groups:
@@ -2287,7 +2356,8 @@ class QueueManager:
 
         # Group confidence = its weakest script: a group holding one guessed
         # ("order") script is a guess as a whole.
-        rank = {"none": 0, "order": 1, "duration": 2, "tokens": 3, "link": 4, "name": 5, "plan": 6}
+        rank = {"none": 0, "order": 1, "duration": 2, "tokens": 3, "length": 4, "link": 4, "name": 5,
+                "plan": 6}
         for g in groups:
             kinds = list(g["script_basis"].values())
             g["basis"] = min(kinds, key=lambda k: rank.get(k, 0)) if kinds else ""
@@ -2362,6 +2432,31 @@ class QueueManager:
                 out[id(v)] = f"{key}#{v.url}" if (same_host_dupes and key) else key
         return out
 
+    def _work_dir_for(self, target_dir: Path, new_lens: list[float]) -> Path:
+        """The folder a download of this title goes to. A folder of the
+        title that holds ANOTHER cut — its video is not the length of this
+        download's — is another work: this one takes "<title> (2)" (the
+        next free), never that folder. Landing there skipped the new video
+        as "already on disk" and filed its scripts under the old cut. An
+        unknown length on either side keeps the folder (as before)."""
+        from funpairdl.utils.media_duration import local_media_duration
+        if not new_lens:
+            return target_dir
+        n, cand = 1, target_dir
+        while cand.is_dir():
+            try:
+                vids = [f for f in cand.iterdir() if f.is_file() and f.suffix.lower() in self._VIDEO_EXTS]
+            except OSError:
+                return cand
+            lens = [d for d in (local_media_duration(f) for f in vids) if d]
+            if not lens or any(abs(d - nl) <= max(3.0, 0.02 * nl) for d in lens for nl in new_lens):
+                return cand  # no video yet, or the same cut: the work's own folder
+            n += 1
+            cand = target_dir.with_name(f"{target_dir.name} ({n})")
+            logger.info("'%s' holds another cut (%s s vs %s s): trying %s",
+                        target_dir.name, [round(x, 1) for x in lens], [round(x, 1) for x in new_lens], cand.name)
+        return cand
+
     def _auto_split_bundle_pair(self, pair: Pair) -> list[Pair] | None:
         """If a resolved bundle produced multiple videos, split into separate
         pairs by matching each video to its scripts via filename stem — or by
@@ -2370,8 +2465,16 @@ class QueueManager:
         Returns new pairs if split occurred, or None if no split needed.
         """
         groups = self.plan_bundle_split(
-            pair.items, pair.bundle_plan, pair.name, pair.alt_group_config)
-        if not groups:
+            pair.items, pair.bundle_plan, pair.name, pair.alt_group_config,
+            durations={it.url: it.duration for it in pair.items if it.duration})
+        # One work is no split. (A single group — character alts joined to
+        # their work — once "split" into an identical pair that split
+        # again, forever.) Its first video is the work's; organize makes
+        # the others its variants.
+        if not groups or len(groups) < 2:
+            if groups and groups[0]["videos"]:
+                first = groups[0]["videos"][0]
+                pair.items.sort(key=lambda it: 0 if it is first else 1)
             return None
 
         # Each split pair becomes its own folder, so whatever group label
@@ -2381,7 +2484,12 @@ class QueueManager:
         for g in groups:
             new_pair = Pair(name=g["name"], preferred_resolution=pair.preferred_resolution,
                             source_url=pair.source_url)
-            new_pair.output_dir = str(self.download_dir / g["name"])
+            new_pair.output_dir = str(self._work_dir_for(
+                self.download_dir / g["name"],
+                [v.duration for v in g["videos"] if v.duration]))
+            # A folder of that name may already hold a work: its files are
+            # never overwritten (see Pair.foreign_files).
+            new_pair.foreign_files = self._folder_files(Path(new_pair.output_dir))
             new_pair.items = list(g["videos"]) + list(g["scripts"]) + list(g["others"])
             for it in new_pair.items:
                 it.group = "Main"
@@ -2434,10 +2542,20 @@ class QueueManager:
         for item in main_scripts:
             canonical, _ = self._parse_axis(item.filename)
             axis_seen.setdefault(canonical, []).append(item)
+        # The work's own set is the one named plainest: "Work" over "Work
+        # (Less Vibrations)" and "Work EASY", whatever order they came in.
+        l0_group = axis_seen.get("L0") or []
+        keep_base = ""
+        if len(l0_group) > 1:
+            keep = min(enumerate(l0_group), key=lambda x: (len(self._script_base(x[1].filename)), x[0]))[1]
+            keep_base = self._script_base(keep.filename)
+            axis_seen["L0"] = [keep] + [x for x in l0_group if x is not keep]
         extras: list[PairItem] = []
-        for _canonical, group in axis_seen.items():
+        for canonical, group in axis_seen.items():
             if len(group) > 1:
-                extras.extend(group[1:])
+                own = next((x for x in group if self._script_base(x.filename) == keep_base), group[0])
+                axis_seen[canonical] = [own] + [x for x in group if x is not own]
+                extras.extend(axis_seen[canonical][1:])
 
         # Subfolder mode fallback: no axis collision but multiple authors.
         if not extras:
@@ -2460,24 +2578,47 @@ class QueueManager:
         if not extras:
             return
 
-        # Bucket extras by author so each scripter gets its own slot
-        # (matches the old author-grouped author-_groups iteration).
+        # One slot per script SET — its scripter and its name without the
+        # axis ("Work (Heroine B)" with its pitch/roll/twist is one variant,
+        # not four) — labelled by what its name adds to the work's ("Heroine
+        # B", "EASY", "max"; empty → the scripter, else "Alt").
         next_n = 1
         used = set(pair.alt_group_config.keys()) | {it.group for it in pair.items if it.group}
         while f"Alt {next_n}" in used:
             next_n += 1
 
-        by_author: OrderedDict[str, list[PairItem]] = OrderedDict()
-        for it in extras:
-            key = it.author or f"_anon_{id(it)}"
-            by_author.setdefault(key, []).append(it)
+        l0s = axis_seen.get("L0") or []
+        primary = l0s[0] if l0s else main_scripts[0]
+        primary_base = self._script_base(primary.filename)
+        extra_keys = {(it.author or "", self._script_base(it.filename)) for it in extras}
+        extra_keys.discard(("", primary_base))
+        by_set: OrderedDict[tuple[str, str], list[PairItem]] = OrderedDict()
+        for it in main_scripts:
+            key = (it.author or "", self._script_base(it.filename))
+            if it in extras or key in extra_keys:
+                by_set.setdefault(key, []).append(it)
 
-        for _author, items in by_author.items():
+        for (author, base), items in by_set.items():
             alt_name = f"Alt {next_n}"
             next_n += 1
-            pair.alt_group_config.setdefault(alt_name, {"inherit_multi_axis": True})
+            tag = self._variant_tag(base + ".funscript", primary_base + ".funscript")
+            if (author and author != (primary.author or "")) or re.fullmatch(r"[\W\d_]*", tag or ""):
+                tag = ""  # another scripter's take is labelled by them; "2" says nothing
+            pair.alt_group_config.setdefault(alt_name, {"inherit_multi_axis": True, "display_name": tag})
             for it in items:
                 it.group = alt_name
+
+    @classmethod
+    def _script_base(cls, filename: str) -> str:
+        """A script's name without ".funscript" and its axis suffix:
+        "Work (Heroine B).pitch.funscript" -> "Work (Heroine B)"."""
+        name = filename or ""
+        if name.lower().endswith(".funscript"):
+            name = name[: -len(".funscript")]
+        head, dot, last = name.rpartition(".")
+        if dot and head and (last.lower() in cls._ERODECK_AXIS_MAP or cls._axis_from_prefixed(last)):
+            name = head
+        return name
 
     @staticmethod
     def _adopt_lone_alt_video(pair: Pair, output_dir: Path) -> None:
@@ -2501,6 +2642,21 @@ class QueueManager:
     _MERGED_SCRIPT_RE = re.compile(r"\.(?:merged|multi-?axis|multiaxis|combined|all-?axes)\.funscript$",
                                    re.IGNORECASE)
 
+    @staticmethod
+    def _is_combined_script(path: Path) -> bool:
+        """A funscript that carries every axis inside it (funscript 2.0
+        "channels", the older "axes" list) — posted under the stroke
+        file's own name beside the separate axis files it repeats."""
+        try:
+            if path.stat().st_size > 32 * 1024 * 1024:
+                return False
+            data = json.loads(path.read_bytes().decode("utf-8-sig", errors="replace"))
+        except (OSError, ValueError):
+            return False
+        if not isinstance(data, dict):
+            return False
+        return bool(data.get("channels")) or bool(data.get("axes"))
+
     def _drop_redundant_scripts(self, pair: Pair, output_dir: Path) -> None:
         seen: dict[str, PairItem] = {}
         seen_paths: set[str] = set()
@@ -2515,7 +2671,8 @@ class QueueManager:
                 pair.items.remove(it)
                 continue
             seen_paths.add(path.name.lower())
-            if has_axes and self._MERGED_SCRIPT_RE.search(it.filename):
+            if has_axes and (self._MERGED_SCRIPT_RE.search(it.filename)
+                             or self._is_combined_script(path)):
                 path.unlink(missing_ok=True)
                 pair.items.remove(it)
                 logger.info("Dropped combined multi-axis file (axes present): %s", it.filename)
@@ -2532,6 +2689,32 @@ class QueueManager:
             pair.items.remove(it)
             logger.info("Dropped duplicate script (identical to %s): %s", first.filename, it.filename)
 
+    def _script_named_video(self, pair: Pair, videos: list[PairItem]) -> PairItem:
+        """Of several Main videos, the one Main's stroke scripts are named
+        after (the post's work; the others are its variants), else the
+        first. A pack lists its files in its own order — "Moss alt,
+        Pip alt, Lumi" — which says nothing about which is the work."""
+        from funpairdl.core.video_plan import _ENCODE_TOKEN_RE
+
+        def toks(name: str) -> set[str]:
+            return {t for t in re.split(r"[^a-z0-9]+", name.lower())
+                    if len(t) >= 3 and not _ENCODE_TOKEN_RE.match(t)}
+
+        names = [Path(it.filename).stem for it in pair.items
+                 if (it.group or "Main") == "Main" and it.file_type == FileType.FUNSCRIPT
+                 and self._parse_axis(it.filename)[0] == "L0"]
+        best, best_score = videos[0], 0.0
+        for v in videos:
+            vt = toks(Path(v.filename).stem)
+            for n in names:
+                st = toks(n)
+                if not st:
+                    continue
+                score = len(vt & st) / len(st)
+                if score > best_score + 1e-9:
+                    best, best_score = v, score
+        return best
+
     def _autopromote_extra_main_videos(self, pair: Pair, output_dir: Path) -> None:
         """A second, different video in Main is a variant of the work
         ("Work (nude).mp4" next to "Work (stockings).mp4" with one script
@@ -2546,7 +2729,8 @@ class QueueManager:
         ]
         if len(main_videos) <= 1:
             return
-        primary = main_videos[0]
+        primary = self._script_named_video(pair, main_videos)
+        main_videos = [primary] + [v for v in main_videos if v is not primary]
         used = set(pair.alt_group_config.keys()) | {it.group for it in pair.items if it.group}
         next_n = 1
         for extra in main_videos[1:]:
@@ -2580,7 +2764,21 @@ class QueueManager:
         i = 0
         while i < min(len(stem), len(pstem)) and stem[i].lower() == pstem[i].lower():
             i += 1
-        return lib.sanitize_label(stem[i:], fallback="")
+        rest = lib.sanitize_label(stem[i:], fallback="")
+        if len(re.findall(r"[A-Za-z0-9]+", stem[i:])) <= 3:
+            return rest
+        # Names that part early ("pip-ember-alt-scene-3" beside "[Studio]
+        # Lumi (Ember alt) scene 3"): the words only this one has.
+        from funpairdl.core.video_plan import _ENCODE_TOKEN_RE, _SYNONYMS
+        norm = lambda w: _SYNONYMS.get(w.lower(), w.lower())  # noqa: E731
+        theirs_w = {norm(w) for w in re.findall(r"[A-Za-z0-9]+", pstem)}
+        uniq: list[str] = []
+        for w in re.findall(r"[A-Za-z0-9]+", stem):
+            lw = norm(w)
+            if lw in theirs_w or _ENCODE_TOKEN_RE.match(lw) or lw in {u.lower() for u in uniq}:
+                continue
+            uniq.append(w)
+        return lib.sanitize_label(" ".join(uniq), fallback="") if uniq else rest
 
     _VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".wmv", ".ts", ".flv"}
 
@@ -2620,7 +2818,7 @@ class QueueManager:
         # describe an encode, not the work ("Show-P4-RF35.mkv" is "Show").
         s = re.sub(
             r"(?<![a-z0-9])(?:\d{3,4}p|[248]k|\d{1,3}fps|no[-_ ]?wm|wm"
-            r"|x26[45]|h\.?26[45]|hevc|av1|avc|c?rf\d{1,2}|10bit|8bit|hdr)(?![a-z0-9])",
+            r"|x26[45]|h\.?26[45]|hevc|av1|avc|c?rf\d{1,2}|10bit|8bit|hdr|(?:un)?compressed)(?![a-z0-9])",
             " ", s,
         )
         # Keep alphanumerics of ANY script (CJK included) — only drop
@@ -2971,6 +3169,10 @@ class QueueManager:
 
         output_dir = Path(pair.output_dir)
         base_name = sanitize_filename(self._clean_title(pair.name))
+        # Another cut of the title lives in "<title> (2)" (see _work_dir_for):
+        # its files carry the folder's name, as every work's do.
+        if re.fullmatch(re.escape(base_name) + r" \(\d+\)", output_dir.name):
+            base_name = output_dir.name
 
         # Save original filenames before renaming (for undo)
         if not pair.original_filenames:
@@ -3093,7 +3295,17 @@ class QueueManager:
             main_axis_primary[canonical] = (item, suffix)
 
         # ─── Alt groups → flat (Label) variants ───
-        used_labels = lib.existing_labels(output_dir, base_name)
+        # Labels other files in the folder hold. This pair's own files,
+        # still under their download names, hold none: a script already
+        # named "<work> (Heroine B)" must not push its own label to
+        # "Heroine B 2".
+        own_names = {i.filename.lower() for i in pair.items if i.filename}
+        used_labels = {
+            v["label"] for v in lib.scan_variants(output_dir, base_name)
+            if not v.get("primary")
+            and not ({Path(f).name.lower() for f in (v.get("files") or {}).values()}
+                     | ({Path(v["video"]).name.lower()} if v.get("video") else set())) <= own_names
+        }
         main_authors = {(i.author or "").strip() for i in main_scripts if (i.author or "").strip()}
         main_names = {i.filename.lower() for i in main_items}
         overrides: dict[str, dict] = {}

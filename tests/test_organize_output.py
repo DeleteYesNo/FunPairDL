@@ -188,8 +188,8 @@ class TestAxisCollision:
 
         # First L0 script → primary (with L0 suffix since _parse_axis returns "L0")
         assert (tmp_path / "Weekday.L0.funscript").exists()
-        # Second L0 script → flat variant, no subfolder, no linked video
-        assert (tmp_path / "Weekday (Alt).L0.funscript").exists()
+        # Second L0 script → flat variant named by what its name adds
+        assert (tmp_path / "Weekday (plus).L0.funscript").exists()
         assert not (tmp_path / "Weekday.alt").exists()
         assert not (tmp_path / ".linkinfo").exists()
         assert [f.name for f in tmp_path.iterdir() if f.suffix.lower() == ".mp4"] == ["Weekday.mp4"]
@@ -207,7 +207,7 @@ class TestAxisCollision:
         _organize(pair)
 
         assert (tmp_path / "Video.funscript").exists()
-        assert (tmp_path / "Video (Alt).funscript").exists()
+        assert (tmp_path / "Video (plus).funscript").exists()
 
     def test_no_collision_different_axes(self, tmp_path):
         """Different known axes → no collision → all stay Main."""
@@ -252,13 +252,13 @@ class TestAxisCollision:
         _organize(pair)
 
         assert pair.alt_group_config["Alt 1"]["inherit_multi_axis"] is True
-        assert pair.alt_group_config["Alt 1"]["label"] == "Alt"
-        assert (tmp_path / "Mixed (Alt).funscript").exists()
-        assert not (tmp_path / "Mixed (Alt).pitch.funscript").exists()
+        assert pair.alt_group_config["Alt 1"]["label"] == "max"
+        assert (tmp_path / "Mixed (max).funscript").exists()
+        assert not (tmp_path / "Mixed (max).pitch.funscript").exists()
         assert not (tmp_path / "Mixed.alt").exists()
         v = _variants(tmp_path)
-        assert v["Alt"]["files"] == {"L0": "Mixed (Alt).funscript"}
-        assert "inherit_axes" not in v["Alt"]          # default true
+        assert v["max"]["files"] == {"L0": "Mixed (max).funscript"}
+        assert "inherit_axes" not in v["max"]          # default true
 
     def test_alt_whose_file_is_gone_makes_nothing(self, tmp_path):
         """A mirror bundle carried the same upload as the forum script: the
@@ -698,3 +698,102 @@ class TestLoneCommentVideoAndRedundantScripts:
         _organize(pair)
         assert (out / "Work Title.funscript").exists() or (out / "Work Title.merged.funscript").exists()
         assert len(pair.items) == 2
+
+
+class TestCharacterAltsAndCombinedScripts:
+    def test_pack_order_does_not_pick_the_primary(self, tmp_path):
+        # A pack lists "Moss alt, Pip alt, Lumi": the work is the one the
+        # script is named after, the others are its variants.
+        out = tmp_path / "Work"
+        names = ["moss-ember-alt-scene-3-no-male-version-4k.mp4",
+                 "studiox-pip-ember-alt-scene-3-no-wm-4k.mp4",
+                 "[StudioX] Lumi (Ember alt) scene 3 NO WM - 4K.mp4"]
+        for i, n in enumerate(names):
+            (out / n).parent.mkdir(parents=True, exist_ok=True)
+            (out / n).write_bytes(bytes([65 + i]) * (100 + i))
+        (out / "StudioX Lumi (Ember alt) scene 3 NO WM - 4K.funscript").write_bytes(b'{"actions":[]}')
+        pair = _make_pair(str(out), "Work", [
+            *(PairItem(url=f"https://pd/u/{i}", filename=n, file_type=FileType.VIDEO) for i, n in enumerate(names)),
+            PairItem(url="https://h/s", filename="StudioX Lumi (Ember alt) scene 3 NO WM - 4K.funscript",
+                     file_type=FileType.FUNSCRIPT),
+        ])
+        _organize(pair)
+        v = _variants(out)
+        assert (out / v["Main"]["video"]).read_bytes() == b"C" * 102
+        labels = sorted(k for k in v if k != "Main")
+        assert labels == ["moss male version", "pip"]
+
+    def test_variant_tag_is_the_words_only_it_has(self):
+        assert QueueManager._variant_tag(
+            "studiox-pip-ember-alt-scene-3-no-wm-4k_2160p.mp4",
+            "[StudioX] Lumi (Ember alt) scene 3 NO WM - 4K.mp4") == "pip"
+
+    def test_combined_channels_file_goes_when_axis_files_exist(self, tmp_path):
+        out = tmp_path / "Work Title"
+        _touch(out / "Work Title.mp4", size=100)
+        (out / "Work Title.funscript").write_bytes(b'{"actions":[{"at":0,"pos":0}]}')
+        (out / "Work Title.pitch.funscript").write_bytes(b'{"actions":[{"at":0,"pos":50}]}')
+        (out / "Work Title (2).funscript").write_bytes(
+            b'{"actions":[{"at":0,"pos":0}],"channels":{"pitch":{"actions":[{"at":0,"pos":50}]}}}')
+        pair = _make_pair(str(out), "Work Title", [
+            PairItem(url="https://h/v", filename="Work Title.mp4", file_type=FileType.VIDEO),
+            PairItem(url="https://h/a", filename="Work Title.funscript", file_type=FileType.FUNSCRIPT),
+            PairItem(url="https://h/b", filename="Work Title.pitch.funscript", file_type=FileType.FUNSCRIPT),
+            PairItem(url="https://h/c", filename="Work Title (2).funscript", file_type=FileType.FUNSCRIPT),
+        ])
+        _organize(pair)
+        assert sorted(p.name for p in out.glob("*.funscript")) == [
+            "Work Title.funscript", "Work Title.pitch.funscript"]
+
+    def test_combined_file_alone_is_kept(self, tmp_path):
+        p = tmp_path / "w.funscript"
+        p.write_bytes(b'{"actions":[],"channels":{"pitch":{"actions":[]}}}')
+        assert QueueManager._is_combined_script(p)
+        p.write_bytes(b'{"actions":[]}')
+        assert not QueueManager._is_combined_script(p)
+
+
+class TestScriptSetVariants:
+    def test_a_second_script_set_is_one_variant_named_by_its_tag(self, tmp_path):
+        _touch(tmp_path / "v.mp4")
+        names = ["Studio Date (Heroine A).funscript", "Studio Date (Heroine A).pitch.funscript",
+                 "Studio Date (Heroine B).funscript", "Studio Date (Heroine B).pitch.funscript",
+                 "Studio Date (Heroine B).surge.funscript"]
+        for n in names:
+            _touch(tmp_path / n)
+        pair = _make_pair(str(tmp_path), "Studio Date", [
+            PairItem(url="http://x/v.mp4", filename="v.mp4", file_type=FileType.VIDEO),
+            *(PairItem(url=f"http://x/{i}", filename=n, file_type=FileType.FUNSCRIPT) for i, n in enumerate(names)),
+        ])
+        _organize(pair)
+        v = _variants(tmp_path)
+        assert set(v) == {"Main", "Heroine B"}
+        assert v["Heroine B"]["files"] == {"L0": "Studio Date (Heroine B).funscript",
+                                           "pitch": "Studio Date (Heroine B).pitch.funscript",
+                                           "surge": "Studio Date (Heroine B).surge.funscript"}
+
+    def test_easy_and_invert_takes_are_labelled(self, tmp_path):
+        _touch(tmp_path / "v.mp4")
+        names = ["Site - Work.funscript", "Site - Work EASY.funscript", "Site - Work INVERT.funscript"]
+        for n in names:
+            _touch(tmp_path / n)
+        pair = _make_pair(str(tmp_path), "Work", [
+            PairItem(url="http://x/v.mp4", filename="v.mp4", file_type=FileType.VIDEO),
+            *(PairItem(url=f"http://x/{i}", filename=n, file_type=FileType.FUNSCRIPT) for i, n in enumerate(names)),
+        ])
+        _organize(pair)
+        assert set(_variants(tmp_path)) == {"Main", "EASY", "INVERT"}
+
+    def test_the_plainest_named_take_is_main_whatever_the_order(self, tmp_path):
+        _touch(tmp_path / "v.mp4")
+        names = ["Work (Less Vibrations).funscript", "Work.funscript", "Work (Overclocked).funscript"]
+        for n in names:
+            _touch(tmp_path / n, size=100 + len(n))
+        pair = _make_pair(str(tmp_path), "Work", [
+            PairItem(url="http://x/v.mp4", filename="v.mp4", file_type=FileType.VIDEO),
+            *(PairItem(url=f"http://x/{i}", filename=n, file_type=FileType.FUNSCRIPT) for i, n in enumerate(names)),
+        ])
+        _organize(pair)
+        v = _variants(tmp_path)
+        assert set(v) == {"Main", "Less Vibrations", "Overclocked"}
+        assert (tmp_path / "Work.funscript").stat().st_size == 100 + len("Work.funscript")

@@ -24,6 +24,9 @@ class PairGroupSpec(BaseModel):
     # (only entries > 0). Lets queued items show Size/ETA immediately
     # instead of waiting for a download slot to resolve.
     sizes: dict[str, int] | None = None
+    # {url: seconds} — probed lengths; the split pairs scripts with videos
+    # by them exactly as the panel's preview did.
+    durations: dict[str, float] | None = None
     inherit_multi_axis: bool = True                 # ignored for Main
     # Variant label: files become "<work> (<label>)[.axis].funscript"
     # (brackets/path characters dropped, numbered when taken). Empty → the
@@ -46,6 +49,7 @@ class VideoCandidate(BaseModel):
     duration: float | None = None
     priority: float = 99.0
     failed: bool = False          # the panel's probe of it failed
+    pack: str = ""                # the folder/list link this file is in ("" = a plain link)
 
 
 class VideoPlanRequest(BaseModel):

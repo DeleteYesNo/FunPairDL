@@ -53,14 +53,15 @@ class TestPlanBundleSplit:
         by_label = {g["label"]: g for g in groups}
         assert set(by_label) == {"", "Beta Special", "Gamma solo"}
         assert [i.filename for i in by_label["Beta Special"]["videos"]] == ["Beta.mp4"]
-        assert [i.filename for i in by_label["Beta Special"]["scripts"]] == ["Gamma.funscript"]
+        # Beta's own script was not placed: it follows the video it is
+        # named after into the user's group.
+        assert [i.filename for i in by_label["Beta Special"]["scripts"]] == ["Gamma.funscript", "Beta.funscript"]
         assert by_label["Beta Special"]["name"] == "Beta Special"
         assert [i.filename for i in by_label["Gamma solo"]["videos"]] == ["Gamma.mp4"]
-        # Alpha: heuristic pair. Beta's own script lost its video to the plan
-        # and, being unmatched, rides along with the first group.
+        # Alpha: heuristic pair.
         alpha = by_label[""]
         assert [i.filename for i in alpha["videos"]] == ["Alpha.mp4"]
-        assert sorted(i.filename for i in alpha["scripts"]) == ["Alpha.funscript", "Beta.funscript"]
+        assert sorted(i.filename for i in alpha["scripts"]) == ["Alpha.funscript"]
 
     def test_mirror_on_a_file_host_is_not_split_from_the_source_page(self):
         # The same work: the iwara page (descriptive slug) and a pixeldrain
@@ -1040,3 +1041,116 @@ class TestAbbreviatedScriptNames:
         assert [s.filename for s in by_video[v4.url]["scripts"]] == ["BDS04.funscript"]
         assert [s.filename for s in by_video[v1.url]["scripts"]] == ["BDS#01.funscript"]
         assert by_video[v4.url]["basis"] == "tokens"
+
+
+class TestCharacterAltSplit:
+    def test_same_length_scriptless_videos_join_the_scripted_work(self):
+        a = PairItem(url="https://pd/u/a", filename="[StudioX] Lumi (Ember alt) scene 3.mp4", file_type=FileType.VIDEO)
+        b = PairItem(url="https://pd/u/b", filename="studiox-pip-ember-alt-scene-3.mp4", file_type=FileType.VIDEO)
+        c = PairItem(url="https://pd/u/c", filename="moss-ember-alt-scene-3.mp4", file_type=FileType.VIDEO)
+        s = _vi("StudioX Lumi (Ember alt) scene 3.funscript", FileType.FUNSCRIPT)
+        durations = {a.url: 41.98, b.url: 41.98, c.url: 41.99, s.url: 46.4}
+        groups = QueueManager().plan_bundle_split([c, b, a, s], None, "T", durations=durations)
+        assert groups is not None and len(groups) == 1
+        assert {v.url for v in groups[0]["videos"]} == {a.url, b.url, c.url}
+        assert groups[0]["videos"][0] is a
+        assert [x.url for x in groups[0]["scripts"]] == [s.url]
+
+    def test_another_length_stays_its_own_work(self):
+        a = PairItem(url="https://pd/u/a", filename="[StudioX] Lumi scene 3.mp4", file_type=FileType.VIDEO)
+        b = PairItem(url="https://pd/u/b", filename="[StudioX] Pip scene 4.mp4", file_type=FileType.VIDEO)
+        s = _vi("StudioX Lumi scene 3.funscript", FileType.FUNSCRIPT)
+        groups = QueueManager().plan_bundle_split(
+            [a, b, s], None, "T", durations={a.url: 41.98, b.url: 63.0, s.url: 41.0})
+        assert groups is not None and len(groups) == 2
+
+
+class TestLengthsAndPlacedVideos:
+    def test_a_script_far_longer_than_a_token_match_goes_by_length(self):
+        trailer = PairItem(url="https://tube/v/1", filename="Garden Party Episode 3 Trailer [Studio].mp4",
+                           file_type=FileType.VIDEO)
+        full = PairItem(url="https://booru/v/2", filename="Booru - tag one, tag two - 123.mp4",
+                        file_type=FileType.VIDEO)
+        s = _vi("Studio Garden Party - Part 3.funscript", FileType.FUNSCRIPT)
+        groups = QueueManager().plan_bundle_split(
+            [trailer, full, s], None, "T",
+            durations={trailer.url: 45.7, full.url: 727.6, s.url: 727.64})
+        g = next(g for g in groups if g["scripts"])
+        assert g["videos"][0] is full and g["basis"] == "length"
+
+    def test_unplaced_script_joins_the_placed_video_it_is_named_after(self):
+        main = PairItem(url="https://tube/v/1", filename="Garden Party Part 3.mp4", file_type=FileType.VIDEO)
+        comp = PairItem(url="https://pd/u/c", filename="[Studio] Garden Party (1-3).mp4", file_type=FileType.VIDEO)
+        s1 = _vi("Garden Party Part 3.funscript", FileType.FUNSCRIPT)
+        s2 = _vi("Studio Garden Party (1-3).funscript", FileType.FUNSCRIPT)
+        plan = {main.url: "Garden Party Part 3", s1.url: "Garden Party Part 3",
+                comp.url: "[Studio] Garden Party (1-3)"}
+        groups = QueueManager().plan_bundle_split([main, comp, s1, s2], plan, "T")
+        by_label = {g["label"]: g for g in groups}
+        assert [x.url for x in by_label["[Studio] Garden Party (1-3)"]["scripts"]] == [s2.url]
+        assert [x.url for x in by_label["Garden Party Part 3"]["scripts"]] == [s1.url]
+
+    def test_compressed_and_uncompressed_are_one_work(self):
+        assert QueueManager._mirror_key("[Studio] Work (1-3) uncompressed.mp4") ==             QueueManager._mirror_key("[Studio] Work (1-3).mp4")
+
+    def test_length_outranks_shared_words_of_a_compilation(self):
+        # "Work - Part 3" shares its words with the compilation "Work
+        # (1-3)"; its length only with the booru copy of Part 3.
+        booru = PairItem(url="https://booru/v/2", filename="Booru - tag one, tag two - 123.mp4",
+                         file_type=FileType.VIDEO)
+        comp = PairItem(url="https://pd/u/c", filename="[Studio] Garden Party (1-3).mp4", file_type=FileType.VIDEO)
+        p3 = _vi("Studio Garden Party - Part 3.funscript", FileType.FUNSCRIPT)
+        c1 = _vi("Studio Garden Party (1-3).funscript", FileType.FUNSCRIPT)
+        groups = QueueManager().plan_bundle_split(
+            [booru, comp, p3, c1], None, "T", durations={booru.url: 727.6, p3.url: 727.64, c1.url: 1297.9})
+        by_video = {g["videos"][0].url: g for g in groups}
+        assert [x.url for x in by_video[booru.url]["scripts"]] == [p3.url]
+        assert [x.url for x in by_video[comp.url]["scripts"]] == [c1.url]
+
+    def test_a_work_is_named_by_its_script_when_the_host_title_says_nothing(self):
+        booru = PairItem(url="https://booru/v/2", filename="Booru - tag one, tag two - 123.mp4",
+                         file_type=FileType.VIDEO)
+        other = PairItem(url="https://tube/v/1", filename="Garden Party Trailer.mp4", file_type=FileType.VIDEO)
+        p3 = _vi("Studio Garden Party - Part 3.funscript", FileType.FUNSCRIPT)
+        groups = QueueManager().plan_bundle_split(
+            [other, booru, p3], None, "T", durations={booru.url: 727.6, other.url: 45.0, p3.url: 727.64})
+        g = next(g for g in groups if g["scripts"])
+        assert g["name"] == "Studio Garden Party - Part 3"
+
+    def test_one_work_with_variants_is_not_split_into_itself(self):
+        a = PairItem(url="https://pd/u/a", filename="[StudioX] Lumi (Ember alt) scene 3.mp4", file_type=FileType.VIDEO)
+        b = PairItem(url="https://pd/u/b", filename="studiox-pip-ember-alt-scene-3.mp4", file_type=FileType.VIDEO)
+        s = _vi("StudioX Lumi (Ember alt) scene 3.funscript", FileType.FUNSCRIPT)
+        for it, d in ((a, 41.98), (b, 41.98), (s, 46.4)):
+            it.duration = d
+        pair = Pair(name="[StudioX] Lumi + 1 Alt", items=[b, a, s])
+        assert QueueManager()._auto_split_bundle_pair(pair) is None
+        assert pair.items[0] is a
+        # The panel's label for the one work changes nothing either.
+        pair.bundle_plan = {a.url: "Lumi", b.url: "Lumi", s.url: "Lumi"}
+        assert QueueManager()._auto_split_bundle_pair(pair) is None
+
+
+def _mp4(seconds: float) -> bytes:
+    import struct
+
+    def atom(t, b):
+        return struct.pack(">I", 8 + len(b)) + t + b
+    mvhd = atom(b"mvhd", bytes(4) + struct.pack(">II", 0, 0) + struct.pack(">II", 1000, int(seconds * 1000)) + bytes(80))
+    return atom(b"ftyp", b"isom" + bytes(12)) + atom(b"moov", mvhd + atom(b"trak", bytes(16))) + atom(b"mdat", bytes(64))
+
+
+class TestAnotherCutIsAnotherFolder:
+    def test_a_title_folder_holding_another_cut_is_not_merged_into(self, tmp_path):
+        qm = QueueManager()
+        work = tmp_path / "Studio Date"
+        work.mkdir()
+        (work / "Studio Date.mp4").write_bytes(_mp4(155.3))
+        assert qm._work_dir_for(work, [180.35]) == tmp_path / "Studio Date (2)"
+        # The same cut (or an unknown length) keeps the work's folder.
+        assert qm._work_dir_for(work, [155.0]) == work
+        assert qm._work_dir_for(work, []) == work
+        # "(2)" already holds the 180 s cut: that is this work's folder.
+        (tmp_path / "Studio Date (2)").mkdir()
+        (tmp_path / "Studio Date (2)" / "Studio Date.mp4").write_bytes(_mp4(180.3))
+        assert qm._work_dir_for(work, [180.35]) == tmp_path / "Studio Date (2)"

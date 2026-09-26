@@ -63,6 +63,9 @@ class PairItem:
     # when the current url fails for good. `tried_urls` keeps what failed.
     alternates: list[str] = field(default_factory=list)
     tried_urls: list[str] = field(default_factory=list)
+    # Seconds, as the panel probed it (0 = unknown): the split pairs
+    # scripts with videos by it, as the panel's preview did.
+    duration: float = 0.0
 
     @property
     def progress(self) -> float:
@@ -87,6 +90,7 @@ class PairItem:
             "group": self.group,
             "alternates": list(self.alternates),
             "tried_urls": list(self.tried_urls),
+            "duration": self.duration,
             "error_message": self.error_message,
             "segments": [
                 {
@@ -119,6 +123,7 @@ class PairItem:
         )
         item.alternates = [str(u) for u in (d.get("alternates") or []) if u]
         item.tried_urls = [str(u) for u in (d.get("tried_urls") or []) if u]
+        item.duration = float(d.get("duration") or 0.0)
         item.segments = [
             SegmentInfo(**s) for s in d.get("segments", [])
         ]

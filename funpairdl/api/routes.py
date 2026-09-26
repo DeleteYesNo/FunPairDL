@@ -320,7 +320,8 @@ async def video_plan(req: VideoPlanRequest) -> dict:
     )
     videos = [VideoSpec(url=v.url, name=v.name, source=v.source or "OP", size=int(v.size or 0),
                         height=int(v.height or 0), duration=float(v.duration or 0),
-                        priority=float(v.priority), failed=bool(v.failed))
+                        priority=float(v.priority), failed=bool(v.failed),
+                        pack=v.pack or "")
               for v in req.videos if v.url]
     return await asyncio.to_thread(plan_videos, videos, prefs, dict(req.decisions or {}),
                                    list(req.credits or []))

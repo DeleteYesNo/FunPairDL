@@ -337,8 +337,39 @@ _DIRECT_FILE_EXTENSIONS = (
 )
 
 
+async def _duration_from_formats(formats: list[dict], session: aiohttp.ClientSession) -> float | None:
+    """yt-dlp named no length (rule34video, a generic page's player): read
+    it from the video file's own header — a few small ranged GETs. The
+    length is what tells a trailer from the full video and pairs a
+    script with its cut."""
+    from funpairdl.utils.media_duration import probe_media_duration
+    direct = [f for f in formats
+              if str(f.get("url") or "").startswith("http")
+              and str(f.get("protocol") or "https") in ("http", "https")
+              and ".m3u8" not in str(f.get("url") or "")]
+    # An mp4 names its length in one box; a webm often only deep inside.
+    direct.sort(key=lambda f: 0 if ".mp4" in str(f.get("url") or "").split("?")[0].lower() else 1)
+    for f in direct[:2]:
+        headers = dict(f.get("http_headers") or {})
+        try:
+            d = await asyncio.wait_for(probe_media_duration(f["url"], session, headers=headers), 25)
+            if d:
+                return d
+            # A CDN with a lapsed certificate (seen on video hosts) still
+            # serves the bytes: the length is read without verifying it.
+            async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as s2:
+                d = await asyncio.wait_for(probe_media_duration(f["url"], s2, headers=headers), 25)
+            if d:
+                return d
+        except Exception as e:  # noqa: BLE001 — a missing length is no probe failure
+            logger.debug("duration from formats failed: %s", e)
+    return None
+
+
 async def _probe_ytdlp(url: str, session: aiohttp.ClientSession) -> dict:
     """yt-dlp format extraction on the dedicated probe executor (60 s cap)."""
+    from funpairdl.providers.ytdlp_generic import _normalize_url
+    url = _normalize_url(url)  # what the download will fetch (hanime1 /download → /watch)
     try:
         def _extract():
             import yt_dlp
@@ -441,6 +472,10 @@ async def _probe_ytdlp(url: str, session: aiohttp.ClientSession) -> dict:
         for a in available:
             a.pop("_url", None)
 
+        duration = info.get("duration") or None
+        if not duration:
+            duration = await _duration_from_formats(candidates, session)
+
         return {
             "success": True,
             "provider": "ytdlp",
@@ -448,7 +483,7 @@ async def _probe_ytdlp(url: str, session: aiohttp.ClientSession) -> dict:
             "filename": info.get("title", ""),
             "formats": available,
             "thumbnail": info.get("thumbnail") or "",
-            "duration": info.get("duration") or None,
+            "duration": duration,
         }
     except asyncio.TimeoutError:
         logger.error("yt-dlp probe timed out after %ds for %s", _YTDLP_TIMEOUT, url[:80])

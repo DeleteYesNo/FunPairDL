@@ -33,7 +33,7 @@ from pathlib import Path
 # only in these are the same video twice.
 _ENCODE_TOKEN_RE = re.compile(
     r"^(?:\d{3,4}p|[248]k|uhd|fhd|qhd|hd|sd|h\.?26[45]|x26[45]|hevc|avc|av1|vp9|"
-    r"small(?:er)?|compressed|comp|re-?encoded?|reenc|lite|low|mini|tiny|web|"
+    r"small(?:er)?|(?:un)?compressed|comp|re-?encoded?|reenc|lite|low|mini|tiny|web|rf\d{1,2}|"
     r"\d+(?:\.\d+)?[mg]b|\d{2,3}fps|hq|lq|mq|high|medium|med|original|orig|source|src|"
     r"bitrate|crf\d*|q\d{1,2}|\d{3,4}x\d{3,4}|mp4|mkv|webm|mov)$",
     re.IGNORECASE,
@@ -46,6 +46,21 @@ _OPAQUE_TOKEN_RE = re.compile(
 )
 # Random ids (a pixeldrain/iwara token in brackets) say nothing either way.
 _ID_TOKEN_RE = re.compile(r"^(?=.*\d)[a-z0-9_-]{8,}$", re.IGNORECASE)
+
+
+def _is_id(t: str) -> bool:
+    """A random id ("gu6L8LWb", "a1b2c3d4"), not a word with a digit in it
+    ("FortyTwo3D", "Studio2025"): ids are unpronounceable or digit-riddled."""
+    if not _ID_TOKEN_RE.match(t):
+        return False
+    letters = re.sub(r"[^a-z]", "", t.lower())
+    runs = len(re.findall(r"\d+", t))
+    digits = sum(c.isdigit() for c in t)
+    if runs >= 2 or not letters:
+        return True
+    if digits >= 3 and not re.search(r"\d$", t):
+        return True  # "abc123de"; a year or number at the end is a word's ("Studio2025")
+    return sum(c in "aeiouy" for c in letters) / len(letters) < 0.25
 _SITE_PREFIX_RE = re.compile(
     r"^\s*(?:iwara|source(?:\s*video)?|mirror|video|rule34video|pixeldrain|mega)\s*[-—–:]\s*",
     re.IGNORECASE,
@@ -65,6 +80,7 @@ class VideoSpec:
     duration: float = 0.0
     priority: float = 99.0       # host priority from the panel (lower = better)
     failed: bool = False         # its probe failed: unsupported site, gone
+    pack: str = ""               # the folder/list link this file came in ("" = a plain link)
     key: str = ""                # filled in: mirror key
     stem: str = ""               # filled in: comparison stem
     tokens: set[str] = field(default_factory=set)
@@ -83,6 +99,10 @@ def _stem_of(spec: VideoSpec) -> str:
     from funpairdl.core.queue_manager import QueueManager
     from funpairdl.core.pair import FileType, PairItem
     name = (spec.name or "").strip()
+    bare = Path(name).stem if re.search(r"\.[a-z0-9]{2,4}$", name, re.IGNORECASE) else name
+    segs = {x.lower() for x in re.split(r"[/?&=#]", spec.url or "") if x}
+    if name and (not _core_tokens(_SITE_PREFIX_RE.sub("", bare)) or bare.lower() in segs):
+        name = ""  # the host titled it by its id ("7abcd"): the URL's slug says more
     if name:
         # The probed title/filename keeps its brackets ("(4K/Nude) Work
         # [Auth]"), which is what tells a variant tag from the work's name;
@@ -96,10 +116,20 @@ def _stem_of(spec: VideoSpec) -> str:
     return _SITE_PREFIX_RE.sub("", s).strip()
 
 
+# Spellings of one word, folded so "NO WM" and "no watermark" agree.
+_SYNONYMS = {"watermark": "wm", "watermarks": "wm", "watermarked": "wm", "watermarkless": "wm"}
+
+
+_GLUED_ENCODE_RE = re.compile(r"(?<=[a-z])(\d{2,3}fps|\d{3,4}p)(?![a-z0-9])")
+
+
 def _tokens(stem: str) -> set[str]:
-    return {t for t in re.split(r"[^a-z0-9]+", stem.lower()) if t}
+    low = _GLUED_ENCODE_RE.sub(r" \1", (stem or "").lower())
+    return {_SYNONYMS.get(t, t) for t in re.split(r"[^a-z0-9]+", low) if t}
 
 
+# A release year ("Work 2020") dates a work; one host keeps it, the next drops it.
+_YEAR_RE = re.compile(r"^(?:19|20)\d\d$")
 _BRACKET_RE = re.compile(r"[\[\(【][^\]\)】]*[\]\)】]")
 
 
@@ -110,7 +140,66 @@ def _core_tokens(stem: str) -> frozenset[str]:
     bare = _BRACKET_RE.sub(" ", stem or "")
     return frozenset(t for t in _tokens(bare)
                      if not _ENCODE_TOKEN_RE.match(t) and not _OPAQUE_TOKEN_RE.match(t)
-                     and not _ID_TOKEN_RE.match(t))
+                     and not _is_id(t) and not _YEAR_RE.match(t))
+
+
+_SQUARE_RE = re.compile(r"[\[【]([^\]】]*)[\]】]")
+# Genre/format tags that sit in square brackets but name no creator.
+_TAG_WORDS = frozenset({"hmv", "pmv", "sfm", "vr", "3d", "2d", "sound", "audio", "voice",
+                        "remake", "free", "full", "ai", "loop", "joi", "cei", "fap", "hero",
+                        "fh", "multi", "axis", "script", "funscript", "no", "wm", "eng", "sub",
+                        "subs", "uncensored", "censored"})
+
+
+def _creators(stem: str) -> frozenset[str]:
+    """Who made it: the words in a name's square brackets ("[AB12] Work",
+    "Work [FortyTwo3D]") that are not format tags or encode words."""
+    out = set()
+    for inner in _SQUARE_RE.findall(stem or ""):
+        for t in _tokens(inner):
+            if (t in _TAG_WORDS or _ENCODE_TOKEN_RE.match(t) or _OPAQUE_TOKEN_RE.match(t)
+                    or _is_id(t)):
+                continue
+            out.add(t)
+    return frozenset(out)
+
+
+def _pack_key(v: "VideoSpec", core: frozenset[str]) -> str:
+    """One pack file's work: its name's core words, its creators, its
+    numbers and parenthesised tags — so "Work (1-3) uncompressed.mp4" and
+    "Work (1-3).mp4" are one video, while "[AB12] Heroine Nova" and
+    "[FortyTwo3D] Heroine Nova", "Diary 01" and "Diary 02", "Work (nude)" and
+    "Work (stockings)" are not."""
+    nums = {t for t in v.tokens if re.fullmatch(r"\d{1,3}", t)}
+    tags = {t for inner in _PAREN_RE.findall(v.stem or "") for t in _tokens(inner)
+            if not _ENCODE_TOKEN_RE.match(t) and not _is_id(t)}
+    return "pack:" + " ".join(sorted(set(core) | _creators(v.stem) | nums | tags))
+
+
+def _pack_anchor(v: "VideoSpec", anchors: list["VideoSpec"], cores: dict) -> "VideoSpec | None":
+    """The pack file a plain link is another copy of: their core names
+    contain one another (2+ shared words) and their creators don't
+    conflict; the anchor whose creator the link names wins, then the
+    closest name. None when nothing fits or two fit equally."""
+    vc, vcr = cores[v.url], _creators(v.stem)
+    best: list[tuple[float, VideoSpec]] = []
+    for a in anchors:
+        ac, acr = cores[a.url], _creators(a.stem)
+        if not ac or not vc or not (ac <= vc or vc <= ac) or len(ac & vc) < 2:
+            continue
+        if acr and vcr and not (acr & vcr):
+            continue  # "[AB12] Heroine Nova" is not "[FortyTwo3D] Heroine Nova"
+        # The link names the anchor's creator (or the anchor, a slug with
+        # no brackets, carries the link's): that settles a tie.
+        named = (acr and acr <= v.tokens) or (vcr and vcr <= a.tokens)
+        score = len(ac & vc) / len(ac | vc) + (1.0 if named else 0.0)
+        best.append((score, a))
+    if not best:
+        return None
+    best.sort(key=lambda x: -x[0])
+    if len(best) > 1 and abs(best[0][0] - best[1][0]) < 1e-9 and best[0][1].key != best[1][1].key:
+        return None
+    return best[0][1]
 
 
 def _height_from_name(stem: str) -> int:
@@ -138,8 +227,18 @@ def _classify(spec: VideoSpec, ref: VideoSpec,
     if _duration_differs(spec.duration, ref.duration):
         tag = QueueManager._variant_tag(spec.stem + ".mp4", ref.stem + ".mp4") or f"{int(round(spec.duration))}s"
         return "variant", frozenset({"__dur__", str(int(round(spec.duration)))}), tag
+    if (spec.duration >= 60 and ref.duration >= 60 and abs(spec.duration - ref.duration) <= 0.5):
+        a, b = _core_tokens(spec.stem), _core_tokens(ref.stem)
+        if a | b and len(a & b) / len(a | b) < 0.34:
+            # One exact length under two unrelated host titles ("Booru - If
+            # it exists…" / "Clip (Sound) Booru Video #…"): one video.
+            # (Character alts share most of their name and stay variants.)
+            return "mirror", frozenset(), ""
     diff = (spec.tokens - ref.tokens) | (ref.tokens - spec.tokens)
-    diff = {t for t in diff if not _ID_TOKEN_RE.match(t) and t not in credits}
+    diff = {t for t in diff if not _is_id(t) and t not in credits}
+    if any(re.fullmatch(r"c?rf\d*", t) for t in diff):
+        # HandBrake's "-P4-RF35": the preset number rides with the quality.
+        diff = {t for t in diff if not re.fullmatch(r"p\d", t)}
     if not diff:
         return "mirror", frozenset(), ""
     variant = {t for t in diff if not _ENCODE_TOKEN_RE.match(t) and not _OPAQUE_TOKEN_RE.match(t)}
@@ -152,6 +251,36 @@ def _classify(spec: VideoSpec, ref: VideoSpec,
         return "reencode", frozenset(), ""
     tag = QueueManager._variant_tag(spec.stem + ".mp4", ref.stem + ".mp4") or " ".join(sorted(diff))
     return "ambiguous", frozenset(), tag
+
+
+_PAREN_RE = re.compile(r"[\(（]([^\)）]*)[\)）]")
+
+
+def _paren_diff(spec: VideoSpec, ref: VideoSpec, credits: frozenset[str] = frozenset()) -> set[str]:
+    """Words of a parenthesised tag ("(nude)", "(Pip alt)") one name has
+    and the other lacks entirely."""
+    tags = lambda st: {t for inner in _PAREN_RE.findall(st or "") for t in _tokens(inner)}
+    diff = ((tags(spec.stem) - ref.tokens) | (tags(ref.stem) - spec.tokens)) - credits
+    return {t for t in diff if not _ENCODE_TOKEN_RE.match(t) and not _OPAQUE_TOKEN_RE.match(t)
+            and not _is_id(t)}
+
+
+def _classify_in_pack(spec: VideoSpec, ref: VideoSpec,
+                      credits: frozenset[str] = frozenset()) -> tuple[str, frozenset[str], str]:
+    """A plain link matched to a pack file is another copy of it — hosts
+    retitle freely ("[Studio][4K] Work Full Animation" for "[Studio] Work.mp4")
+    — unless its length differs or a parenthesised tag sets it apart
+    ("Work (nude)")."""
+    from funpairdl.core.queue_manager import QueueManager
+    if _duration_differs(spec.duration, ref.duration):
+        return _classify(spec, ref, credits)
+    # A tag the other name carries anywhere is no difference: a slug
+    # ("work-ember-alt-scene-3.mp4") keeps the words, not the brackets.
+    diff = _paren_diff(spec, ref, credits)
+    if diff:
+        tag = QueueManager._variant_tag(spec.stem + ".mp4", ref.stem + ".mp4") or " ".join(sorted(diff))
+        return "variant", frozenset(sorted(diff)), tag
+    return "mirror", frozenset(), ""
 
 
 def _qualifies(spec: VideoSpec, floor: str, top_height: int) -> bool:
@@ -217,6 +346,7 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
     # OP links name the post's work(s); a comment link belongs to the work
     # whose name its own name contains ("Work Title Mockgan" -> "Work Title").
     cores = {v.url: _core_tokens(v.stem) for v in videos}
+    own_cores = dict(cores)  # before aliasing folds "Heroine Nova" into every "... Heroine Nova"
     raw_cores: list[frozenset[str]] = []
     for v in videos:
         if v.source == "OP" and cores[v.url] not in raw_cores:
@@ -260,6 +390,10 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
         else:
             fits = [k for k in op_cores if k and k <= core]
             if not fits:
+                # Or the other way round: "Garden Party [Artist]" under
+                # "Stream-Vid: Garden Party" (half the OP's words at least).
+                fits = [k for k in op_cores if len(core) >= 2 and core <= k and 2 * len(core) >= len(k)]
+            if not fits:
                 return "?" + " ".join(sorted(core))
             core = max(fits, key=len)
             key = " ".join(sorted(core))
@@ -269,8 +403,40 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
 
     for v in videos:
         v.key = _key_of(v)
-    op_keys = [v.key for v in videos if v.source == "OP"] or [
-        " ".join(sorted(k)) for k in op_cores]
+
+    # A pack (folder/list) holds the post's files by their real names: each
+    # distinct file is its own video, and a plain link is another copy of
+    # the pack file it names. Name cores alone merged a scripter's
+    # collection of eleven "Heroine Nova" animations by eleven creators into
+    # one work.
+    anchors = [v for v in videos if v.pack]
+    for a in anchors:
+        a.key = _pack_key(a, own_cores[a.url])
+    for v in videos:
+        if not v.pack and anchors:
+            a = _pack_anchor(v, anchors, own_cores)
+            if a is not None:
+                v.key = a.key
+
+    # Two links of one exact length (a minute or more, within half a
+    # second) are one video, whatever the hosts call them.
+    by_len: dict[str, float] = {}
+    for v in videos:
+        if v.duration and v.duration >= 60 and not v.failed:
+            by_len.setdefault(v.key, v.duration)
+    for k1 in list(by_len):
+        for k2 in list(by_len):
+            if k1 < k2 and k1 in by_len and k2 in by_len and abs(by_len[k1] - by_len[k2]) <= 0.5:
+                if k1.startswith("pack:") and k2.startswith("pack:"):
+                    continue  # two files in packs are two videos
+                keep, drop = (k2, k1) if k2.startswith("pack:") else (k1, k2)
+                for v in videos:
+                    if v.key == drop:
+                        v.key = keep
+                by_len.pop(drop, None)
+
+    # A post of comment links only: each of them names a work.
+    op_keys = [v.key for v in videos if v.source == "OP"] or [v.key for v in videos]
     by_key: dict[str, list[VideoSpec]] = {}
     for v in videos:
         by_key.setdefault(v.key, []).append(v)
@@ -288,15 +454,26 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
                            "alternates": [], "members": {v.url: "unrelated" for v in members},
                            "reason": "留言的影片與帖子的作品名稱對不上"})
             continue
-        # Reference: the live OP link with the shortest name (fewest qualifiers).
-        ops = [v for v in members if v.source == "OP"] or members
+        # Reference: the live OP link with the shortest name (fewest qualifiers);
+        # in a pack's group, the pack file.
+        live = [v for v in members if not v.failed] or members
+        ops = (([v for v in live if v.pack] if key.startswith("pack:") else [])
+               or [v for v in live if v.source == "OP"] or live)
         ref = min(ops, key=lambda v: (v.failed, len(v.tokens), v.priority))
         clusters: dict[frozenset, dict] = {}
         for v in members:
             if v is ref:
                 kind, ckey, tag = "mirror", frozenset(), ""
+            elif key.startswith("pack:"):
+                kind, ckey, tag = _classify_in_pack(v, ref, credit_words)
             else:
                 kind, ckey, tag = _classify(v, ref, credit_words)
+            if (kind == "variant" and v.failed and not ref.failed and "__dur__" not in ckey
+                    and not _paren_diff(v, ref, credit_words)):
+                # A dead link titled a little differently ("Stream-Vid: Work"
+                # beside the live "Work [Artist]") is a dead copy, not a lost
+                # version — only a bracketed tag or another length says so.
+                kind, ckey, tag = "reencode", frozenset(), ""
             if kind == "ambiguous" and (v.failed or ref.failed):
                 # Nothing to ask about a link that can't be downloaded: it
                 # only ever serves as a fallback.

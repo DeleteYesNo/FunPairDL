@@ -646,6 +646,41 @@ check("external script row shows its host", extRow.includes('<span class="funpai
   check("credits: no prefix", ctx._postCredits({ title: "Work (Suggested)", opUsername: "" }).length, 0);
 }
 
+// ── plan candidates: packs, comment works, length mismatch ──
+{
+  check("video file name", ctx._isVideoFileName("Work Title.mp4"), true);
+  check("script is no video file", ctx._isVideoFileName("Work Title.funscript"), false);
+  check("readme is no video file", ctx._isVideoFileName("readme.txt"), false);
+  const parsed = {
+    mode: "single",
+    scripts: [{}, {}],
+    groupState: { itemGroup: { "video-0": "Main", "video-1": "Alt 1", "video-2": "Alt 2",
+                               "script-0": "Main", "script-1": "Alt 1" } },
+  };
+  check("source: OP stays OP", ctx._planSource(parsed, "video-0", { source: "OP" }), "OP");
+  check("source: comment group with its own scripts is a work",
+    ctx._planSource(parsed, "video-1", { source: "comment" }), "OP");
+  check("source: comment group without scripts is a comment",
+    ctx._planSource(parsed, "video-2", { source: "comment" }), "comment");
+  check("length: trailer under a longer script", ctx._lengthMismatch(39, 98), true);
+  check("length: script ends a bit after", ctx._lengthMismatch(41.9, 46.4), false);
+  check("length: script ends before the credits", ctx._lengthMismatch(600, 540), false);
+  check("length: script covers a sliver of a long video", ctx._lengthMismatch(1300, 200), true);
+  check("length: unknown video", ctx._lengthMismatch(0, 98), false);
+  const vl = ctx._batchDecisions({ hasVideos: true, checkedVideos: 1, videoDuration: 39, mainScriptDur: 98 });
+  check("decision: video shorter than its script asks", vl.some((d) => d.kind === "videolen"), true);
+  check("rule34video model page is a credit link", ctx.isNonVideoPath("https://rule34video.com/models/some-studio/"), true);
+  check("pornstars page is a credit link", ctx.isNonVideoPath("https://example.com/pornstars/someone"), true);
+}
+
+// ── saved work labels: only the user's ──
+{
+  const labels = ctx._userLabels({ _bundlePlan: { a: "Work A", b: "Work B", c: "Mine" },
+                                   _workPlanSeeded: { a: "Work A", b: "Work B", c: "Work C" } });
+  check("saved labels: seeds are not saved", Object.keys(labels).join(","), "c");
+  check("saved labels: a dragged row is", labels.c, "Mine");
+}
+
 // ── send prefs: header controls override the settings ──
 {
   const p = ctx._currentPrefs({ video_pick_mode: "best_quality", collect_other_authors: false });

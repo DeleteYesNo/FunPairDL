@@ -114,7 +114,7 @@ function isNonVideoPath(url) {
         host !== "downloads.fanbox.cc") {
       return true;
     }
-    return /^\/(members|users|channels?|model|pornstar|profile|account)\b/.test(path);
+    return /^\/(members|users|channels?|models?|pornstars?|profile|account)\b/.test(path);
   } catch (e) { return false; }
 }
 
@@ -150,6 +150,9 @@ const NON_VIDEO_HOSTS = [
   "feeliate.com", "experiencesexonline.com", "synsual.me",
   "ayvasoftware.io", "funosr.com", "funsr.com", "yourhobbiescustomized.com",
   "uptimerobot.com",
+  // stores, extensions and comics linked beside the video, never the video
+  "chromewebstore.google.com", "chrome.google.com", "addons.mozilla.org",
+  "aliexpress.", "amazon.", "thehandy.com", "allporncomic.com",
 ];
 
 // A heading that is literally a video filename ("Work_longer.mp4") — how a
@@ -408,11 +411,12 @@ const _BASIS_LABEL = {
   name: ["名稱", "#2e9e6a"],
   link: ["腳本註記", "#2e9e6a"],
   tokens: ["關鍵字/tags", "#4a90d9"],
+  length: ["長度相同", "#2e9e6a"],
   duration: ["時長", "#4a90d9"],
   order: ["順序(猜測)", "#c2842a"],
   none: ["未配對", "#666"],
 };
-const _BASIS_RANK = { none: 0, order: 1, duration: 2, tokens: 3, link: 4, name: 5, plan: 6 };
+const _BASIS_RANK = { none: 0, order: 1, duration: 2, tokens: 3, length: 4, link: 4, name: 5, plan: 6 };
 
 function _basisTagHTML(basis) {
   const e = _BASIS_LABEL[basis];
@@ -1635,6 +1639,7 @@ async function sendPairToServer(data) {
       sizes: g.sizes || {},   // probed byte sizes {url: bytes}, >0 only
       bundle_plan: g.bundlePlan || {},  // bundle file url → sub-group label
       alternates: g.alternates || {},   // chosen video url → fallback urls
+      durations: g.durations || {},     // probed lengths {url: seconds}
       inherit_multi_axis: g.inheritMultiAxis !== false,
       display_name: (g.displayName || "").trim(),
     }));
@@ -2450,8 +2455,13 @@ function setupProbing(panel, parsed) {
         dropdown.innerHTML = info.files.map((f) => _bundleFileRowHTML(f, probeKey)).join("");
         item.after(dropdown);
         // Several works in one bundle: show how they will be split into
-        // pairs, as sub-groups the user can rearrange before sending.
-        _planBundleLayout(panel, parsed, dropdown, info.files, probeKey);
+        // pairs, as sub-groups the user can rearrange before sending. A
+        // pack in a single post's Main is planned with the post's other
+        // rows instead (the work plan below Main) — one plan, one set of
+        // labels.
+        if (!(parsed.mode === "single" && item.closest('.funpairdl-group-body[data-group="Main"]'))) {
+          _planBundleLayout(panel, parsed, dropdown, info.files, probeKey);
+        }
 
         let bundleTag = item.querySelector(".funpairdl-tag-bundle");
         if (!bundleTag) {
@@ -2762,7 +2772,7 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
   // bucket first is to keep the group association after resolution.
   const buckets = {}; // groupName → { videoUrls, scriptUrls, scriptAuthorMap }
   function _bucket(g) {
-    if (!buckets[g]) buckets[g] = { videoUrls: [], scriptUrls: [], scriptAuthorMap: {}, filenames: {}, bundlePlan: {}, alternates: {} };
+    if (!buckets[g]) buckets[g] = { videoUrls: [], scriptUrls: [], scriptAuthorMap: {}, filenames: {}, bundlePlan: {}, alternates: {}, durations: {} };
     return buckets[g];
   }
   const bundlePlan = panel._bundlePlan || {};
@@ -2787,7 +2797,12 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
           // without this the backend can't name pairs or match scripts.
           if (realName) b.filenames[bcb.dataset.fileUrl] = realName;
           if (fn.endsWith(".funscript")) b.scriptUrls.push(bcb.dataset.fileUrl);
-          else b.videoUrls.push(bcb.dataset.fileUrl);
+          else {
+            b.videoUrls.push(bcb.dataset.fileUrl);
+            // A pack file's length is its streaming copy's (the plan knows which).
+            const d = _planDuration(panel, parsed, bcb.dataset.fileUrl, 0);
+            if (d) b.durations[bcb.dataset.fileUrl] = d;
+          }
           // The pack's video won the video plan: the other links are its fallbacks.
           const alts = panel._alternates && panel._alternates[bcb.dataset.fileUrl];
           if (alts && alts.length) b.alternates[bcb.dataset.fileUrl] = [...alts];
@@ -2810,6 +2825,8 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
         b.scriptUrls.push(video.url);
       } else {
         b.videoUrls.push(video.url);
+        const d = _planDuration(panel, parsed, video.url, video.probedDuration || 0);
+        if (d) b.durations[video.url] = d;
       }
     }
   });
@@ -2821,6 +2838,7 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
     const gname = (parsed.groupState && parsed.groupState.itemGroup[key]) || "Main";
     const b = _bucket(gname);
     b.scriptUrls.push(script.url);
+    if (script.probedDuration) b.durations[script.url] = Number(script.probedDuration);
     if (script.author) b.scriptAuthorMap[script.url] = script.author;
     // Carry the script's real name (the attachment's link text). A forum
     // short-url resolves to a CDN path whose basename is a content hash, so
@@ -2864,6 +2882,9 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
     resolvedS.forEach((u, i) => { const lb = b.bundlePlan[b.scriptUrls[i]]; if (lb) resolvedPlan[u] = lb; });
     const resolvedAlternates = {};
     resolvedV.forEach((u, i) => { const alts = b.alternates[b.videoUrls[i]]; if (alts && alts.length) resolvedAlternates[u] = alts; });
+    const resolvedDurations = {};
+    resolvedV.forEach((u, i) => { const d = b.durations[b.videoUrls[i]]; if (d) resolvedDurations[u] = d; });
+    resolvedS.forEach((u, i) => { const d = b.durations[b.scriptUrls[i]]; if (d) resolvedDurations[u] = d; });
     groups.push({
       name: gname,
       videoUrls: resolvedV,
@@ -2873,6 +2894,7 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
       sizes: resolvedSizes,
       bundlePlan: resolvedPlan,
       alternates: resolvedAlternates,
+      durations: resolvedDurations,
       inheritMultiAxis: (parsed.groupState && parsed.groupState.inheritAxes[gname] !== false),
       displayName: (parsed.groupState && parsed.groupState.altNames && parsed.groupState.altNames[gname]) || "",
     });
@@ -3284,21 +3306,25 @@ function _videoRowsForPlan(panel, parsed) {
     if (!v) return;
     const row = panel.querySelector(`.funpairdl-item[data-key="${key}"]`);
     if (!row) return;
+    const src = _planSource(parsed, key, v);
     const bundleCbs = [...panel.querySelectorAll(`.funpairdl-bundle-cb[data-probe-key="${key}"]`)];
     if (bundleCbs.length) {
-      const vids = bundleCbs.filter((cb) => !/\.funscript$/i.test(cb.dataset.fileName || ""));
-      if (vids.length !== 1) return;
-      const cb = vids[0];
-      const fileUrl = cb.dataset.fileUrl || "";
-      out.push({
-        v: { url: fileUrl, probedFilename: cb.dataset.fileName || "", label: cb.dataset.fileName || "",
-             probedSize: _probeSizeEntry(fileUrl), source: v.source, priority: v.priority },
-        row, key, section, bundleCb: cb,
-      });
+      // Every video file of a pack is a candidate of its own: a folder of
+      // eleven animations is eleven videos, and a streaming link beside it
+      // is a copy of the one it names.
+      const vids = bundleCbs.filter((cb) => _isVideoFileName(cb.dataset.fileName || ""));
+      for (const cb of vids) {
+        const fileUrl = cb.dataset.fileUrl || "";
+        out.push({
+          v: { url: fileUrl, probedFilename: cb.dataset.fileName || "", label: cb.dataset.fileName || "",
+               probedSize: _probeSizeEntry(fileUrl), source: v.source, priority: v.priority, pack: v.url },
+          row, key, section, bundleCb: cb, src, packVideos: vids.length,
+        });
+      }
       return;
     }
     if ((v.isBundle || v.probedIsBundle || isBundleUrl(v.url)) && !v.probeFailed) return;
-    out.push({ v, row, key, section });
+    out.push({ v, row, key, section, src });
   };
   if (parsed.mode === "collection") {
     (parsed.sections || []).forEach((sec, si) => sec.videos.forEach((v, vi) => push(v, `sv-${si}-${vi}`, String(si))));
@@ -3307,6 +3333,23 @@ function _videoRowsForPlan(panel, parsed) {
     (parsed.videos || []).forEach((v, i) => push(v, `video-${i}`, ""));
   }
   return out;
+}
+
+// Pure: a pack file that is a video (not a script, a readme or a cover).
+function _isVideoFileName(name) {
+  return /\.(mp4|mkv|webm|mov|avi|m4v|wmv|flv|ts)$/i.test(name || "");
+}
+
+// Pure: how the plan treats a candidate's origin. A comment link is "OP"
+// when its own group carries scripts: the commenter posted another work
+// with its scripts (a compilation), not a mirror of the post's video.
+function _planSource(parsed, key, v) {
+  if (!v || v.source === "OP") return "OP";
+  const gs = parsed && parsed.groupState;
+  const g = gs && gs.itemGroup && gs.itemGroup[key];
+  if (!g || g === "Main" || parsed.mode === "collection") return "comment";
+  const hasScripts = (parsed.scripts || []).some((s, i) => gs.itemGroup[`script-${i}`] === g);
+  return hasScripts ? "OP" : "comment";
 }
 
 // The checkbox that decides whether a plan candidate is downloaded.
@@ -3401,18 +3444,19 @@ async function _refreshVideoPlan(panel, parsed) {
   const scopes = _videoPlanScopes(rows, parsed.mode);
   if (scopes.length === 0) return;
   const prefs = _currentPrefs(await _loadSendPrefs());
-  const spec = (v) => ({
+  const spec = (v, src) => ({
     url: v.url, name: v.probedFilename || "",
-    source: v.source === "OP" ? "OP" : "comment",
+    source: src || (v.source === "OP" ? "OP" : "comment"),
     size: _expectedSize(v.probedFormats, prefs.min_resolution) || v.probedSize || _probeSizeEntry(v.url) || 0,
     height: v.probedHeight || 0,
     duration: v.probedDuration || null,
     priority: Number(v.priority) || 99,
     failed: !!v.probeFailed,
+    pack: v.pack || "",
   });
   const credits = _postCredits(parsed);
   const decisions = panel._encodeDecisions || {};
-  const specs = scopes.map((sc) => sc.map(({ v }) => spec(v)));
+  const specs = scopes.map((sc) => sc.map(({ v, src }) => spec(v, src)));
   const key = JSON.stringify([specs, prefs.video_pick_mode, prefs.min_resolution,
                               prefs.encode_vs_variant, decisions, !!panel._mergeInto,
                               Object.keys(panel._sectionMerge || {}), credits]);
@@ -3471,8 +3515,12 @@ function _applyVideoPlan(panel, parsed, plans) {
       const { v, row } = r;
       const role = plan.roles[v.url] || "chosen";
       merged.roles[v.url] = role;
+      // A pack file's own row (the work plan tags it); a pack of several
+      // videos also carries the plan's tag per file.
+      const fileRow = r.bundleCb ? (r.bundleCb.closest(".funpairdl-bundle-file") || row) : row;
+      const tagRow = r.bundleCb && r.packVideos > 1 ? fileRow : row;
       // The work plan set a script-less video aside: that stands.
-      if (row.dataset.scriptless && role !== "dead") continue;
+      if (fileRow.dataset.scriptless && role !== "dead") continue;
       const g = groupOf[v.url] || {};
       let text = "", cls = role, title = g.reason || "";
       if (role === "chosen") text = (g.alternates || []).length ? "✔ 下載這個" : "";
@@ -3500,9 +3548,8 @@ function _applyVideoPlan(panel, parsed, plans) {
         want = false;
         text = "預覽（合集在下）"; cls = "unrelated"; title = "推文旁邊有完整檔案的合集；要這支的話自己勾";
       }
-      _setRowTag(row, cls, text, title);
+      _setRowTag(tagRow, cls, text, title);
       if (r.bundleCb) {
-        const fileRow = r.bundleCb.closest(".funpairdl-bundle-file");
         if (!(fileRow && fileRow.dataset.touched)) _setChecked(panel, r.bundleCb, want);
         const rowCb = row.querySelector('input[type="checkbox"][name]');
         if (want && rowCb && !rowCb.checked && !row.dataset.touched) _setChecked(panel, rowCb, true);
@@ -3511,7 +3558,7 @@ function _applyVideoPlan(panel, parsed, plans) {
         if (cb && !row.dataset.touched) _setChecked(panel, cb, want);
       }
       const ask = role === "ambiguous" ? (plan.ambiguous || []).find((a) => a.url === v.url) : null;
-      _renderAskRow(panel, parsed, row, v, ask);
+      _renderAskRow(panel, parsed, tagRow, v, ask);
     }
   }
   panel._videoPlan = merged;
@@ -3795,10 +3842,24 @@ function _batchDecisions(st) {
     const vid = st.videoDuration ? `，影片 ${formatDuration(st.videoDuration)}` : "";
     out.push({ kind: "scriptlen", text: `腳本長度不一致（${lens}${vid}）：不是同一支影片的腳本，請取消不屬於這支影片的` });
   }
+  if ((st.scriptLens || []).length < 2 && _lengthMismatch(st.videoDuration, st.mainScriptDur)) {
+    out.push({ kind: "videolen", text: `影片 ${formatDuration(st.videoDuration)} 和腳本 ${formatDuration(st.mainScriptDur)} 長度對不上（預告片或別的剪輯？）：確認影片來源，或取消影片只送腳本` });
+  }
   if (st.otherAuthorCommentScripts > 0) {
     out.push({ kind: "comments", text: `留言區有 ${st.otherAuthorCommentScripts} 支腳本（合集帖），請拖到所屬作品或略過` });
   }
   return out;
+}
+
+// Pure: a video that cannot be the script's — the script runs past its
+// end (a trailer or a free preview of a paid video), or covers under a
+// quarter of a long video (a compilation, another cut). A script ending a
+// little before its video is normal: the last action is not the last frame.
+function _lengthMismatch(video, script) {
+  const v = Number(video) || 0, s = Number(script) || 0;
+  if (!v || !s) return false;
+  if (s - v > Math.max(5, 0.1 * v)) return true;
+  return v - s > 120 && s < v / 4;
 }
 
 // Pure: script lengths grouped — lengths within max(10 s, 5 %) of each
@@ -3879,6 +3940,7 @@ function _batchAssess(card) {
     ? wp.groups.filter((g) => (g.scripts || []).length > 0).length : 1;
   let scriptLens = [];
   let videoDuration = 0;
+  let mainScriptDur = 0;
   if (parsed.mode === "single" && scriptWorks <= 1) {
     const durs = [];
     panel.querySelectorAll('.funpairdl-group-body[data-group="Main"] .funpairdl-item[data-kind="script"]').forEach((row) => {
@@ -3889,8 +3951,9 @@ function _batchAssess(card) {
     });
     const cl = _durationClusters(durs);
     if (cl.length >= 2) scriptLens = cl;
-    const chosen = rows.find((r) => ticked(r) && r.v.probedDuration);
-    videoDuration = chosen ? Number(chosen.v.probedDuration) : 0;
+    if (cl.length === 1) mainScriptDur = cl[0].dur;
+    const chosen = rows.find((r) => ticked(r) && _planDuration(panel, parsed, r.v.url, r.v.probedDuration));
+    videoDuration = chosen ? Number(_planDuration(panel, parsed, chosen.v.url, chosen.v.probedDuration)) : 0;
   }
   const st = {
     ambiguous,
@@ -3904,7 +3967,7 @@ function _batchAssess(card) {
     deadReasons,
     gone, goneAction: prefs.dead_video_action || "delete",
     otherLive: rows.filter((r) => !isDead(r) && !ticked(r)).length,
-    scriptLens, videoDuration,
+    scriptLens, videoDuration, mainScriptDur,
     otherAuthorCommentScripts: parsed.mode === "collection" && prefs.collect_other_authors !== false
       ? (parsed.commentScripts || []).length : 0,
   };
@@ -4211,6 +4274,17 @@ function _batchSelKey(url) {
   return tid ? _BATCH_SEL_PREFIX + tid : null;
 }
 
+// The work labels the user set. A label still equal to the plan's own
+// seed is the plan's and is recomputed on reopen — saved, it came back as
+// the user's and pinned a stale guess (a script left in the wrong work).
+function _userLabels(panel) {
+  if (!panel) return {};
+  const seeded = panel._workPlanSeeded || {};
+  const out = {};
+  for (const [u, lb] of Object.entries(panel._bundlePlan || {})) if (seeded[u] !== lb) out[u] = lb;
+  return out;
+}
+
 function _batchSaveCardState(card) {
   const key = _batchSelKey(card._url);
   if (!key) return;
@@ -4230,7 +4304,7 @@ function _batchSaveCardState(card) {
         .map((x) => ({ id: x.id, name: x.name || "" })),
       // Bundle sub-group / work-group arrangement (url → label) and any
       // empty work groups the user created.
-      bundlePlan: { ...((card._panel && card._panel._bundlePlan) || {}) },
+      bundlePlan: _userLabels(card._panel),
       workGroupsExtra: [...((card._panel && card._panel._workGroupsExtra) || [])],
       // Re-encode-or-variant answers (url → choice).
       encodeDecisions: { ...((card._panel && card._panel._encodeDecisions) || {}) },
@@ -5171,7 +5245,7 @@ function _scheduleWorkPlan(panel, parsed) {
     panel._workPlanWatch = true;
     panel.addEventListener("change", (e) => {
       const t = e.target;
-      if (t && t.matches && t.matches('.funpairdl-item input[type="checkbox"][name="video"], .funpairdl-item input[type="checkbox"][name="script"]')) {
+      if (t && t.matches && t.matches('.funpairdl-item input[type="checkbox"][name="video"], .funpairdl-item input[type="checkbox"][name="script"], .funpairdl-bundle-cb')) {
         _scheduleWorkPlan(panel, parsed);
       }
     });
@@ -5198,15 +5272,33 @@ function _mainWorkRows(panel, parsed) {
     if (row.dataset.kind === "video") {
       const v = parsed.videos[idx];
       if (!v) return;
-      // A bundle row is planned inside its own dropdown — also before its
-      // listing has arrived (a pack of "Work.mp4 + scripts" is not a
-      // script-less work of its own).
-      if (panel.querySelector(`.funpairdl-bundle-cb[data-probe-key="${row.dataset.key}"]`)) return;
+      // A pack's ticked files are rows of the plan like any link — the
+      // files are what is sent. (Before its listing arrives a pack is no
+      // row at all: "Work.mp4 + scripts" is not a script-less work.)
+      const packCbs = [...panel.querySelectorAll(`.funpairdl-bundle-cb[data-probe-key="${row.dataset.key}"]`)];
+      if (packCbs.length) {
+        for (const bcb of packCbs) {
+          const url = bcb.dataset.fileUrl || "";
+          const name = bcb.dataset.fileName || "";
+          const fileRow = bcb.closest(".funpairdl-bundle-file") || row;
+          if (!url) continue;
+          if (!bcb.checked && !(fileRow.dataset.scriptless && !fileRow.dataset.touched)) {
+            _setWorkBadge(fileRow, null);
+            continue;
+          }
+          if (/\.funscript$/i.test(name)) {
+            scripts.push({ url, name, row: fileRow, cb: bcb, duration: 0, link: "" });
+          } else if (_isVideoFileName(name)) {
+            videos.push({ url, name, row: fileRow, cb: bcb, hints: "", duration: _planDuration(panel, parsed, url, 0) });
+          }
+        }
+        return;
+      }
       if (v.isBundle || v.probedIsBundle || isBundleUrl(v.url)) return;
       videos.push({
         url: v.url, name: v.probedFilename || "", row,
         hints: (v.probedTags || []).join(" "),
-        duration: v.probedDuration || 0,
+        duration: _planDuration(panel, parsed, v.url, v.probedDuration || 0),
       });
     } else if (row.dataset.kind === "script") {
       const s = parsed.scripts[idx];
@@ -5217,6 +5309,22 @@ function _mainWorkRows(panel, parsed) {
     }
   });
   return { videos, scripts };
+}
+
+// The length of a planned video: its own probe's, else a copy's in its
+// plan group (a pack file is never probed; the streaming copy beside it is).
+function _planDuration(panel, parsed, url, own) {
+  if (own) return own;
+  const plan = panel._videoPlan;
+  if (!plan) return 0;
+  const g = (plan.groups || []).find((gr) => gr.members && Object.prototype.hasOwnProperty.call(gr.members, url));
+  if (!g) return 0;
+  const byUrl = new Map((parsed.videos || []).map((v) => [v.url, v]));
+  for (const u of Object.keys(g.members)) {
+    const v = byUrl.get(u);
+    if (v && v.probedDuration && g.members[u] !== "dead") return v.probedDuration;
+  }
+  return 0;
 }
 
 // Pure: display groups from the rows' labels — plan order first, then
@@ -5323,6 +5431,13 @@ async function _refreshWorkPlan(panel, parsed) {
     const nextSeeded = {};
     panel._workScriptBasis = {};
     if (plan && plan.split && Array.isArray(plan.groups)) {
+      // A seed stays a seed while its label is untouched: a row an
+      // in-between plan left out (unticked a while, its pack not listed
+      // yet) keeps it, so this plan may still move the row. Forgetting it
+      // made a stale guess look like the user's and split a work apart.
+      for (const [u, name] of Object.entries(seeded)) {
+        if (panel._bundlePlan[u] === name) nextSeeded[u] = name;
+      }
       for (const g of plan.groups) {
         const name = g.name || "";
         if (!name) continue;
@@ -5370,7 +5485,7 @@ function _applyScriptless(panel, parsed, rows) {
   let restored = false;
   for (const r of rows.videos) {
     if (r.row.dataset.touched) continue;
-    const cb = r.row.querySelector('input[type="checkbox"][name]');
+    const cb = r.cb || r.row.querySelector('input[type="checkbox"][name]');
     if (bare.has(r.url)) {
       panel._workPlanScriptless += 1;
       if (r.row.dataset.scriptless) continue;
@@ -5400,6 +5515,8 @@ function _renderWorkPlan(panel, parsed) {
   let head;
   if (labelled.length === 0) {
     head = `✔ 送出後是同一部作品:${nVideos} 個影片互為鏡像(只會下載勾選的),${nScripts} 支腳本都屬於它。`;
+  } else if (labelled.length === 1 && groups.length === 1) {
+    head = `✔ 送出後是同一部作品:${nVideos} 支影片——腳本以其命名的那支為主,其餘長度相同的存成變體;${nScripts} 支腳本都屬於它。`;
   } else {
     head = `送出後會拆成 ${labelled.length} 個作品(每個一個資料夾);每組標籤是配對依據,橘色的「順序(猜測)」請自行核對;拖曳列到組上可調整,組名即資料夾名。`;
   }
