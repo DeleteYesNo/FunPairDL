@@ -797,3 +797,49 @@ class TestScriptSetVariants:
         v = _variants(tmp_path)
         assert set(v) == {"Main", "Less Vibrations", "Overclocked"}
         assert (tmp_path / "Work.funscript").stat().st_size == 100 + len("Work.funscript")
+
+
+def _mp4(seconds: float, width: int, height: int, pad: int = 0) -> bytes:
+    import struct
+
+    def atom(t, b):
+        return struct.pack(">I", 8 + len(b)) + t + b
+    mvhd = atom(b"mvhd", bytes(4) + struct.pack(">II", 0, 0) + struct.pack(">II", 1000, int(seconds * 1000)) + bytes(80))
+    tkhd = atom(b"tkhd", bytes(4) + bytes(20) + bytes(8) + bytes(8) + bytes(36) + struct.pack(">II", width << 16, height << 16))
+    moov = atom(b"moov", mvhd + atom(b"trak", tkhd))
+    return atom(b"ftyp", b"isom" + bytes(12)) + moov + atom(b"mdat", bytes(64 + pad))
+
+
+class TestRenders:
+    def _pair(self, out):
+        (out).mkdir(parents=True, exist_ok=True)
+        (out / "Garden Party.mp4").write_bytes(_mp4(160, 3840, 2160))
+        (out / "Garden Party (2).mp4").write_bytes(_mp4(160, 7680, 3840, pad=10))
+        (out / "Garden Party.funscript").write_bytes(b'{"actions":[]}')
+        return _make_pair(str(out), "Garden Party", [
+            PairItem(url="https://h/a", filename="Garden Party.mp4", file_type=FileType.VIDEO),
+            PairItem(url="https://h/b", filename="Garden Party (2).mp4", file_type=FileType.VIDEO),
+            PairItem(url="https://h/s", filename="Garden Party.funscript", file_type=FileType.FUNSCRIPT),
+        ])
+
+    def _organize(self, pair, mode):
+        qm = QueueManager()
+        with patch("funpairdl.persistence.settings.Settings.load") as mock_load:
+            mock_load.return_value.script_variant_mode = "flat"
+            mock_load.return_value.reconcile_on_redownload = False
+            mock_load.return_value.vr_versions = mode
+            qm._organize_output(pair)
+
+    def test_2d_only_leaves_the_vr_render_out(self, tmp_path):
+        out = tmp_path / "Garden Party"
+        pair = self._pair(out)
+        self._organize(pair, "flat")
+        assert sorted(p.name for p in out.glob("*.mp4")) == ["Garden Party.mp4"]
+        assert list(_variants(out)) == ["Main"]
+
+    def test_all_keeps_the_vr_render_as_a_labelled_variant(self, tmp_path):
+        out = tmp_path / "Garden Party"
+        pair = self._pair(out)
+        self._organize(pair, "all")
+        assert (out / "Garden Party (VR).mp4").exists()
+        assert set(_variants(out)) == {"Main", "VR"}

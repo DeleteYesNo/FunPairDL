@@ -329,6 +329,69 @@ def _folder_file_key_iv_attrs(
     raise RuntimeError(f"Missing encrypted key for MEGA node {handle}")
 
 
+def _folder_file_full_key(node: dict, folder_key: tuple, share_root: str) -> tuple | None:
+    """The node's 8-int full key (the one `_folder_file_key_iv_attrs`
+    validated) — its second half keys the media attribute."""
+    k, _iv, _attrs = _folder_file_key_iv_attrs(node, folder_key, share_root)
+    for pair in node.get("k", "").split("/"):
+        if ":" not in pair:
+            continue
+        try:
+            dk = _decrypt_key(_base64_to_a32(pair.partition(":")[2]), folder_key)
+        except Exception:
+            continue
+        if len(dk) >= 8 and _file_key(dk) == k:
+            return dk
+    return None
+
+
+def _xxtea_decrypt(v: list[int], k: list[int]) -> list[int]:
+    n, delta, mask = len(v), 0x9E3779B9, 0xFFFFFFFF
+    s = ((6 + 52 // n) * delta) & mask
+    y = v[0]
+    while s:
+        e = (s >> 2) & 3
+        for p in range(n - 1, -1, -1):
+            z = v[p - 1] if p > 0 else v[n - 1]
+            mx = ((((z >> 5) ^ (y << 2)) + ((y >> 3) ^ (z << 4)))
+                  ^ ((s ^ y) + (k[(p & 3) ^ e] ^ z))) & mask
+            v[p] = (v[p] - mx) & mask
+            y = v[p]
+        s = (s - delta) & mask
+    return v
+
+
+def media_attributes(fa: str, full_key: tuple | None) -> dict:
+    """What MEGA's uploader recorded about a video — {"width", "height",
+    "fps", "duration"} — from the node's ``fa`` string ("…/NNN:8*<11 b64>"),
+    XXTEA-encrypted under the second half of the 8-int file key. Empty
+    when the file has none (not a video, or an old upload)."""
+    if not fa or not full_key or len(full_key) < 8:
+        return {}
+    raw = None
+    for part in fa.split("/"):
+        typ, _, val = part.partition(":")[2].partition("*")
+        if typ == "8" and val:
+            try:
+                raw = _base64_url_decode(val[:11])
+            except ValueError:
+                raw = None
+            break
+    if not raw or len(raw) != 8:
+        return {}
+    v = _xxtea_decrypt(list(struct.unpack("<2I", raw)), [int(x) & 0xFFFFFFFF for x in full_key[4:8]])
+    b = struct.pack("<2I", *v)
+    width = (b[0] >> 1) + ((b[1] & 127) << 7)
+    height = b[2] + ((b[3] & 127) << 8)
+    fps = (b[3] >> 7) + ((b[4] & 127) << 1)
+    duration = (b[4] >> 7) + (b[5] << 1) + (b[6] << 9)
+    if b[0] & 1:
+        width, height = (width << 3) + 8, (height << 3) + 8
+    if not width or not height:
+        return {}
+    return {"width": width, "height": height, "fps": fps, "duration": duration or None}
+
+
 def _share_root_handle(nodes: list) -> str:
     """Handle of the folder the share link was created for.
 
@@ -462,11 +525,18 @@ async def _probe_standalone_file(session, info: dict) -> dict:
             logger.warning(
                 "Failed to decrypt MEGA filename for %s: %s", info["handle"], e
             )
+    media = {}
+    if info.get("key"):
+        try:
+            media = media_attributes(data.get("fa", ""), _base64_to_a32(info["key"]))
+        except Exception as e:  # noqa: BLE001 — sizes/lengths are extras
+            logger.debug("MEGA media attribute unreadable for %s: %s", info["handle"], e)
     return {
         "success": True,
         "provider": "mega",
         "size": size,
         "filename": filename or "MEGA file",
+        **_media_fields(media),
     }
 
 
@@ -501,12 +571,28 @@ async def _probe_folder_file(session, info: dict) -> dict:
     if attrs and "n" in attrs:
         filename = attrs["n"]
 
+    media = {}
+    try:
+        media = media_attributes(target.get("fa", ""), _folder_file_full_key(target, folder_key, share_root))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("MEGA media attribute unreadable: %s", e)
     return {
         "success": True,
         "provider": "mega",
         "size": target.get("s", 0),
         "filename": filename or "MEGA file",
+        **_media_fields(media),
     }
+
+
+def _media_fields(media: dict) -> dict:
+    """The probe response's length and frame size (what the panel reads)."""
+    out = {}
+    if media.get("duration"):
+        out["duration"] = float(media["duration"])
+    if media.get("width") and media.get("height"):
+        out["width"], out["height"] = int(media["width"]), int(media["height"])
+    return out
 
 
 async def probe_mega_folder(url: str) -> dict:
@@ -553,10 +639,17 @@ async def probe_mega_folder(url: str) -> dict:
             # Build per-file URL using folder link + file handle
             file_url = f"https://mega.nz/folder/{info['handle']}#{info['key']}/file/{file_handle}"
 
+            media = {}
+            if node.get("fa"):
+                try:
+                    media = media_attributes(node["fa"], _folder_file_full_key(node, folder_key, share_root))
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("MEGA media attribute unreadable: %s", e)
             files.append({
                 "name": filename or f"file_{file_handle}",
                 "size": size,
                 "url": file_url,
+                **_media_fields(media),
             })
 
         if files and decrypted == 0:

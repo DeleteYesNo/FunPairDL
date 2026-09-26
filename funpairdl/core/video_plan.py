@@ -81,6 +81,8 @@ class VideoSpec:
     priority: float = 99.0       # host priority from the panel (lower = better)
     failed: bool = False         # its probe failed: unsupported site, gone
     pack: str = ""               # the folder/list link this file came in ("" = a plain link)
+    width: int = 0               # frame size when a probe read it (0 = unknown)
+    fmt: str = ""                # filled in: "flat" | "vr" | "passthrough" | "" (unknown)
     key: str = ""                # filled in: mirror key
     stem: str = ""               # filled in: comparison stem
     tokens: set[str] = field(default_factory=set)
@@ -91,6 +93,32 @@ class Prefs:
     pick_mode: str = "smallest"        # "smallest" | "best_quality"
     min_resolution: str = "1080"       # floor; "best" = only the top height qualifies
     encode_vs_variant: str = "ask"     # "ask" | "reencode" | "variant"
+    vr_versions: str = "flat"          # one video in 2D and VR: "flat" | "vr" | "all"
+
+
+_VR_NAME_RE = re.compile(
+    r"(?<![a-z0-9])(?:vr|vr180|vr360|sbs|3dh|fisheye\d*|mkx\d+|180x180|lr[-_ ]?180|180[-_ ]?(?:lr|sbs))(?![a-z0-9])",
+    re.IGNORECASE)
+_PASSTHROUGH_RE = re.compile(r"pass[-_ ]?through", re.IGNORECASE)
+FORMAT_LABEL = {"flat": "2D", "vr": "VR", "passthrough": "Passthrough"}
+
+
+def video_format(width: int, height: int, name: str = "") -> str:
+    """How a video is meant to be watched: "flat" (2D), "vr" (180° side by
+    side or over-under), "passthrough" (VR with a keyed background for
+    mixed reality), "" when nothing tells. The frame decides when known —
+    a 2:1 or square frame of VR size; a name only when it is not."""
+    name = name or ""
+    if width and height:
+        r = width / height
+        vr = (1.95 <= r <= 2.05 and height >= 1440) or (0.98 <= r <= 1.02 and width >= 2880)
+    elif _VR_NAME_RE.search(name) or _PASSTHROUGH_RE.search(name):
+        vr = True
+    else:
+        return ""
+    if not vr:
+        return "flat"
+    return "passthrough" if _PASSTHROUGH_RE.search(name) else "vr"
 
 
 def _stem_of(spec: VideoSpec) -> str:
@@ -224,6 +252,10 @@ def _classify(spec: VideoSpec, ref: VideoSpec,
     `credits` are the post's creator words: a host title that adds
     "[Creator]" to the file's name is the same video, not a variant."""
     from funpairdl.core.queue_manager import QueueManager
+    if spec.fmt and ref.fmt and spec.fmt != ref.fmt:
+        # The same video rendered for another way of watching: its own
+        # download, kept or left per the vr_versions setting.
+        return "variant", frozenset({"__fmt__", spec.fmt}), FORMAT_LABEL[spec.fmt]
     if _duration_differs(spec.duration, ref.duration):
         tag = QueueManager._variant_tag(spec.stem + ".mp4", ref.stem + ".mp4") or f"{int(round(spec.duration))}s"
         return "variant", frozenset({"__dur__", str(int(round(spec.duration)))}), tag
@@ -272,7 +304,7 @@ def _classify_in_pack(spec: VideoSpec, ref: VideoSpec,
     — unless its length differs or a parenthesised tag sets it apart
     ("Work (nude)")."""
     from funpairdl.core.queue_manager import QueueManager
-    if _duration_differs(spec.duration, ref.duration):
+    if _duration_differs(spec.duration, ref.duration) or (spec.fmt and ref.fmt and spec.fmt != ref.fmt):
         return _classify(spec, ref, credits)
     # A tag the other name carries anywhere is no difference: a slug
     # ("work-ember-alt-scene-3.mp4") keeps the words, not the brackets.
@@ -342,6 +374,7 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
     for v in videos:
         v.stem = _stem_of(v)
         v.tokens = _tokens(v.stem)
+        v.fmt = video_format(v.width, v.height, v.name or v.stem)
 
     # OP links name the post's work(s); a comment link belongs to the work
     # whose name its own name contains ("Work Title Mockgan" -> "Work Title").
@@ -457,9 +490,15 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
         # Reference: the live OP link with the shortest name (fewest qualifiers);
         # in a pack's group, the pack file.
         live = [v for v in members if not v.failed] or members
-        ops = (([v for v in live if v.pack] if key.startswith("pack:") else [])
-               or [v for v in live if v.source == "OP"] or live)
-        ref = min(ops, key=lambda v: (v.failed, len(v.tokens), v.priority))
+        in_pack = key.startswith("pack:")
+        fmt_rank = _FORMAT_ORDER.get(prefs.vr_versions, _FORMAT_ORDER["flat"])
+        # The render the setting prefers is the work's own; then the pack
+        # file (in a pack's group) or an OP link; then the plainest name.
+        ref = min(live, key=lambda v: (
+            fmt_rank.index(v.fmt or "flat"),
+            0 if ((v.pack if in_pack else v.source == "OP") or
+                  not any((o.pack if in_pack else o.source == "OP") for o in live)) else 1,
+            len(v.tokens), v.priority))
         clusters: dict[frozenset, dict] = {}
         for v in members:
             if v is ref:
@@ -538,7 +577,77 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
                 "members": member_roles, "reason": reason,
             })
 
+    _apply_format_pref(groups, roles, {v.url: v for v in videos}, cores, prefs)
     return {"groups": groups, "ambiguous": ambiguous, "roles": roles}
+
+
+_FORMAT_ORDER = {"flat": ("flat", "vr", "passthrough"), "vr": ("vr", "passthrough", "flat")}
+
+
+def _apply_format_pref(groups: list[dict], roles: dict, specs: dict, cores: dict, prefs: Prefs) -> None:
+    """One video offered as 2D and as VR (and passthrough) — the same work,
+    the same length — keeps one way of watching: the 2D render by default,
+    the VR one, or all of them (``vr_versions``). The others become role
+    "format": left out, a click away."""
+    order = _FORMAT_ORDER.get(prefs.vr_versions) or _FORMAT_ORDER["flat"]
+    keep_all = prefs.vr_versions not in _FORMAT_ORDER
+    live = [g for g in groups if g.get("chosen") and g["kind"] in ("primary", "variant")]
+    fmt = {id(g): specs[g["chosen"]].fmt or "flat" for g in live}
+    if len({fmt[id(g)] for g in live}) < 2:
+        return
+
+    def same_media(a: dict, b: dict) -> bool:
+        sa, sb = specs[a["chosen"]], specs[b["chosen"]]
+        if sa.duration and sb.duration:
+            if abs(sa.duration - sb.duration) > 1.0:
+                return False
+            ca, cb = cores.get(sa.url, frozenset()), cores.get(sb.url, frozenset())
+            return a["key"] == b["key"] or len(ca & cb) >= 2
+        return a["key"] == b["key"]
+
+    parent = {id(g): id(g) for g in live}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    for i, a in enumerate(live):
+        for b in live[i + 1:]:
+            if fmt[id(a)] != fmt[id(b)] and same_media(a, b):
+                parent[find(id(a))] = find(id(b))
+    sets: dict[int, list[dict]] = {}
+    for g in live:
+        sets.setdefault(find(id(g)), []).append(g)
+    for members in sets.values():
+        present = {fmt[id(g)] for g in members}
+        if len(present) < 2:
+            continue
+        keep = next(f for f in order if f in present)
+        if keep_all:
+            # Every render goes; the preferred one is the work, the others
+            # its "(VR)" / "(Passthrough)" variants.
+            for g in members:
+                if fmt[id(g)] != keep and g["kind"] == "primary":
+                    g.update(kind="variant", tag=FORMAT_LABEL[fmt[id(g)]],
+                             reason=f"同一影片的 {FORMAT_LABEL[fmt[id(g)]]} 版")
+                    roles[g["chosen"]] = "variant"
+            continue
+        lost_primary = any(g["kind"] == "primary" and fmt[id(g)] != keep for g in members)
+        for g in members:
+            if fmt[id(g)] == keep:
+                if lost_primary and g["kind"] == "variant" and g["tag"] == FORMAT_LABEL[keep]:
+                    # The kept render IS the work now, not a "2D variant" of it.
+                    g.update(kind="primary", tag="", reason="")
+                    roles[g["chosen"]] = "chosen"
+                    g["members"][g["chosen"]] = "chosen"
+                continue
+            label = FORMAT_LABEL[fmt[id(g)]]
+            g.update(kind="format", tag=label, chosen="", alternates=[],
+                     members={u: "format" for u in g["members"]},
+                     reason=f"同一影片的 {label} 版；設定只下載 {FORMAT_LABEL[keep]} 版")
+            for u in g["members"]:
+                roles[u] = "format"
 
 
 def _pick_reason(chosen: VideoSpec, rest: list[VideoSpec], prefs: Prefs) -> str:

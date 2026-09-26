@@ -222,6 +222,19 @@ class SettingsDialog(QDialog):
         )
         form.addRow("When a post's video is gone:", self.dead_video_combo)
 
+        self.vr_versions_combo = QComboBox()
+        self.vr_versions_combo.addItem("2D only", "flat")
+        self.vr_versions_combo.addItem("VR only (passthrough when it's the only VR)", "vr")
+        self.vr_versions_combo.addItem("All renders, as variants", "all")
+        idx = self.vr_versions_combo.findData(getattr(self.settings, "vr_versions", "flat"))
+        self.vr_versions_combo.setCurrentIndex(max(0, idx))
+        self.vr_versions_combo.setToolTip(
+            "A post offers the same video as a 2D render and a VR one (180° side "
+            "by side, passthrough). Told apart by the frame size (read before the "
+            "download where the host allows, else after it) or the name."
+        )
+        form.addRow("One video in 2D and VR:", self.vr_versions_combo)
+
         layout.addLayout(form)
         layout.addStretch(1)
         return tab
@@ -318,6 +331,7 @@ class SettingsDialog(QDialog):
         s.merge_into_library = self.merge_library_check.isChecked()
         s.batch_skip_identical = self.skip_identical_check.isChecked()
         s.dead_video_action = self.dead_video_combo.currentData() or "delete"
+        s.vr_versions = self.vr_versions_combo.currentData() or "flat"
 
         # Clipboard tab
         s.clipboard_watch_enabled = self.clip_enabled.isChecked()

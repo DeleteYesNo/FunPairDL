@@ -81,3 +81,53 @@ def test_funscript_info_reads_combined_multi_axis_files():
         {"id": "R0", "actions": [{"at": 0, "pos": 50}, {"at": 90_000, "pos": 60}]},
         {"id": "R1", "actions": [{"at": 0, "pos": 50}, {"at": 120_000, "pos": 40}]}]}
     assert funscript_info(json.dumps(doc).encode()) ["duration"] == 120.0
+
+
+def _tkhd(width: int, height: int) -> bytes:
+    body = bytes(4) + bytes(20) + bytes(8) + bytes(8) + bytes(36)
+    body += struct.pack(">II", width << 16, height << 16)
+    return _atom(b"tkhd", body)
+
+
+def _mp4(seconds: float, width: int, height: int) -> bytes:
+    moov = _atom(b"moov", _mvhd(1000, int(seconds * 1000))
+                 + _atom(b"trak", _tkhd(0, 0))                 # audio: 0x0
+                 + _atom(b"trak", _tkhd(width, height)))
+    return _atom(b"ftyp", b"isom" + bytes(12)) + moov + _atom(b"mdat", bytes(64))
+
+
+def test_frame_size_from_the_video_track(tmp_path):
+    from funpairdl.utils.media_duration import local_media_meta, mp4_dims_from_moov
+    data = _mp4(160.0, 7680, 3840)
+    moov_at = data.index(b"moov") - 4
+    assert mp4_dims_from_moov(data[moov_at:moov_at + int.from_bytes(data[moov_at:moov_at + 4], "big")]) == (7680, 3840)
+    p = tmp_path / "v.mp4"
+    p.write_bytes(data)
+    assert local_media_meta(p) == {"duration": 160.0, "width": 7680, "height": 3840}
+
+
+def test_mega_media_attribute_round_trip():
+    import base64
+    from funpairdl.utils.mega_api import media_attributes
+
+    def encrypt(v, k):
+        n, delta, mask = len(v), 0x9E3779B9, 0xFFFFFFFF
+        rounds, s, z = 6 + 52 // n, 0, v[-1]
+        for _ in range(rounds):
+            s = (s + delta) & mask
+            e = (s >> 2) & 3
+            for p in range(n):
+                y = v[(p + 1) % n]
+                mx = ((((z >> 5) ^ (y << 2)) + ((y >> 3) ^ (z << 4))) ^ ((s ^ y) + (k[(p & 3) ^ e] ^ z))) & mask
+                v[p] = (v[p] + mx) & mask
+                z = v[p]
+        return v
+
+    width, height, fps, secs = 3840, 2160, 60, 160
+    b = bytes([(width << 1) & 255, (width >> 7) & 127, height & 255, ((height >> 8) & 127) | ((fps & 1) << 7),
+               ((fps >> 1) & 127) | ((secs & 1) << 7), (secs >> 1) & 255, (secs >> 9) & 255, 16])
+    key = (1, 2, 3, 4, 0x11111111, 0x22222222, 0x33333333, 0x44444444)
+    enc = struct.pack("<2I", *encrypt(list(struct.unpack("<2I", b)), list(key[4:8])))
+    fa = "123:0*abc/456:8*" + base64.urlsafe_b64encode(enc).decode().rstrip("=")
+    assert media_attributes(fa, key) == {"width": 3840, "height": 2160, "fps": 60, "duration": 160}
+    assert media_attributes("123:0*abc", key) == {}

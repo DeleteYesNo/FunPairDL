@@ -337,6 +337,16 @@ _DIRECT_FILE_EXTENSIONS = (
 )
 
 
+def _meta_fields(meta: dict) -> dict:
+    """A probe response's length and frame size, when the header gave them."""
+    out = {}
+    if meta.get("duration"):
+        out["duration"] = meta["duration"]
+    if meta.get("width") and meta.get("height"):
+        out["width"], out["height"] = int(meta["width"]), int(meta["height"])
+    return out
+
+
 async def _duration_from_formats(formats: list[dict], session: aiohttp.ClientSession) -> float | None:
     """yt-dlp named no length (rule34video, a generic page's player): read
     it from the video file's own header — a few small ranged GETs. The
@@ -475,6 +485,9 @@ async def _probe_ytdlp(url: str, session: aiohttp.ClientSession) -> dict:
         duration = info.get("duration") or None
         if not duration:
             duration = await _duration_from_formats(candidates, session)
+        # The largest format's frame: 2:1 is a VR render, 16:9 a 2D one.
+        sized = [f for f in formats if f.get("width") and f.get("height")]
+        top = max(sized, key=lambda f: f["width"] * f["height"]) if sized else {}
 
         return {
             "success": True,
@@ -484,6 +497,7 @@ async def _probe_ytdlp(url: str, session: aiohttp.ClientSession) -> dict:
             "formats": available,
             "thumbnail": info.get("thumbnail") or "",
             "duration": duration,
+            **({"width": int(top["width"]), "height": int(top["height"])} if top else {}),
         }
     except asyncio.TimeoutError:
         logger.error("yt-dlp probe timed out after %ds for %s", _YTDLP_TIMEOUT, url[:80])
@@ -642,14 +656,12 @@ async def _probe_pixeldrain(url: str, settings, session: aiohttp.ClientSession) 
                 # Duration from the container header — two small ranged
                 # reads against the file endpoint, not a download.
                 from funpairdl.utils.media_duration import (
-                    looks_like_video, probe_media_duration,
+                    looks_like_video, probe_media_meta,
                 )
                 name = data.get("name", "") or ""
                 if looks_like_video(name):
-                    duration = await probe_media_duration(
-                        f"https://pixeldrain.com/api/file/{file_id}", session, {}, name)
-                    if duration:
-                        result["duration"] = duration
+                    result.update(_meta_fields(await probe_media_meta(
+                        f"https://pixeldrain.com/api/file/{file_id}", session, {}, name)))
                 return result
             return {"success": False, "error": f"Status {resp.status}"}
     except Exception as e:
@@ -1035,7 +1047,7 @@ async def _probe_direct(url: str, provider: str, session: aiohttp.ClientSession)
     try:
         from urllib.parse import urlparse as _urlparse
         from funpairdl.utils.media_duration import (
-            funscript_info, looks_like_video, probe_media_duration,
+            funscript_info, looks_like_video, probe_media_meta,
         )
         path = (_urlparse(url).path or "").lower()
 
@@ -1094,9 +1106,7 @@ async def _probe_direct(url: str, provider: str, session: aiohttp.ClientSession)
             "size": size,
         }
         if looks_like_video(path):
-            duration = await probe_media_duration(url, session, headers, path)
-            if duration:
-                result["duration"] = duration
+            result.update(_meta_fields(await probe_media_meta(url, session, headers, path)))
         return result
     except Exception as e:
         logger.error("Probe failed for %s: %s", url[:80], e)

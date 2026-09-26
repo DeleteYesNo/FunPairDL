@@ -142,6 +142,45 @@ def mp4_duration_from_moov(moov: bytes) -> float | None:
     return None
 
 
+def mp4_dims_from_moov(moov: bytes) -> tuple[int, int] | None:
+    """(width, height) of the largest track in a ``moov`` atom — the video
+    track's ``tkhd`` (16.16 fixed point); audio tracks are 0×0."""
+    if len(moov) < 8 or moov[4:8] != b"moov":
+        return None
+    best: tuple[int, int] | None = None
+    for off, typ, size, _hdr in _atoms(moov, 8):
+        if typ != b"trak" or size is None:
+            continue
+        trak = moov[off:off + size]
+        for o2, t2, s2, h2 in _atoms(trak, 8):
+            if t2 != b"tkhd" or s2 is None:
+                continue
+            body = o2 + h2
+            if body >= len(trak):
+                continue
+            woff = body + (88 if trak[body] == 1 else 76)
+            if woff + 8 > len(trak):
+                continue
+            w = struct.unpack(">I", trak[woff:woff + 4])[0] >> 16
+            h = struct.unpack(">I", trak[woff + 4:woff + 8])[0] >> 16
+            if w and h and (best is None or w * h > best[0] * best[1]):
+                best = (w, h)
+    return best
+
+
+def mp4_meta_from_moov(moov: bytes) -> dict:
+    dims = mp4_dims_from_moov(moov)
+    return {"duration": mp4_duration_from_moov(moov),
+            "width": dims[0] if dims else 0, "height": dims[1] if dims else 0}
+
+
+def _moov_in(head: bytes) -> bytes | None:
+    for off, typ, size, _hdr in _atoms(head):
+        if typ == b"moov" and size is not None and off + size <= len(head):
+            return head[off:off + size]
+    return None
+
+
 def mp4_plan(head: bytes, base: int = 0) -> tuple[str, Any]:
     """Decide the next step from a buffer that starts at file offset `base`:
 
@@ -295,29 +334,39 @@ async def probe_media_duration(
 ) -> float | None:
     """Seconds, or None. At most a handful of small ranged GETs; never
     raises — a missing duration is not a probe failure."""
+    return (await probe_media_meta(url, session, headers, filename)).get("duration")
+
+
+async def probe_media_meta(
+    url: str, session: aiohttp.ClientSession, headers: dict | None = None,
+    filename: str = "",
+) -> dict:
+    """{"duration", "width", "height"} (None/0 when unknown) from the file's
+    header — the size tells a 2D render from a VR one. Never raises."""
     headers = dict(headers or {})
     kind_src = filename or url
+    none = {"duration": None, "width": 0, "height": 0}
     try:
         head = await _ranged(session, url, headers, 0, HEAD_BYTES)
         if not head:
-            return None
+            return none
         if head[:4] == b"\x1a\x45\xdf\xa3":
-            return webm_duration(head)
+            return {**none, "duration": webm_duration(head)}
         if len(head) >= 8 and head[4:8] in (b"ftyp", b"moov", b"mdat", b"free", b"wide", b"skip"):
             step, arg = mp4_plan(head, 0)
             hops = 0
             while hops < MAX_HOPS:
                 hops += 1
                 if step == "done":
-                    return arg
+                    moov = _moov_in(head)
+                    return mp4_meta_from_moov(moov) if moov else {**none, "duration": arg}
                 if step == "fail":
                     logger.debug("mp4 duration: %s (%s)", arg, url[:80])
-                    return None
+                    return none
                 if step == "fetch":
                     off, size = arg
                     moov = await _ranged(session, url, headers, off, size)
-                    d = mp4_duration_from_moov(moov)
-                    return d
+                    return mp4_meta_from_moov(moov)
                 if step == "header":
                     off = arg
                     hdr = await _ranged(session, url, headers, off, 16)
@@ -325,13 +374,13 @@ async def probe_media_duration(
                     # mp4_plan on a bare 16-byte header: either "fetch" (moov
                     # size known) or "header" for the following atom.
                     continue
-            return None
+            return none
         if looks_like_video(kind_src):
             logger.debug("duration: unrecognised container for %s", url[:80])
-        return None
+        return none
     except Exception as e:
         logger.debug("duration probe failed for %s: %s", url[:80], e)
-        return None
+        return none
 
 
 # ---------------------------------------------------------------------------
@@ -341,40 +390,48 @@ async def probe_media_duration(
 def local_media_duration(path) -> float | None:
     """Seconds of a video file on disk (mp4/mov/m4v via moov, webm/mkv via
     EBML), or None. Reads at most the head and the moov atom."""
+    return local_media_meta(path).get("duration")
+
+
+def local_media_meta(path) -> dict:
+    """{"duration", "width", "height"} of a video file on disk (None/0 when
+    unknown). Reads at most the head and the moov atom."""
     from pathlib import Path as _P
     p = _P(path)
+    none = {"duration": None, "width": 0, "height": 0}
     try:
         size = p.stat().st_size
         with open(p, "rb") as f:
             head = f.read(HEAD_BYTES)
             if not head:
-                return None
+                return none
             if head[:4] == b"\x1a\x45\xdf\xa3":
-                return webm_duration(head)
+                return {**none, "duration": webm_duration(head)}
             if len(head) < 8 or head[4:8] not in (b"ftyp", b"moov", b"mdat", b"free", b"wide", b"skip"):
-                return None
+                return none
             step, arg = mp4_plan(head, 0)
             hops = 0
             while hops < MAX_HOPS * 4:
                 hops += 1
                 if step == "done":
-                    return arg
+                    moov = _moov_in(head)
+                    return mp4_meta_from_moov(moov) if moov else {**none, "duration": arg}
                 if step == "fail":
-                    return None
+                    return none
                 if step == "fetch":
                     off, length = arg
                     if off < 0 or off >= size:
-                        return None
+                        return none
                     f.seek(off)
-                    return mp4_duration_from_moov(f.read(length))
+                    return mp4_meta_from_moov(f.read(length))
                 if step == "header":
                     off = arg
                     if off < 0 or off + 16 > size:
-                        return None
+                        return none
                     f.seek(off)
                     step, arg = mp4_plan(f.read(16), off)
                     continue
-                return None
+                return none
     except OSError:
-        return None
-    return None
+        return none
+    return none

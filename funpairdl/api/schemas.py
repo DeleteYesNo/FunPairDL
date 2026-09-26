@@ -50,6 +50,7 @@ class VideoCandidate(BaseModel):
     priority: float = 99.0
     failed: bool = False          # the panel's probe of it failed
     pack: str = ""                # the folder/list link this file is in ("" = a plain link)
+    width: int = 0                # frame width when probed (with height: 2D or VR)
 
 
 class VideoPlanRequest(BaseModel):

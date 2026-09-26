@@ -2715,6 +2715,65 @@ class QueueManager:
                     best, best_score = v, score
         return best
 
+    @staticmethod
+    def _render_of(path: Path) -> str:
+        """"flat" | "vr" | "passthrough" of a video on disk: its frame, else
+        its name; unknown counts as 2D."""
+        from funpairdl.core.video_plan import video_format
+        from funpairdl.utils.media_duration import local_media_meta
+        meta = local_media_meta(path)
+        return video_format(meta.get("width") or 0, meta.get("height") or 0, path.name) or "flat"
+
+    def _keep_preferred_renders(self, pair: Pair, output_dir: Path) -> bool:
+        """One video downloaded as a 2D and a VR render (and passthrough) —
+        the same length to the second — keeps the renders `vr_versions`
+        asks for: 2D only (default), VR only, or all. The panel leaves the
+        others out when it can tell before the download (MEGA's recorded
+        frame size, yt-dlp formats, an mp4 header); this catches the rest
+        by the files' own frames. Returns whether a video was removed."""
+        from funpairdl.core.video_plan import FORMAT_LABEL
+        from funpairdl.persistence.settings import Settings
+        from funpairdl.utils.media_duration import local_media_meta
+        try:
+            mode = getattr(Settings.load(), "vr_versions", "flat") or "flat"
+        except Exception:
+            mode = "flat"
+        order = {"flat": ("flat", "vr", "passthrough"), "vr": ("vr", "passthrough", "flat")}.get(mode)
+        if not order:
+            return False
+        vids = [it for it in pair.items
+                if it.file_type == FileType.VIDEO and (output_dir / it.filename).exists()]
+        if len(vids) < 2:
+            return False
+        info = {}
+        for it in vids:
+            meta = local_media_meta(output_dir / it.filename)
+            info[id(it)] = (meta.get("duration") or 0.0, self._render_of(output_dir / it.filename))
+        removed = False
+        rest = list(vids)
+        while rest:
+            it = rest.pop(0)
+            d0 = info[id(it)][0]
+            if not d0:
+                continue
+            same = [it] + [o for o in rest if info[id(o)][0] and abs(info[id(o)][0] - d0) <= 1.0]
+            for o in same[1:]:
+                rest.remove(o)
+            present = {info[id(x)][1] for x in same}
+            if len(present) < 2:
+                continue
+            keep = next(f for f in order if f in present)
+            for x in same:
+                fmt = info[id(x)][1]
+                if fmt == keep:
+                    continue
+                (output_dir / x.filename).unlink(missing_ok=True)
+                pair.items.remove(x)
+                removed = True
+                logger.info("%s render left out (vr_versions=%s, kept %s): %s",
+                            FORMAT_LABEL[fmt], mode, FORMAT_LABEL[keep], x.filename)
+        return removed
+
     def _autopromote_extra_main_videos(self, pair: Pair, output_dir: Path) -> None:
         """A second, different video in Main is a variant of the work
         ("Work (nude).mp4" next to "Work (stockings).mp4" with one script
@@ -2741,6 +2800,12 @@ class QueueManager:
             alt_name = f"Alt {next_n}"
             used.add(alt_name)
             tag = self._variant_tag(extra.filename, primary.filename)
+            fe, fp = self._render_of(output_dir / extra.filename), self._render_of(output_dir / primary.filename)
+            if fe != fp:
+                # The VR render of the work: say so, not "[a1B2c3D4]".
+                from funpairdl.core.video_plan import FORMAT_LABEL
+                if FORMAT_LABEL[fe].lower() not in (tag or "").lower():
+                    tag = FORMAT_LABEL[fe]
             pair.alt_group_config[alt_name] = {"inherit_multi_axis": True, "display_name": tag}
             extra.group = alt_name
             logger.info("Second Main video is a variant: %s -> %s (%s)",
@@ -3190,6 +3255,9 @@ class QueueManager:
         # Main into implicit Alt groups (legacy flat-list submissions
         # relied on this).
         self._autopromote_main_collisions(pair)
+        # One video in 2D and VR renders: the setting says which stay.
+        if self._keep_preferred_renders(pair, output_dir):
+            self._adopt_lone_alt_video(pair, output_dir)
         self._autopromote_extra_main_videos(pair, output_dir)
 
         # ─── Partition items by group ───

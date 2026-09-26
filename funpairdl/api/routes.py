@@ -68,6 +68,7 @@ async def get_config() -> dict:
         "merge_into_library": settings.merge_into_library,
         "batch_skip_identical": settings.batch_skip_identical,
         "dead_video_action": settings.dead_video_action,
+        "vr_versions": getattr(settings, "vr_versions", "flat"),
     }
 
 
@@ -317,11 +318,12 @@ async def video_plan(req: VideoPlanRequest) -> dict:
         pick_mode=req.pick_mode or settings.video_pick_mode or "smallest",
         min_resolution=req.min_resolution or settings.default_resolution or "best",
         encode_vs_variant=req.encode_vs_variant or settings.encode_vs_variant or "ask",
+        vr_versions=getattr(settings, "vr_versions", "flat") or "flat",
     )
     videos = [VideoSpec(url=v.url, name=v.name, source=v.source or "OP", size=int(v.size or 0),
                         height=int(v.height or 0), duration=float(v.duration or 0),
                         priority=float(v.priority), failed=bool(v.failed),
-                        pack=v.pack or "")
+                        pack=v.pack or "", width=int(v.width or 0))
               for v in req.videos if v.url]
     return await asyncio.to_thread(plan_videos, videos, prefs, dict(req.decisions or {}),
                                    list(req.credits or []))

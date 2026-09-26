@@ -323,3 +323,53 @@ class TestNamesAndLengths:
         assert _is_id("a1b2c3d4")
         assert not _is_id("fortytwo3d")
         assert not _is_id("studio2025")
+
+
+class TestRenders:
+    """One video offered as a 2D and a VR render (and passthrough)."""
+
+    def _vids(self):
+        return [
+            _v("https://mega.nz/file/flat", "Garden Party.mp4", size=1_260, duration=160.0),
+            _p("https://mega.nz/folder/x/file/vr", "Garden Party.mp4", size=1_480),
+            _p("https://mega.nz/folder/x/file/pt", "Garden Party Passthrough.mp4", size=1_530),
+        ]
+
+    def _with_frames(self, vids):
+        vids[0].width, vids[0].height = 3840, 2160
+        for v in vids[1:]:
+            v.width, v.height, v.duration = 7680, 3840, 160.0
+        return vids
+
+    def test_format_from_frame_or_name(self):
+        from funpairdl.core.video_plan import video_format
+        assert video_format(3840, 2160) == "flat"
+        assert video_format(7680, 3840) == "vr"
+        assert video_format(7680, 3840, "Work Passthrough.mp4") == "passthrough"
+        assert video_format(2560, 1080) == "flat"          # cinema scope is no VR
+        assert video_format(0, 0, "Work_LR_180.mp4") == "vr"
+        assert video_format(0, 0, "Work.mp4") == ""
+
+    def test_2d_only_by_default(self):
+        res = plan_videos(self._with_frames(self._vids()), Prefs())
+        assert res["roles"]["https://mega.nz/file/flat"] == "chosen"
+        assert res["roles"]["https://mega.nz/folder/x/file/vr"] == "format"
+        assert res["roles"]["https://mega.nz/folder/x/file/pt"] == "format"
+
+    def test_vr_only(self):
+        res = plan_videos(self._with_frames(self._vids()), Prefs(vr_versions="vr"))
+        assert res["roles"]["https://mega.nz/folder/x/file/vr"] in ("chosen", "variant")
+        assert res["roles"]["https://mega.nz/file/flat"] == "format"
+        assert res["roles"]["https://mega.nz/folder/x/file/pt"] == "format"
+
+    def test_all_renders_are_variants(self):
+        res = plan_videos(self._with_frames(self._vids()), Prefs(vr_versions="all"))
+        wanted = {u for u, r in res["roles"].items() if r in ("chosen", "variant")}
+        assert wanted == {"https://mega.nz/file/flat", "https://mega.nz/folder/x/file/vr",
+                          "https://mega.nz/folder/x/file/pt"}
+        assert _group_of(res, "https://mega.nz/folder/x/file/vr")["tag"] == "VR"
+
+    def test_same_name_renders_are_never_mirrors(self):
+        # Without the frame sizes both "Garden Party.mp4" read as one video.
+        res = plan_videos(self._with_frames(self._vids())[:2], Prefs(vr_versions="all"))
+        assert res["roles"]["https://mega.nz/folder/x/file/vr"] != "alternate"

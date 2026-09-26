@@ -2525,7 +2525,9 @@ function setupProbing(panel, parsed) {
       if (info.duration) v.probedDuration = Number(info.duration) || 0;
       // What the video plan compares: bytes and the best height on offer.
       v.probedSize = Number(info.size) || 0;
-      v.probedHeight = Math.max(0, ...((info.formats || []).map((f) => Number(f.height) || 0)));
+      v.probedHeight = Math.max(0, Number(info.height) || 0, ...((info.formats || []).map((f) => Number(f.height) || 0)));
+      // The frame's width too: 2:1 is a VR render of what 16:9 shows in 2D.
+      v.probedWidth = Number(info.width) || 0;
       v.probedFormats = (info.formats || []).map((f) => ({ height: Number(f.height) || 0, size: Number(f.size) || 0 }));
       updateVideoSize(probeKey, info);
       showProbeExtras(sizeEl, probeKey, info);
@@ -2800,7 +2802,7 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
           else {
             b.videoUrls.push(bcb.dataset.fileUrl);
             // A pack file's length is its streaming copy's (the plan knows which).
-            const d = _planDuration(panel, parsed, bcb.dataset.fileUrl, 0);
+            const d = _planDuration(panel, parsed, bcb.dataset.fileUrl, Number(bcb.dataset.duration) || 0);
             if (d) b.durations[bcb.dataset.fileUrl] = d;
           }
           // The pack's video won the video plan: the other links are its fallbacks.
@@ -3177,7 +3179,7 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
 const _SEND_PREF_DEFAULTS = {
   video_pick_mode: "smallest", encode_vs_variant: "ask", collect_other_authors: true,
   merge_into_library: true, batch_skip_identical: true,
-  dead_video_action: "delete",
+  dead_video_action: "delete", vr_versions: "flat",
 };
 const PROBE_SETTLE_TIMEOUT_MS = 20000;
 const PROBE_HARD_DEADLINE_MS = 300000;
@@ -3317,7 +3319,10 @@ function _videoRowsForPlan(panel, parsed) {
         const fileUrl = cb.dataset.fileUrl || "";
         out.push({
           v: { url: fileUrl, probedFilename: cb.dataset.fileName || "", label: cb.dataset.fileName || "",
-               probedSize: _probeSizeEntry(fileUrl), source: v.source, priority: v.priority, pack: v.url },
+               probedSize: _probeSizeEntry(fileUrl), source: v.source, priority: v.priority, pack: v.url,
+               // What the host listing recorded (MEGA keeps length and frame size).
+               probedDuration: Number(cb.dataset.duration) || 0,
+               probedWidth: Number(cb.dataset.width) || 0, probedHeight: Number(cb.dataset.height) || 0 },
           row, key, section, bundleCb: cb, src, packVideos: vids.length,
         });
       }
@@ -3449,6 +3454,7 @@ async function _refreshVideoPlan(panel, parsed) {
     source: src || (v.source === "OP" ? "OP" : "comment"),
     size: _expectedSize(v.probedFormats, prefs.min_resolution) || v.probedSize || _probeSizeEntry(v.url) || 0,
     height: v.probedHeight || 0,
+    width: v.probedWidth || 0,
     duration: v.probedDuration || null,
     priority: Number(v.priority) || 99,
     failed: !!v.probeFailed,
@@ -3528,6 +3534,10 @@ function _applyVideoPlan(panel, parsed, plans) {
       else if (role === "variant") text = g.tag ? `變體 (${g.tag})` : "變體";
       else if (role === "ambiguous") { text = "待決定"; title = "另一編碼還是另一個版本？下方選一個"; }
       else if (role === "unrelated") { text = "非本作品?"; title = title || "名稱與帖子的作品對不上；要的話自己勾"; }
+      else if (role === "format") {
+        text = `略過（${g.tag || "VR"} 版）`; cls = "unrelated";
+        title = title || "同一影片的另一種觀看版本；設定 → One video in 2D and VR 決定下載哪一種";
+      }
       else if (role === "dead" || (role === "unrelated" && v.probeFailed)) {
         text = `無法下載（${_deadReason(v.probeError)}）`; cls = "unrelated";
         title = v.probeError || "探測失敗，下載也會失敗";
@@ -4936,7 +4946,8 @@ function _bundleFileRowHTML(f, probeKey) {
     <input type="checkbox" class="funpairdl-bundle-cb"
            data-probe-key="${probeKey}"
            data-file-url="${furl}"
-           data-file-name="${fname}" checked>
+           data-file-name="${fname}"
+           data-duration="${Number(f.duration) || ""}" data-width="${Number(f.width) || ""}" data-height="${Number(f.height) || ""}" checked>
     <span class="funpairdl-bundle-fname">${fname}</span>
     <span class="funpairdl-bundle-fsize">${fsize}</span>
   </label>`;
@@ -5289,7 +5300,8 @@ function _mainWorkRows(panel, parsed) {
           if (/\.funscript$/i.test(name)) {
             scripts.push({ url, name, row: fileRow, cb: bcb, duration: 0, link: "" });
           } else if (_isVideoFileName(name)) {
-            videos.push({ url, name, row: fileRow, cb: bcb, hints: "", duration: _planDuration(panel, parsed, url, 0) });
+            videos.push({ url, name, row: fileRow, cb: bcb, hints: "",
+                          duration: _planDuration(panel, parsed, url, Number(bcb.dataset.duration) || 0) });
           }
         }
         return;

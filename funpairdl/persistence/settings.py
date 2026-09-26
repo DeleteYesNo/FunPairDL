@@ -148,6 +148,10 @@ class Settings:
     # "delete" = drop the post — it isn't sent and its tab is closed when the
     # batch is sent; "keep" = send it anyway, the scripts without a video.
     dead_video_action: str = "delete"
+    # One video offered in several renders (2D, VR 180°, VR passthrough):
+    # "flat" = download the 2D one only, "vr" = the VR one only (passthrough
+    # when that is all), "all" = every render, as variants of the work.
+    vr_versions: str = "flat"
 
     @classmethod
     def load(cls, path: Path = CONFIG_FILE) -> Settings:
