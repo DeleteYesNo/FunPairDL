@@ -1154,3 +1154,66 @@ class TestAnotherCutIsAnotherFolder:
         (tmp_path / "Studio Date (2)").mkdir()
         (tmp_path / "Studio Date (2)" / "Studio Date.mp4").write_bytes(_mp4(180.3))
         assert qm._work_dir_for(work, [180.35]) == tmp_path / "Studio Date (2)"
+
+
+class TestLibraryAlreadyHolds:
+    """A video the library holds is not fetched again, whatever sent it."""
+
+    def _setup(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+        lib_root = tmp_path / "lib"
+        work = lib_root / "studio-garden-party-4k-full-animation"
+        work.mkdir(parents=True)
+        (work / "studio-garden-party-4k-full-animation.mp4").write_bytes(_mp4(155.7) + bytes(2_000_000))
+        (work / "studio-garden-party-4k-full-animation.funscript").write_bytes(b'{"actions":[]}')
+        other = lib_root / "Studio Date"
+        other.mkdir()
+        (other / "Studio Date.mp4").write_bytes(_mp4(60.0) + bytes(1_500_000))
+        qm = QueueManager()
+        monkeypatch.setattr(qm, "_library_dirs", lambda: [lib_root])
+        settings = MagicMock(merge_into_library=True, vr_versions="flat")
+        monkeypatch.setattr("funpairdl.persistence.settings.Settings.load", lambda *a, **k: settings)
+        return qm, lib_root, work, other
+
+    def _pair(self, tmp_path, name, video_name, size, duration=0.0, scripts=("s.funscript",)):
+        pair = Pair(name=name)
+        pair.output_dir = str(tmp_path / "dl" / name)
+        v = PairItem(url="https://pd/u/v", filename=video_name, file_type=FileType.VIDEO, total_bytes=size)
+        v.duration = duration
+        pair.items = [v] + [PairItem(url=f"https://pd/u/{s}", filename=s, file_type=FileType.FUNSCRIPT)
+                            for s in scripts]
+        return pair
+
+    def test_same_bytes_anywhere_in_the_library(self, tmp_path, monkeypatch):
+        qm, _root, _work, other = self._setup(tmp_path, monkeypatch)
+        size = (other / "Studio Date.mp4").stat().st_size
+        pair = self._pair(tmp_path, "Whatever Name", "x.mp4", size)
+        assert asyncio.run(qm._skip_library_copies(pair)) is False
+        assert [i.filename for i in pair.items] == ["s.funscript"]
+        assert pair.output_dir == str(other)
+
+    def test_another_encode_of_the_same_length_under_a_slug_folder(self, tmp_path, monkeypatch):
+        qm, _root, work, _other = self._setup(tmp_path, monkeypatch)
+        pair = self._pair(tmp_path, "[Studio] Garden Party", "[Studio] Garden Party.mp4", 9_999_999, 155.5)
+        asyncio.run(qm._skip_library_copies(pair))
+        assert pair.output_dir == str(work)
+        assert all(i.file_type == FileType.FUNSCRIPT for i in pair.items)
+
+    def test_another_length_is_another_video(self, tmp_path, monkeypatch):
+        qm, _root, _work, _other = self._setup(tmp_path, monkeypatch)
+        pair = self._pair(tmp_path, "[Studio] Garden Party", "[Studio] Garden Party.mp4", 9_999_999, 180.4)
+        asyncio.run(qm._skip_library_copies(pair))
+        assert any(i.file_type == FileType.VIDEO for i in pair.items)
+
+    def test_video_only_pair_is_done(self, tmp_path, monkeypatch):
+        qm, _root, _work, other = self._setup(tmp_path, monkeypatch)
+        pair = self._pair(tmp_path, "x", "x.mp4", (other / "Studio Date.mp4").stat().st_size, scripts=())
+        assert asyncio.run(qm._skip_library_copies(pair)) is True
+
+    def test_off_when_the_setting_is(self, tmp_path, monkeypatch):
+        qm, _root, _work, other = self._setup(tmp_path, monkeypatch)
+        from funpairdl.persistence.settings import Settings
+        Settings.load().merge_into_library = False
+        pair = self._pair(tmp_path, "x", "x.mp4", (other / "Studio Date.mp4").stat().st_size)
+        assert asyncio.run(qm._skip_library_copies(pair)) is False
+        assert any(i.file_type == FileType.VIDEO for i in pair.items)

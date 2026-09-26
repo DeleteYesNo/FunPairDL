@@ -1533,6 +1533,22 @@ class QueueManager:
                 self.on_queue_changed()
             return
 
+        # Phase -1: a video the library already holds is not fetched again —
+        # whatever sent it (a forum post, the Pixeldrain picker, a pasted
+        # link); its scripts go into that work, where organize reconciles
+        # them (identical dropped, new axes in, changed as variants).
+        try:
+            if await self._skip_library_copies(pair):
+                pair.state = PairState.COMPLETED
+                logger.info("Pair '%s': everything is already in the library", pair.name)
+                if self.on_pair_updated:
+                    self.on_pair_updated(pair)
+                if self.on_queue_changed:
+                    self.on_queue_changed()
+                return
+        except Exception as e:  # never let the check block a download
+            logger.warning("Library check failed for '%s': %s", pair.name, e)
+
         output_dir = Path(pair.output_dir)
 
         # Track this pair's tasks locally; also register in shared lists for pause/cancel
@@ -2431,6 +2447,138 @@ class QueueManager:
             for v in group:
                 out[id(v)] = f"{key}#{v.url}" if (same_host_dupes and key) else key
         return out
+
+    _LIB_INDEX_TTL = 120.0
+
+    def _library_video_index(self) -> dict[int, list[Path]]:
+        """{byte size: [video paths]} of every work folder in the library
+        roots (one level deep), rebuilt at most every two minutes."""
+        import time as _time
+        now = _time.monotonic()
+        cached = getattr(self, "_lib_index", None)
+        if cached and now - cached[0] < self._LIB_INDEX_TTL:
+            return cached[1]
+        index: dict[int, list[Path]] = {}
+        for root in self._library_dirs():
+            try:
+                dirs = [d for d in root.iterdir() if d.is_dir() and not lib.is_meta_dir(d.name)]
+            except OSError:
+                continue
+            for d in dirs:
+                try:
+                    for f in d.iterdir():
+                        if f.suffix.lower() in self._VIDEO_EXTS and f.is_file():
+                            index.setdefault(f.stat().st_size, []).append(f)
+                except OSError:
+                    continue
+        self._lib_index = (now, index)
+        return index
+
+    @staticmethod
+    def _name_words(name: str) -> frozenset[str]:
+        """A work name's words for "same title": all of them, bracketed
+        creator tags included, minus encode/version/id words."""
+        from funpairdl.core.video_plan import _ENCODE_TOKEN_RE, _OPAQUE_TOKEN_RE, _is_id, _tokens
+        stem = Path(name).stem if Path(name).suffix.lower() in QueueManager._VIDEO_EXTS else name
+        return frozenset(t for t in _tokens(stem) if not _ENCODE_TOKEN_RE.match(t)
+                         and not _OPAQUE_TOKEN_RE.match(t) and not _is_id(t))
+
+    async def _skip_library_copies(self, pair: Pair) -> bool:
+        """Drop the pair's videos the library already holds and point the
+        pair at that work. A video is held when a library file has its exact
+        byte count, or when a work named like it (all the words of one name
+        in the other) has a video of its length to half a second — another
+        encode of the same video (the "already in library" rule the forum
+        panel applies). A render the vr_versions setting prefers over the
+        library's (the 2D one next to a VR copy) still downloads. Returns
+        True when nothing is left to fetch."""
+        from funpairdl.persistence.settings import Settings
+        settings = await asyncio.to_thread(Settings.load)
+        if not getattr(settings, "merge_into_library", True):
+            return False
+        videos = [i for i in pair.items if i.file_type == FileType.VIDEO and not i.is_bundle
+                  and i.state not in (ItemState.COMPLETED, ItemState.DOWNLOADING)
+                  and not i.downloaded_bytes]
+        if not videos:
+            return False
+        index = await asyncio.to_thread(self._library_video_index)
+        own = Path(pair.output_dir)
+        hits: dict[str, Path] = {}
+        for v in videos:
+            same = [p for p in index.get(v.total_bytes or -1, []) if v.total_bytes > 1_000_000]
+            if same:
+                hits[v.id] = same[0].parent
+                continue
+            hit = await self._same_length_work(v, pair, settings)
+            if hit is not None:
+                hits[v.id] = hit
+        if not hits:
+            return False
+        dirs = set(hits.values())
+        if len(dirs) != 1 or len(hits) != len(videos):
+            # Some videos are new, or they are in different works: only the
+            # held ones are dropped when the pair stays where it was headed.
+            held = [v for v in videos if v.id in hits and hits[v.id] == own]
+            for v in held:
+                pair.items.remove(v)
+            return False
+        work = dirs.pop()
+        for v in videos:
+            pair.items.remove(v)
+            logger.info("Library already holds %s (%s): not downloaded", v.filename, work.name)
+        if not any(i.file_type == FileType.FUNSCRIPT for i in pair.items):
+            return True
+        if work != own:
+            logger.info("Pair '%s' merges into the library work '%s'", pair.name, work)
+            pair.output_dir = str(work)
+            pair.foreign_files = self._folder_files(work)
+        return False
+
+    async def _same_length_work(self, v: PairItem, pair: Pair, settings) -> Path | None:
+        """The library work named like `v` (or like its pair) that holds a
+        video of v's length — probed from the host when the panel sent none."""
+        from funpairdl.core.video_plan import video_format
+        from funpairdl.utils.media_duration import local_media_meta
+        words = [w for w in (self._name_words(pair.name), self._name_words(v.filename)) if len(w) >= 2]
+        if not words:
+            return None
+        cands: list[Path] = []
+        for root in self._library_dirs():
+            try:
+                for d in root.iterdir():
+                    if not d.is_dir() or lib.is_meta_dir(d.name):
+                        continue
+                    dw = self._name_words(d.name)
+                    if len(dw) >= 2 and any(w <= dw or dw <= w for w in words):
+                        cands.append(d)
+            except OSError:
+                continue
+        if not cands:
+            return None
+        length, fmt = v.duration or 0.0, ""
+        if not length:
+            from funpairdl.providers.probe import probe_url_info
+            info = await probe_url_info(v.url, settings=settings)
+            length = float(info.get("duration") or 0)
+            fmt = video_format(int(info.get("width") or 0), int(info.get("height") or 0), v.filename)
+        if not length:
+            return None
+        order = {"flat": ("flat", "vr", "passthrough"), "vr": ("vr", "passthrough", "flat")}.get(
+            getattr(settings, "vr_versions", "flat"))
+        found: list[Path] = []
+        for d in cands:
+            for f in d.iterdir():
+                if f.suffix.lower() not in self._VIDEO_EXTS or not f.is_file():
+                    continue
+                meta = await asyncio.to_thread(local_media_meta, f)
+                if not meta.get("duration") or abs(meta["duration"] - length) > 0.5:
+                    continue
+                have = video_format(meta.get("width") or 0, meta.get("height") or 0, f.name) or "flat"
+                if order and fmt and fmt != have and order.index(fmt) < order.index(have):
+                    continue  # the setting prefers this render to the library's
+                found.append(d)
+                break
+        return found[0] if len(found) == 1 else None
 
     def _work_dir_for(self, target_dir: Path, new_lens: list[float]) -> Path:
         """The folder a download of this title goes to. A folder of the
