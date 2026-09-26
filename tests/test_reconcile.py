@@ -277,3 +277,20 @@ def test_title_key_strips_only_qualifier_tags():
     assert k("Alpha Beta (Soft & Hardcore Scripts)") == k("Alpha Beta")
     assert k("Alpha Beta (Dialogue)") != k("Alpha Beta")   # a real variant name stays
     assert k("Alpha Beta ～Part 2～") == k("Alpha Beta ~Part 2~")  # punctuation width
+
+
+def test_a_set_identical_to_any_existing_variant_is_dropped(tmp_path, monkeypatch):
+    # The work holds two script sets (Main and "(Heroine B)"); re-sending
+    # both must add nothing — each incoming file equals one of them.
+    _stub_settings(monkeypatch, reconcile_on_redownload=True)
+    qm = QueueManager(download_dir=tmp_path)
+    work = _existing_work(tmp_path, "Work", b"VIDEO", {
+        "Work.funscript": "A-L0", "Work.pitch.funscript": "A-PITCH",
+        "Work (Heroine B).funscript": "B-L0", "Work (Heroine B).pitch.funscript": "B-PITCH"})
+    pair, _ = _redownload_pair(tmp_path, "Work", b"VIDEO", {
+        "Studio Work (Heroine A).funscript": "A-L0", "Studio Work (Heroine A).pitch.funscript": "A-PITCH",
+        "Studio Work (Heroine B).funscript": "B-L0", "Studio Work (Heroine B).pitch.funscript": "B-PITCH"})
+    assert qm._reconcile_with_library(pair) is True
+    assert sorted(p.name for p in work.glob("*.funscript")) == [
+        "Work (Heroine B).funscript", "Work (Heroine B).pitch.funscript",
+        "Work.funscript", "Work.pitch.funscript"]

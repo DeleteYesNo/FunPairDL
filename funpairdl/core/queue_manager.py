@@ -3213,12 +3213,18 @@ class QueueManager:
                 return False
 
         # Existing axes in dest (excluding this download's own incoming files).
+        # Every file of an axis counts: a work with a "(Heroine B)" variant
+        # holds two L0s, and a re-download of either set is identical to one
+        # of them — compared with only the first, the other set came back
+        # as a duplicate "(Alt)" variant.
         existing_axis: dict[str, Path] = {}
+        existing_all: dict[str, list[Path]] = {}
         for f in dest.iterdir():
             if (f.is_file() and f.name.lower().endswith(".funscript")
                     and _rp(f) not in incoming_paths):
                 ax, _ = self._parse_axis(f.name)
                 existing_axis.setdefault(ax, f)
+                existing_all.setdefault(ax, []).append(f)
 
         new_axis, changed = [], []
         for s in scripts:
@@ -3231,7 +3237,10 @@ class QueueManager:
                 new_axis.append((sp, suffix))
             else:
                 try:
-                    identical = self._file_sha256(sp) == self._file_sha256(ex)
+                    digest = self._file_sha256(sp)
+                    identical = any(
+                        e.stat().st_size == sp.stat().st_size and self._file_sha256(e) == digest
+                        for e in existing_all.get(ax, [ex]))
                 except OSError:
                     identical = False
                 if identical:
