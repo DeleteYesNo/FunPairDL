@@ -1427,12 +1427,17 @@ class QueueManager:
                 if manifest_url and (item.headers or {}).get("Referer"):
                     ydl_opts["http_headers"] = {"Referer": item.headers["Referer"]}
 
-                # Apply resolution preference: exact match or best
+                # Apply resolution preference: exact match or best. A stream
+                # offered as video-only renditions plus one audio track (an
+                # HLS master with "hls-720" + "hls-audio") has no combined
+                # format: "best" alone found nothing, so the best video is
+                # merged with the audio as the last resort.
+                ydl_opts["format"] = "bv*+ba/b/bv*"
                 if preferred_resolution and preferred_resolution != "best":
                     try:
                         h = int(preferred_resolution)
                         ydl_opts["format"] = (
-                            f"bestvideo[height={h}]+bestaudio/best[height={h}]/best"
+                            f"bv*[height={h}]+ba/b[height={h}]/bv*+ba/b/bv*"
                         )
                     except ValueError:
                         pass
