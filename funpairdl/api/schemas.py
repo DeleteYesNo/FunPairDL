@@ -61,6 +61,8 @@ class VideoPlanRequest(BaseModel):
     encode_vs_variant: str = ""   # "" = the setting
     decisions: dict[str, str] = {}  # {url: "reencode" | "variant"}
     credits: list[str] = []         # the post's creator names (title "[X]" prefix, OP)
+    title: str = ""                 # the post's title: its words explain a host's retitling
+    scripts: list[dict] = []        # the post's scripts [{name, duration}]: their works and lengths
 
 
 class LookupVideo(BaseModel):

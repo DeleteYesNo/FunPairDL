@@ -35,7 +35,7 @@ _ENCODE_TOKEN_RE = re.compile(
     r"^(?:\d{3,4}p|[248]k|uhd|fhd|qhd|hd|sd|h\.?26[45]|x26[45]|hevc|avc|av1|vp9|"
     r"small(?:er)?|(?:un)?compressed|comp|re-?encoded?|reenc|lite|low|mini|tiny|web|rf\d{1,2}|"
     r"\d+(?:\.\d+)?[mg]b|\d{2,3}fps|hq|lq|mq|high|medium|med|original|orig|source|src|"
-    r"bitrate|crf\d*|q\d{1,2}|\d{3,4}x\d{3,4}|mp4|mkv|webm|mov)$",
+    r"bitrate|crf\d*|q\d{1,2}|\d{3,4}x\d{3,4}|mp4|mkv|webm|mov|sound|with[-_]?sound)$",
     re.IGNORECASE,
 )
 # Version-ish words: they tell two files apart but not HOW they differ.
@@ -151,9 +151,27 @@ _SYNONYMS = {"watermark": "wm", "watermarks": "wm", "watermarked": "wm", "waterm
 _GLUED_ENCODE_RE = re.compile(r"(?<=[a-z])(\d{2,3}fps|\d{3,4}p)(?![a-z0-9])")
 
 
+# A run of kana/CJK/hangul is one word: a Japanese or Chinese title
+# names its work as surely as Latin letters do (it used to read as no words).
+_WORD_RE = re.compile(r"[a-z0-9]+|[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uff66-\uff9f]+")
+
+
 def _tokens(stem: str) -> set[str]:
     low = _GLUED_ENCODE_RE.sub(r" \1", (stem or "").lower())
-    return {_SYNONYMS.get(t, t) for t in re.split(r"[^a-z0-9]+", low) if t}
+    return {_SYNONYMS.get(t, t) for t in _WORD_RE.findall(low)}
+
+
+_SEQUEL_RE = re.compile(r"^(?:part|pt|ep|episode|vol|chapter|ch|scene)\d+$")
+
+
+def _sequel_marks(tokens: set[str]) -> set[str]:
+    """"part2", "ep3": what tells a sequel from its first part. (Bare
+    numbers are no sign: hosts append "(1)" and post ids to titles.)"""
+    return {t for t in tokens if _SEQUEL_RE.match(t)}
+
+
+def _script_stem(name: str) -> str:
+    return re.sub(r"(\.[A-Za-z]+)?\.funscript$", "", name or "", flags=re.IGNORECASE)
 
 
 # A release year ("Work 2020") dates a work; one host keeps it, the next drops it.
@@ -245,8 +263,26 @@ def _duration_differs(a: float, b: float) -> bool:
     return abs(a - b) > max(3.0, 0.02 * max(a, b))
 
 
+def _one_sided(a_only: set[str], b_only: set[str], title_words: frozenset[str]) -> set[str]:
+    """The words that set two names apart. A slug's author digits are no
+    difference ("studio3" beside "studio"); a word only ONE name adds is none
+    either when the post's title has it ("(Winterfall)", "Progress") — the
+    host copied the title. Words both sides add (Aria / Seed) stay."""
+    a_only, b_only = set(a_only), set(b_only)
+    for t in list(a_only):
+        for u in list(b_only):
+            if t != u and (t.rstrip("0123456789") == u or u.rstrip("0123456789") == t):
+                a_only.discard(t)
+                b_only.discard(u)
+    if not a_only or not b_only:
+        a_only -= title_words
+        b_only -= title_words
+    return a_only | b_only
+
+
 def _classify(spec: VideoSpec, ref: VideoSpec,
-              credits: frozenset[str] = frozenset()) -> tuple[str, frozenset[str], str]:
+              credits: frozenset[str] = frozenset(),
+              title_words: frozenset[str] = frozenset()) -> tuple[str, frozenset[str], str]:
     """(kind, cluster key, tag) of `spec` relative to `ref`:
     kind = "mirror" | "reencode" | "ambiguous" | "variant".
     `credits` are the post's creator words: a host title that adds
@@ -266,8 +302,9 @@ def _classify(spec: VideoSpec, ref: VideoSpec,
             # it exists…" / "Clip (Sound) Booru Video #…"): one video.
             # (Character alts share most of their name and stay variants.)
             return "mirror", frozenset(), ""
-    diff = (spec.tokens - ref.tokens) | (ref.tokens - spec.tokens)
-    diff = {t for t in diff if not _is_id(t) and t not in credits}
+    keep = lambda t: not _is_id(t) and t not in credits and not _ENCODE_TOKEN_RE.match(t)  # noqa: E731
+    diff = _one_sided({t for t in spec.tokens - ref.tokens if keep(t)},
+                      {t for t in ref.tokens - spec.tokens if keep(t)}, title_words)
     if any(re.fullmatch(r"c?rf\d*", t) for t in diff):
         # HandBrake's "-P4-RF35": the preset number rides with the quality.
         diff = {t for t in diff if not re.fullmatch(r"p\d", t)}
@@ -288,27 +325,30 @@ def _classify(spec: VideoSpec, ref: VideoSpec,
 _PAREN_RE = re.compile(r"[\(（]([^\)）]*)[\)）]")
 
 
-def _paren_diff(spec: VideoSpec, ref: VideoSpec, credits: frozenset[str] = frozenset()) -> set[str]:
+def _paren_diff(spec: VideoSpec, ref: VideoSpec, credits: frozenset[str] = frozenset(),
+                title_words: frozenset[str] = frozenset()) -> set[str]:
     """Words of a parenthesised tag ("(nude)", "(Pip alt)") one name has
     and the other lacks entirely."""
-    tags = lambda st: {t for inner in _PAREN_RE.findall(st or "") for t in _tokens(inner)}
-    diff = ((tags(spec.stem) - ref.tokens) | (tags(ref.stem) - spec.tokens)) - credits
-    return {t for t in diff if not _ENCODE_TOKEN_RE.match(t) and not _OPAQUE_TOKEN_RE.match(t)
-            and not _is_id(t)}
+    tags = lambda st: {t for inner in _PAREN_RE.findall(st or "") for t in _tokens(inner)}  # noqa: E731
+    keep = lambda t: (t not in credits and not _ENCODE_TOKEN_RE.match(t)  # noqa: E731
+                      and not _OPAQUE_TOKEN_RE.match(t) and not _is_id(t))
+    return _one_sided({t for t in tags(spec.stem) - ref.tokens if keep(t)},
+                      {t for t in tags(ref.stem) - spec.tokens if keep(t)}, title_words)
 
 
 def _classify_in_pack(spec: VideoSpec, ref: VideoSpec,
-                      credits: frozenset[str] = frozenset()) -> tuple[str, frozenset[str], str]:
+                      credits: frozenset[str] = frozenset(),
+                      title_words: frozenset[str] = frozenset()) -> tuple[str, frozenset[str], str]:
     """A plain link matched to a pack file is another copy of it — hosts
     retitle freely ("[Studio][4K] Work Full Animation" for "[Studio] Work.mp4")
     — unless its length differs or a parenthesised tag sets it apart
     ("Work (nude)")."""
     from funpairdl.core.queue_manager import QueueManager
     if _duration_differs(spec.duration, ref.duration) or (spec.fmt and ref.fmt and spec.fmt != ref.fmt):
-        return _classify(spec, ref, credits)
+        return _classify(spec, ref, credits, title_words)
     # A tag the other name carries anywhere is no difference: a slug
     # ("work-ember-alt-scene-3.mp4") keeps the words, not the brackets.
-    diff = _paren_diff(spec, ref, credits)
+    diff = _paren_diff(spec, ref, credits, title_words)
     if diff:
         tag = QueueManager._variant_tag(spec.stem + ".mp4", ref.stem + ".mp4") or " ".join(sorted(diff))
         return "variant", frozenset(sorted(diff)), tag
@@ -349,7 +389,8 @@ def _order(cands: list[VideoSpec], prefs: Prefs, pending: set[str] | None = None
 
 def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
                 decisions: dict[str, str] | None = None,
-                credits: list[str] | None = None) -> dict:
+                credits: list[str] | None = None,
+                title: str = "", scripts: list[dict] | None = None) -> dict:
     """Group a post's video links and pick what to download.
 
     Returns::
@@ -371,6 +412,7 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
     prefs = prefs or Prefs()
     decisions = decisions or {}
     credit_words = frozenset(t for c in (credits or []) for t in _tokens(c) if len(t) >= 3)
+    title_words = frozenset(t for t in _tokens(title or "") if len(t) >= 2 and not _ENCODE_TOKEN_RE.match(t))
     for v in videos:
         v.stem = _stem_of(v)
         v.tokens = _tokens(v.stem)
@@ -457,11 +499,22 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
     for v in videos:
         if v.duration and v.duration >= 60 and not v.failed:
             by_len.setdefault(v.key, v.duration)
+    marks = {}
+    for v in videos:
+        if v.key in by_len and v.key not in marks:
+            marks[v.key] = _sequel_marks(v.tokens)
+
+    def _same_len(a: float, b: float) -> bool:
+        # A host that rounds to whole seconds (iwara, MEGA) is a second off.
+        tol = 1.0 if float(a).is_integer() or float(b).is_integer() else 0.5
+        return abs(a - b) <= tol
     for k1 in list(by_len):
         for k2 in list(by_len):
-            if k1 < k2 and k1 in by_len and k2 in by_len and abs(by_len[k1] - by_len[k2]) <= 0.5:
+            if k1 < k2 and k1 in by_len and k2 in by_len and _same_len(by_len[k1], by_len[k2]):
                 if k1.startswith("pack:") and k2.startswith("pack:"):
                     continue  # two files in packs are two videos
+                if marks.get(k1, set()) != marks.get(k2, set()):
+                    continue  # "part2" is the sequel, not a copy (a series keeps one length)
                 keep, drop = (k2, k1) if k2.startswith("pack:") else (k1, k2)
                 for v in videos:
                     if v.key == drop:
@@ -474,12 +527,40 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
     for v in videos:
         by_key.setdefault(v.key, []).append(v)
 
+    # The post's scripts name its works and give their lengths. A comment
+    # link is the video of a script no live OP link covers — the post's
+    # own links died, or a script's video was never linked — when it is
+    # named like that script (or the post) or runs its length: the rescue
+    # a later reply brings (a mirror for a dead video, the handjob clip of
+    # a three-video post).
+    script_list = [(_script_stem(str(s.get("name") or "")), float(s.get("duration") or 0))
+                   for s in (scripts or [])]
+    work_cores = [c for c in (_core_tokens(n) for n, _ in script_list) if len(c) >= 2]
+    tc = _core_tokens(_SITE_PREFIX_RE.sub("", title or ""))
+    if len(tc) >= 2:
+        work_cores.append(tc)
+    live_op = [v for v in videos if v.source == "OP" and not v.failed]
+    op_lens_known = all(v.duration for v in live_op)
+
+    def _uncovered(length: float) -> bool:
+        return op_lens_known and not any(not _duration_differs(v.duration, length) for v in live_op)
+
+    def _post_work(members: list[VideoSpec]) -> bool:
+        for m in (m for m in members if not m.failed):
+            c = _core_tokens(m.stem)
+            if not live_op and len(c) >= 2 and any(w <= c or c <= w for w in work_cores):
+                return True
+            if m.duration and any(sl and not _duration_differs(m.duration, sl) and _uncovered(sl)
+                                  for _n, sl in script_list):
+                return True
+        return False
+
     groups: list[dict] = []
     ambiguous: list[dict] = []
     roles: dict[str, str] = {}
 
     for key, members in by_key.items():
-        related = (not op_keys) or (key in op_keys)
+        related = (not op_keys) or (key in op_keys) or _post_work(members)
         if not related:
             for v in members:
                 roles[v.url] = "unrelated"
@@ -504,11 +585,11 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
             if v is ref:
                 kind, ckey, tag = "mirror", frozenset(), ""
             elif key.startswith("pack:"):
-                kind, ckey, tag = _classify_in_pack(v, ref, credit_words)
+                kind, ckey, tag = _classify_in_pack(v, ref, credit_words, title_words)
             else:
-                kind, ckey, tag = _classify(v, ref, credit_words)
+                kind, ckey, tag = _classify(v, ref, credit_words, title_words)
             if (kind == "variant" and v.failed and not ref.failed and "__dur__" not in ckey
-                    and not _paren_diff(v, ref, credit_words)):
+                    and not _paren_diff(v, ref, credit_words, title_words)):
                 # A dead link titled a little differently ("Stream-Vid: Work"
                 # beside the live "Work [Artist]") is a dead copy, not a lost
                 # version — only a bracketed tag or another length says so.

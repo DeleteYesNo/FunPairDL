@@ -250,7 +250,10 @@ async def _probe_uncached(
 
     # For yt-dlp sites, extract format info
     if provider == "ytdlp" or provider in {"rule34video", "rule34", "hanime1", "iwara", "bilibili"}:
-        return await _probe_ytdlp(url, session)
+        result = await _probe_ytdlp(url, session)
+        if provider == "iwara" and not result.get("success") and "login" in str(result.get("error", "")).lower():
+            result = await _iwara_gone_check(url, result)
+        return result
 
     if provider == "gofile":
         return await _probe_gofile(url, settings, session)
@@ -345,6 +348,27 @@ def _meta_fields(meta: dict) -> dict:
     if meta.get("width") and meta.get("height"):
         out["width"], out["height"] = int(meta["width"]), int(meta["height"])
     return out
+
+
+async def _iwara_gone_check(url: str, result: dict) -> dict:
+    """yt-dlp says "Video may need login" for an iwara video that no longer
+    exists, too. Iwara's API tells the two apart: 404 = deleted (the post's
+    video is gone), anything else = it really needs an account."""
+    import re as _re
+    m = _re.search(r"/video/([A-Za-z0-9]+)", url)
+    if not m:
+        return result
+    try:
+        from curl_cffi import requests as creq
+
+        def _get():
+            return creq.get(f"https://api.iwara.tv/video/{m.group(1)}", impersonate="chrome", timeout=20)
+        r = await asyncio.to_thread(_get)
+        if r.status_code == 404:
+            return {"success": False, "error": "Video not found (404) on iwara — deleted or made private"}
+    except Exception as e:  # noqa: BLE001 — keep yt-dlp's answer
+        logger.debug("iwara API check failed for %s: %s", url[:80], e)
+    return result
 
 
 async def _duration_from_formats(formats: list[dict], session: aiohttp.ClientSession) -> float | None:

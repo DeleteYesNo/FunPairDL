@@ -373,3 +373,53 @@ class TestRenders:
         # Without the frame sizes both "Garden Party.mp4" read as one video.
         res = plan_videos(self._with_frames(self._vids())[:2], Prefs(vr_versions="all"))
         assert res["roles"]["https://mega.nz/folder/x/file/vr"] != "alternate"
+
+
+class TestPostEvidence:
+    """The post's title, scripts and sequels as evidence."""
+
+    def test_a_sequel_of_one_length_is_not_a_copy(self):
+        res = plan_videos([
+            _v("https://iw/v/1", "花園のリズム【春香、夏美】", duration=78.0),
+            _v("https://iw/v/2", "花園のリズムpart2【秋子、冬子】", duration=78.0, source="comment"),
+        ], Prefs(), scripts=[{"name": "花園のリズム【春香、夏美】.funscript", "duration": 76.7}])
+        assert res["roles"]["https://iw/v/2"] != "alternate"
+
+    def test_whole_second_host_and_slug_digits_are_one_video(self):
+        res = plan_videos([
+            _v("https://mega.nz/file/a", "brain-blob-hmv-studio3_1080p.mp4", duration=189.0, size=100),
+            _v("https://tube/v/2", "BRAIN - Blob HMV | Studio", duration=189.963, size=900),
+        ], Prefs())
+        assert len([g for g in res["groups"] if g.get("chosen")]) == 1
+
+    def test_a_title_word_one_host_adds_is_no_variant(self):
+        res = plan_videos([
+            _v("https://pd/u/a", "[Studio] Garden Party Shinchoku - Night Shift.mp4", duration=197.248, size=100),
+            _v("https://tube/v/b", "Night Shift - Garden Party (Sound)", duration=197.248, size=900),
+        ], Prefs(), credits=["Studio"], title="[Studio] Garden Party Shinchoku - Night Shift (Suggested)")
+        assert len([g for g in res["groups"] if g.get("chosen")]) == 1
+
+    def test_a_reply_rescues_a_dead_op_link(self):
+        res = plan_videos([
+            _v("https://ph/view?key=ph123", failed=True),
+            _v("https://tube/v/9", "Garden Party Compilation With Sound - Tube Video", duration=1181.0, source="comment"),
+        ], Prefs(), title="Garden Party Compilation",
+            scripts=[{"name": "Garden Party Compilation With Sound.funscript", "duration": 1186.4}])
+        assert res["roles"]["https://tube/v/9"] == "chosen"
+
+    def test_a_reply_brings_the_video_of_an_unlinked_script(self):
+        res = plan_videos([
+            _v("https://up/a.mp4", "Night Shift Bunny.mp4", duration=272.0),
+            _v("https://tube/v/7", "【Night Shift】ダブル動画", duration=85.7, source="comment"),
+        ], Prefs(), scripts=[{"name": "Night Shift Bunny.funscript", "duration": 272},
+                             {"name": "Night Shift Hands.funscript", "duration": 85}])
+        assert res["roles"]["https://tube/v/7"] == "chosen"
+
+    def test_a_reply_of_the_op_videos_length_stays_a_comment(self):
+        # The OP's live video already covers the script: a reply's other
+        # copy is no second work.
+        res = plan_videos([
+            _v("https://up/a.mp4", "Work.mp4", duration=272.0),
+            _v("https://tube/v/7", "何か別の動画", duration=272.2, source="comment"),
+        ], Prefs(), scripts=[{"name": "Work.funscript", "duration": 272}])
+        assert res["roles"]["https://tube/v/7"] in ("unrelated", "alternate")

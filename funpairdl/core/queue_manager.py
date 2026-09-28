@@ -2100,6 +2100,10 @@ class QueueManager:
             s = _re.sub(r"(?<=[a-z])(?=\d)|(?<=\d)(?=[a-z])", " ", s)
             out = {t for t in _re.split(r"[^a-z0-9]+", s) if len(t) >= 3}
             out |= {t for t in _re.split(r"[^a-z0-9]+", s) if t.isdigit() and len(t) == 2}
+            # Kana/CJK runs are words too (a Japanese title): Japanese and
+            # Chinese titles used to share no token with anything.
+            out |= {t for t in _re.findall(
+                r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]+", s) if len(t) >= 2}
             return out
 
         def _acronym(name: str) -> set[str]:

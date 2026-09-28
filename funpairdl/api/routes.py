@@ -326,7 +326,8 @@ async def video_plan(req: VideoPlanRequest) -> dict:
                         pack=v.pack or "", width=int(v.width or 0))
               for v in req.videos if v.url]
     return await asyncio.to_thread(plan_videos, videos, prefs, dict(req.decisions or {}),
-                                   list(req.credits or []))
+                                   list(req.credits or []), req.title or "",
+                                   [dict(s) for s in (req.scripts or [])])
 
 
 @router.post("/library/lookup")

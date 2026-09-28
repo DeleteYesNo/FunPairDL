@@ -153,6 +153,9 @@ const NON_VIDEO_HOSTS = [
   // stores, extensions and comics linked beside the video, never the video
   "chromewebstore.google.com", "chrome.google.com", "addons.mozilla.org",
   "aliexpress.", "amazon.", "thehandy.com", "allporncomic.com",
+  // a player's demo clip linked beside the script (one was filed as a
+  // work's video)
+  "tandemplayer.com",
 ];
 
 // A heading that is literally a video filename ("Work_longer.mp4") — how a
@@ -520,10 +523,12 @@ function extractLinksFromElement(containerEl, isOP) {
             isBundle: isBundleUrl(href),
           });
         }
-      } else if (!SKIP_DOMAINS.some((d) => host.includes(d))) {
+      } else if (!SKIP_DOMAINS.some((d) => host.includes(d)) && !NON_VIDEO_HOSTS.some((d) => host.includes(d))) {
         // Unknown external link — detect if URL or link text suggests a video page
         const path = u.pathname.toLowerCase();
-        const hasVideoPath = /\/(video|watch|view_video|embed|play|clip|videos)/.test(path);
+        // …or IS a video file ("direct link" to host/…_720p.mp4 in a reply).
+        const hasVideoPath = /\/(video|watch|view_video|embed|play|clip|videos)/.test(path)
+          || /\.(mp4|m4v|mkv|webm|mov)$/.test(path);
         const linkText = (link.textContent || "").toLowerCase();
         const textHintsVideo = /video|watch|stream|movie|porn|hentai|anime/.test(linkText);
         if (hasVideoPath || textHintsVideo) {
@@ -538,6 +543,30 @@ function extractLinksFromElement(containerEl, isOP) {
       }
     } catch (e) {}
   });
+
+  // Video: a known host's URL written as plain text (not linked) — the
+  // cooked post keeps "https://www.iwara.tv/video/…" as text when the
+  // poster pasted it under a heading.
+  {
+    const walker = document.createTreeWalker(containerEl, NodeFilter.SHOW_TEXT);
+    let tn;
+    while ((tn = walker.nextNode())) {
+      if (tn.parentElement && tn.parentElement.closest("a, code, pre")) continue;
+      for (const m of (tn.nodeValue || "").matchAll(/https?:\/\/[^\s<>"'）)]+/g)) {
+        const url = m[0].replace(/[.,;:!?]+$/, "");
+        try {
+          const host = new URL(url).hostname.toLowerCase().replace("www.", "");
+          if (!VIDEO_DOMAINS.some((d) => host.includes(d)) || isNonVideoPath(url)) continue;
+          if (videos.some((v) => v.url === url)) continue;
+          videos.push({
+            url, priority: getVideoPriority(url, !isOP),
+            source: isOP ? "OP" : "comment", label: getVideoLabel(url),
+            isBundle: isBundleUrl(url),
+          });
+        } catch (e) {}
+      }
+    }
+  }
 
   // Video: URLs inside <code> tags (some posters wrap MEGA/GoFile links in code blocks)
   containerEl.querySelectorAll("code").forEach((codeEl) => {
@@ -3461,11 +3490,14 @@ async function _refreshVideoPlan(panel, parsed) {
     pack: v.pack || "",
   });
   const credits = _postCredits(parsed);
+  const planScripts = (parsed.mode === "collection"
+    ? [...(parsed.sections || []).flatMap((sec) => sec.scripts), ...(parsed.commentScripts || [])]
+    : (parsed.scripts || [])).map((s) => ({ name: s.filename || "", duration: s.probedDuration || 0 }));
   const decisions = panel._encodeDecisions || {};
   const specs = scopes.map((sc) => sc.map(({ v, src }) => spec(v, src)));
   const key = JSON.stringify([specs, prefs.video_pick_mode, prefs.min_resolution,
                               prefs.encode_vs_variant, decisions, !!panel._mergeInto,
-                              Object.keys(panel._sectionMerge || {}), credits]);
+                              Object.keys(panel._sectionMerge || {}), credits, planScripts]);
   if (panel._videoPlanKey === key) return;
   const seq = (panel._videoPlanSeq = (panel._videoPlanSeq || 0) + 1);
   const plans = [];
@@ -3475,6 +3507,10 @@ async function _refreshVideoPlan(panel, parsed) {
       plan = await _sendMsg("video-plan", {
         videos: specs[i], pick_mode: prefs.video_pick_mode, min_resolution: prefs.min_resolution,
         encode_vs_variant: prefs.encode_vs_variant, decisions, credits,
+        // The post's title and scripts name its works and give their
+        // lengths: a reply's link for a script no OP link covers is that
+        // work's video, not "unrelated".
+        title: parsed.title || "", scripts: planScripts,
       });
     } catch (e) { plan = null; }
     if (seq !== panel._videoPlanSeq) return;
