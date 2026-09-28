@@ -1227,3 +1227,12 @@ def test_a_scriptless_sequel_named_in_kana_joins_its_work():
         [a, b, s], None, "T", durations={a.url: 78.0, b.url: 78.0, s.url: 76.7})
     # One work either way: no split, or one group holding both videos.
     assert groups is None or (len(groups) == 1 and len(groups[0]["videos"]) == 2)
+
+
+def test_a_packs_cover_image_is_no_video(tmp_path):
+    qm = QueueManager(download_dir=tmp_path)
+    pair = qm.add_pair(name="Garden Party", video_urls=["https://mega.nz/f/v", "https://mega.nz/f/j"],
+                       script_urls=[], filenames={"https://mega.nz/f/v": "Garden Party.mp4",
+                                                  "https://mega.nz/f/j": "cover.jpg"})
+    kinds = {i.filename: i.file_type for i in pair.items}
+    assert kinds == {"Garden Party.mp4": FileType.VIDEO, "cover.jpg": FileType.OTHER}

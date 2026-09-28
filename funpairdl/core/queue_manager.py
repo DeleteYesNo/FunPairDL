@@ -385,10 +385,14 @@ class QueueManager:
                     # used directly as the on-disk path, so an unsanitized
                     # "..\\..\\x" would escape the download folder.
                     filename = sanitize_filename(provided) if provided else self._guess_filename(url, "video")
+                    # A pack's cover image or readme travels with the videos
+                    # but is no video: typed as one it became a "work" of its
+                    # own at the split.
+                    is_other = Path(filename).suffix.lower() in self._OTHER_EXTS
                     item = PairItem(
                         url=url,
                         filename=filename,
-                        file_type=FileType.VIDEO,
+                        file_type=FileType.OTHER if is_other else FileType.VIDEO,
                         provider_name=provider,
                         total_bytes=int(grp_sizes.get(url) or 0),
                         group=grp_name,
@@ -3004,6 +3008,9 @@ class QueueManager:
         return lib.sanitize_label(" ".join(uniq), fallback="") if uniq else rest
 
     _VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".wmv", ".ts", ".flv"}
+    # Files a pack carries beside its videos and scripts.
+    _OTHER_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".txt", ".nfo", ".md",
+                   ".pdf", ".zip", ".rar", ".7z", ".url", ".html"}
 
     # Trailing bracket groups made only of post qualifiers: "(Requested, HQ
     # Multi-Axis Script)", "[Multi-Axis]", "(Suggested)", "(Soft & Hardcore
