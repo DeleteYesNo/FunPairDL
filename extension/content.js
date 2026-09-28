@@ -473,6 +473,9 @@ function extractLinksFromElement(containerEl, isOP) {
   // Video: embedded <video> tags
   containerEl.querySelectorAll("video source[src]").forEach((source) => {
     const src = source.getAttribute("src");
+    let host = "";
+    try { host = new URL(src, location.href).hostname.toLowerCase(); } catch (e) {}
+    if (NON_VIDEO_HOSTS.some((d) => host.includes(d))) return;
     if (src && !src.startsWith("blob:")) {
       videos.push({
         url: src, priority: getVideoPriority(src, !isOP),

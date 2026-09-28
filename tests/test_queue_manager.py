@@ -1217,3 +1217,13 @@ class TestLibraryAlreadyHolds:
         pair = self._pair(tmp_path, "x", "x.mp4", (other / "Studio Date.mp4").stat().st_size)
         assert asyncio.run(qm._skip_library_copies(pair)) is False
         assert any(i.file_type == FileType.VIDEO for i in pair.items)
+
+
+def test_a_scriptless_sequel_named_in_kana_joins_its_work():
+    a = PairItem(url="https://pd/u/a", filename="花園のリズム【春香、夏美】.mp4", file_type=FileType.VIDEO)
+    b = PairItem(url="https://pd/u/b", filename="花園のリズムpart2【秋子、冬子】.mp4", file_type=FileType.VIDEO)
+    s = _vi("花園のリズム【春香、夏美】.funscript", FileType.FUNSCRIPT)
+    groups = QueueManager().plan_bundle_split(
+        [a, b, s], None, "T", durations={a.url: 78.0, b.url: 78.0, s.url: 76.7})
+    # One work either way: no split, or one group holding both videos.
+    assert groups is None or (len(groups) == 1 and len(groups[0]["videos"]) == 2)

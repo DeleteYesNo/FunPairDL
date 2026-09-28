@@ -2331,9 +2331,15 @@ class QueueManager:
                 if not dv:
                     continue
                 vt = _tokens(_identity(v))
+
+                def _alike(a: set[str], b: set[str]) -> bool:
+                    # Two shared words — or one long kana/CJK run, which
+                    # names a work as surely.
+                    shared = a & b
+                    return len(shared) >= 2 or any(len(t) >= 4 and not t.isascii() for t in shared)
                 hits = [sg for sg in scripted if any(
                     abs((durations.get(sv.url) or durations.get(sv.resolved_url or "") or -99) - dv) <= 1.0
-                    and len(vt & _tokens(_identity(sv))) >= 2
+                    and _alike(vt, _tokens(_identity(sv)))
                     for sv in sg["videos"])]
                 if len(hits) == 1:
                     hits[0]["videos"].append(v)

@@ -394,9 +394,9 @@ class TestPostEvidence:
 
     def test_a_title_word_one_host_adds_is_no_variant(self):
         res = plan_videos([
-            _v("https://pd/u/a", "[Studio] Garden Party Shinchoku - Night Shift.mp4", duration=197.248, size=100),
+            _v("https://pd/u/a", "[Studio] Garden Party Progress - Night Shift.mp4", duration=197.248, size=100),
             _v("https://tube/v/b", "Night Shift - Garden Party (Sound)", duration=197.248, size=900),
-        ], Prefs(), credits=["Studio"], title="[Studio] Garden Party Shinchoku - Night Shift (Suggested)")
+        ], Prefs(), credits=["Studio"], title="[Studio] Garden Party Progress - Night Shift (Suggested)")
         assert len([g for g in res["groups"] if g.get("chosen")]) == 1
 
     def test_a_reply_rescues_a_dead_op_link(self):
@@ -423,3 +423,30 @@ class TestPostEvidence:
             _v("https://tube/v/7", "何か別の動画", duration=272.2, source="comment"),
         ], Prefs(), scripts=[{"name": "Work.funscript", "duration": 272}])
         assert res["roles"]["https://tube/v/7"] in ("unrelated", "alternate")
+
+    def test_a_folder_file_and_a_host_copy_of_the_scripts_length_are_one_video(self):
+        folder_file = _p("https://mega.nz/folder/x/file/v", "花園h.mp4", size=80)
+        folder_file.duration = 116.0          # MEGA records whole seconds
+        res = plan_videos([
+            folder_file,
+            _v("https://iw/v/1", "Garden 花園", duration=118.0),   # the host rounds up
+        ], Prefs(), title="(multi-axis) Garden 花園",
+            scripts=[{"name": "花園h.funscript", "duration": 116.6}])
+        res_v = [g for g in res["groups"] if g.get("chosen")]
+        assert len(res_v) == 1
+
+    def test_two_copies_a_reply_brings_are_one_video(self):
+        res = plan_videos([
+            _v("https://ng/portal/view/1", failed=True),
+            _v("https://pd/u/r", "Garden Night.mp4", duration=59.78, height=1920, source="comment"),
+            _v("https://up/alternate/719_alternate_334.720p.mp4", duration=59.71, height=720, source="comment"),
+        ], Prefs(), title="Garden Night - Artist",
+            scripts=[{"name": "Garden night.funscript", "duration": 59.94}])
+        assert [u for u, r in res["roles"].items() if r == "chosen"] == ["https://pd/u/r"]
+
+    def test_a_reply_sequel_of_the_op_work_is_downloaded(self):
+        res = plan_videos([
+            _v("https://iw/v/1", "花園のリズム【春香】", duration=78.0),
+            _v("https://iw/v/2", "花園のリズムpart2【秋子】", duration=78.0, source="comment"),
+        ], Prefs(), scripts=[{"name": "花園のリズム【春香】.funscript", "duration": 76.7}])
+        assert res["roles"]["https://iw/v/2"] in ("chosen", "variant")

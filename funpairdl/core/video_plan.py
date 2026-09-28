@@ -41,7 +41,7 @@ _ENCODE_TOKEN_RE = re.compile(
 # Version-ish words: they tell two files apart but not HOW they differ.
 _OPAQUE_TOKEN_RE = re.compile(
     r"^(?:\d{1,2}|v\d+|ver\d*|version\d*|final|fix(?:ed)?|new|old|updated?|upd|alt|"
-    r"copy|edit(?:ed)?|re-?up(?:load)?|mirror|link|video|file|download|dl)$",
+    r"copy|edit(?:ed)?|re-?up(?:load)?|mirror|alternate|alternative|link|video|file|download|dl)$",
     re.IGNORECASE,
 )
 # Random ids (a pixeldrain/iwara token in brackets) say nothing either way.
@@ -269,6 +269,13 @@ def _one_sided(a_only: set[str], b_only: set[str], title_words: frozenset[str]) 
     either when the post's title has it ("(Winterfall)", "Progress") — the
     host copied the title. Words both sides add (Aria / Seed) stay."""
     a_only, b_only = set(a_only), set(b_only)
+    # A lone letter glued to a name ("<name>h") is noise unless the other
+    # side answers with one ("Work A" / "Work B").
+    one_a = {t for t in a_only if len(t) == 1 and t.isascii() and t.isalpha()}
+    one_b = {t for t in b_only if len(t) == 1 and t.isascii() and t.isalpha()}
+    if not one_a or not one_b:
+        a_only -= one_a
+        b_only -= one_b
     for t in list(a_only):
         for u in list(b_only):
             if t != u and (t.rstrip("0123456789") == u or u.rstrip("0123456789") == t):
@@ -522,6 +529,38 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
                 by_len.pop(drop, None)
 
     # A post of comment links only: each of them names a work.
+    # One script length and several links of it — the post's own links
+    # under unrelated names ("<name>h.mp4" in a folder, "Lynae" on a
+    # host that rounds the length), or a reply's two copies — are one
+    # video's links; the names still decide mirror or variant below.
+    # Pack files stay apart (a folder's files are its works), and so do
+    # sequels and renders.
+    s_lens = [float(s.get("duration") or 0) for s in (scripts or []) if float(s.get("duration") or 0) > 0]
+    if s_lens:
+        rep: dict[str, VideoSpec] = {}
+        for v in videos:
+            if v.duration and not v.failed and v.key not in rep:
+                rep[v.key] = v
+        for sl in sorted(set(round(x, 1) for x in s_lens)):
+            ks = [k for k, v in rep.items() if not _duration_differs(v.duration, sl)]
+            packs = [k for k in ks if k.startswith("pack:")]
+            if len(packs) > 1:
+                continue  # a folder's files are its works
+            target = packs[0] if packs else next((k for k in ks if any(
+                v.key == k and v.source == "OP" for v in videos)), ks[0] if ks else None)
+            if target is None:
+                continue
+            for k in ks:
+                if k == target:
+                    continue
+                if (_sequel_marks(rep[k].tokens) != _sequel_marks(rep[target].tokens)
+                        or (rep[k].fmt and rep[target].fmt and rep[k].fmt != rep[target].fmt)):
+                    continue
+                for v in videos:
+                    if v.key == k:
+                        v.key = target
+                rep.pop(k, None)
+
     op_keys = [v.key for v in videos if v.source == "OP"] or [v.key for v in videos]
     by_key: dict[str, list[VideoSpec]] = {}
     for v in videos:
@@ -548,6 +587,10 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
     def _post_work(members: list[VideoSpec]) -> bool:
         for m in (m for m in members if not m.failed):
             c = _core_tokens(m.stem)
+            # "<OP work> part2" by a reply: the next part, played with the
+            # post's script — a variant of the work, not someone else's.
+            if any(k and len(k) + len(c - k) >= 2 and k <= c and _sequel_marks(c - k) for k in op_cores):
+                return True
             if not live_op and len(c) >= 2 and any(w <= c or c <= w for w in work_cores):
                 return True
             if m.duration and any(sl and not _duration_differs(m.duration, sl) and _uncovered(sl)
