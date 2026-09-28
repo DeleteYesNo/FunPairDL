@@ -450,3 +450,21 @@ class TestPostEvidence:
             _v("https://iw/v/2", "花園のリズムpart2【秋子】", duration=78.0, source="comment"),
         ], Prefs(), scripts=[{"name": "花園のリズム【春香】.funscript", "duration": 76.7}])
         assert res["roles"]["https://iw/v/2"] in ("chosen", "variant")
+
+    def test_a_folder_file_named_in_kana_takes_its_host_copy_and_not_the_sequels(self):
+        res = plan_videos([
+            _p("https://pd/u/p1", "花園のリズム【春香】.mp4", pack="https://pd/l/one"),
+            _v("https://iw/v/1", "花園のリズム【春香】", duration=78.0),
+            _p("https://pd/u/p2", "花園のリズムpart2【秋子】.mp4", pack="https://pd/l/two", source="comment"),
+            _v("https://iw/v/2", "花園のリズムpart2【秋子】", duration=78.0, source="comment"),
+        ], Prefs(), scripts=[{"name": "花園のリズム【春香】.funscript", "duration": 76.7}])
+        assert _group_of(res, "https://iw/v/1") is _group_of(res, "https://pd/u/p1")
+        assert _group_of(res, "https://iw/v/2") is _group_of(res, "https://pd/u/p2")
+        assert _group_of(res, "https://pd/u/p1") is not _group_of(res, "https://pd/u/p2")
+
+    def test_a_numbered_slug_copy_of_a_reply_is_a_mirror(self):
+        res = plan_videos([
+            _v("https://pd/u/r", "Garden Night.mp4", duration=59.78, source="comment"),
+            _v("https://up/alternate/7194008_alternate_334950.720p.mp4", duration=59.71, source="comment"),
+        ], Prefs(), title="Garden Night", scripts=[{"name": "Garden night.funscript", "duration": 59.9}])
+        assert len([g for g in res["groups"] if g.get("chosen")]) == 1

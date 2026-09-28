@@ -51,6 +51,8 @@ _ID_TOKEN_RE = re.compile(r"^(?=.*\d)[a-z0-9_-]{8,}$", re.IGNORECASE)
 def _is_id(t: str) -> bool:
     """A random id ("gu6L8LWb", "a1b2c3d4"), not a word with a digit in it
     ("FortyTwo3D", "Studio2025"): ids are unpronounceable or digit-riddled."""
+    if t.isdigit() and len(t) >= 5:
+        return True  # a post / file number ("7194008_alternate_334950")
     if not _ID_TOKEN_RE.match(t):
         return False
     letters = re.sub(r"[^a-z]", "", t.lower())
@@ -231,8 +233,14 @@ def _pack_anchor(v: "VideoSpec", anchors: list["VideoSpec"], cores: dict) -> "Vi
     best: list[tuple[float, VideoSpec]] = []
     for a in anchors:
         ac, acr = cores[a.url], _creators(a.stem)
-        if not ac or not vc or not (ac <= vc or vc <= ac) or len(ac & vc) < 2:
+        shared = ac & vc
+        # Two shared words — or one long kana/CJK run, which names a work
+        # as surely ("<Japanese title>.mp4" beside its iwara page).
+        if (not ac or not vc or not (ac <= vc or vc <= ac)
+                or (len(shared) < 2 and not any(len(t) >= 4 and not t.isascii() for t in shared))):
             continue
+        if _sequel_marks(a.tokens) != _sequel_marks(v.tokens):
+            continue  # part 1's page is no copy of the part2 file
         if acr and vcr and not (acr & vcr):
             continue  # "[AB12] Heroine Nova" is not "[FortyTwo3D] Heroine Nova"
         # The link names the anchor's creator (or the anchor, a slug with
@@ -302,7 +310,7 @@ def _classify(spec: VideoSpec, ref: VideoSpec,
     if _duration_differs(spec.duration, ref.duration):
         tag = QueueManager._variant_tag(spec.stem + ".mp4", ref.stem + ".mp4") or f"{int(round(spec.duration))}s"
         return "variant", frozenset({"__dur__", str(int(round(spec.duration)))}), tag
-    if (spec.duration >= 60 and ref.duration >= 60 and abs(spec.duration - ref.duration) <= 0.5):
+    if (spec.duration >= 20 and ref.duration >= 20 and abs(spec.duration - ref.duration) <= 0.5):
         a, b = _core_tokens(spec.stem), _core_tokens(ref.stem)
         if a | b and len(a & b) / len(a | b) < 0.34:
             # One exact length under two unrelated host titles ("Booru - If
