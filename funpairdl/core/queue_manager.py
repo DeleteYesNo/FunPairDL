@@ -2163,7 +2163,7 @@ class QueueManager:
             if best_score < 0.5:
                 return None
             if best_score == second_score:
-                # A dead heat ("Mikasa" shared by "Mikasa Full" and "Mikasa
+                # A dead heat ("Hana" shared by "Hana Full" and "Hana
                 # Loop"): the one of the script's length, when just one is.
                 ds = durations.get(s_url_for_tokens[0]) if s_url_for_tokens else None
                 tied = [v for v, vtoks in video_tokens

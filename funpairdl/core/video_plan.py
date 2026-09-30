@@ -849,8 +849,8 @@ def _mark_crowded_and_strays(videos: list[VideoSpec], scripts: list[dict], title
     Crowded: a length several scripts share under different names (a
     post of four characters rendered from one animation, a script each).
     Videos of that length are one character each — never copies of one
-    another by length — and one no script names ("Eren Jaeger (Attack…"
-    beside Mikasa/Pieck scripts) is a stray.
+    another by length — and one no script names ("Guardsman (Series…"
+    beside Hana/Mira scripts) is a stray.
 
     Stray also: a file of a folder holding several videos that matches
     nothing of the post — not its title's or scripts' words, not a
