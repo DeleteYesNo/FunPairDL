@@ -1248,3 +1248,15 @@ def test_a_token_dead_heat_goes_to_the_video_of_the_scripts_length():
         durations={full.url: 63.2, loop.url: 31.0, other.url: 63.2, s.url: 63.2})
     g = next(g for g in groups if g["scripts"])
     assert g["videos"][0] is full
+
+
+def test_guessed_pairings_of_one_length_are_one_work():
+    a = PairItem(url="https://pd/u/a", filename="Lumi Taming 4K60FPS.mp4", file_type=FileType.VIDEO)
+    b = PairItem(url="https://tube/v/b", filename="[Studio] Garden Lumi POV 1080p.mp4", file_type=FileType.VIDEO)
+    s1 = _vi("LumiRide (Hardcore).funscript", FileType.FUNSCRIPT)
+    s2 = _vi("LumiRide (Normal).funscript", FileType.FUNSCRIPT)
+    groups = QueueManager().plan_bundle_split(
+        [a, b, s1, s2], None, "Studio - Lumi Ride",
+        durations={a.url: 40.0, b.url: 40.0, s1.url: 40.04, s2.url: 40.04})
+    assert groups is not None and len(groups) == 1
+    assert len(groups[0]["videos"]) == 2 and len(groups[0]["scripts"]) == 2

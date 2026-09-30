@@ -2344,6 +2344,24 @@ class QueueManager:
                 "script_basis": {s.url: basis.get(id(s), "") for s in g_scripts},
             })
 
+        # Every pairing a guess (order), and every video and script one
+        # length: one work — renders of it, and takes of its script
+        # ("Normal" / "Hardcore") — not a work per video dealt a script each.
+        if durations and len(groups) >= 2 and all(
+                b in ("order", "none", "") for g in groups for b in g["script_basis"].values()):
+            vl = [durations.get(v.url) or durations.get(v.resolved_url or "") for g in groups for v in g["videos"]]
+            sl = [durations.get(s.url) for g in groups for s in g["scripts"]]
+            if vl and all(vl) and sl and all(sl) and max(vl) - min(vl) <= 1.0 and all(
+                    abs(x - vl[0]) <= max(3.0, 0.02 * vl[0]) for x in sl):
+                first = groups[0]
+                for g in groups[1:]:
+                    first["videos"].extend(g["videos"])
+                    first["scripts"].extend(g["scripts"])
+                    first["script_basis"].update(g["script_basis"])
+                groups = [first]
+                if pair_name:
+                    first["name"] = sanitize_filename(self._clean_title(pair_name)) or first["name"]
+
         # A script-less video of exactly a scripted video's length and named
         # alike is that work's variant — the same animation with another
         # character ("Pip (alt)" beside "Lumi"), played with its scripts —
