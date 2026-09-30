@@ -14,6 +14,7 @@ from funpairdl.providers.socigames import SociGamesProvider
 from funpairdl.providers.e621 import E621Provider
 from funpairdl.providers.fanbox import FanboxProvider
 from funpairdl.providers.faptap import FaptapProvider
+from funpairdl.providers.filester import FilesterProvider
 from funpairdl.providers.mediafire import MediafireProvider
 from funpairdl.providers.pmvhaven import PmvHavenProvider
 from funpairdl.providers.vikingfile import VikingFileProvider
@@ -48,6 +49,7 @@ class ProviderRegistry:
             FanboxProvider(),
             PmvHavenProvider(),
             FaptapProvider(),
+            FilesterProvider(),
             MediafireProvider(),
             VikingFileProvider(),
             WatchHentaiProvider(),

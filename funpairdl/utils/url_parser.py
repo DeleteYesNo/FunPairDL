@@ -26,6 +26,8 @@ def detect_provider(url: str) -> str:
         "fanbox.cc": "fanbox",
         "pmvhaven.com": "pmvhaven",
         "faptap.net": "faptap",
+        "filester.gg": "filester",
+        "filester.me": "filester",
         "mediafire.com": "mediafire",
         "vik1ngfile.site": "vikingfile",
         "vikingfile.com": "vikingfile",
@@ -85,6 +87,7 @@ _PROVIDER_LABELS = {
     "fanbox": "pixivFANBOX",
     "pmvhaven": "PMVHaven",
     "faptap": "Faptap",
+    "filester": "filester",
     "mediafire": "MediaFire",
     "vikingfile": "ViKiNG FiLE",
 }

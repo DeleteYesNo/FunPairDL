@@ -240,3 +240,12 @@ def test_duration_from_formats_needs_a_direct_file():
     from funpairdl.providers.probe import _duration_from_formats
     fmts = [{"url": "https://cdn.example/v/index.m3u8", "protocol": "m3u8_native"}]
     assert asyncio.run(_duration_from_formats(fmts, None)) is None
+
+
+def test_filester_urls():
+    from funpairdl.providers.filester import FilesterProvider, file_slug, media_url
+    assert file_slug("https://filester.gg/d/AbC12x9") == "AbC12x9"
+    assert FilesterProvider.can_handle("https://filester.me/d/AbC12x9")
+    assert not FilesterProvider.can_handle("https://filester.gg/faq")
+    assert media_url({"server": "https://cdn.example", "file": "f.mp4", "token": "t1"}) == \
+        "https://cdn.example/v2/f.mp4?token=t1&download=true"

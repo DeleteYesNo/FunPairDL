@@ -55,6 +55,9 @@ const VIDEO_PRIORITY = {
   "fanbox.cc": 7,
   "pmvhaven.com": 7,
   "faptap.net": 7,
+  // Anonymous file host (token API; plain ranged file)
+  "filester.gg": 3,
+  "filester.me": 3,
   // File host: single files and folders (a folder is a pack)
   "mediafire.com": 3,
   // File host whose link the page builds (read in the embedded browser)
@@ -156,6 +159,8 @@ const NON_VIDEO_HOSTS = [
   // a player's demo clip linked beside the script (one was filed as a
   // work's video)
   "tandemplayer.com",
+  // an ad network's "AI sex toys" clip placed beside the video link
+  "syncbot.com",
 ];
 
 // A heading that is literally a video filename ("Work_longer.mp4") — how a
@@ -291,6 +296,7 @@ function getVideoLabel(url) {
     if (host.includes("fanbox.cc")) return "pixivFANBOX";
     if (host.includes("pmvhaven")) return "PMVHaven";
     if (host.includes("faptap")) return "Faptap";
+    if (host.includes("filester")) return "filester";
     if (host.includes("mediafire")) return "MediaFire";
     if (host.includes("vik1ngfile") || host.includes("vikingfile")) return "ViKiNG FiLE";
     if (host.includes("pornhub")) return "PornHub";
@@ -577,7 +583,7 @@ function extractLinksFromElement(containerEl, isOP) {
     if (!text.startsWith("http")) return;
     try {
       const host = new URL(text).hostname.toLowerCase().replace("www.", "");
-      if (VIDEO_DOMAINS.some((d) => host.includes(d))) {
+      if (VIDEO_DOMAINS.some((d) => host.includes(d)) && !isNonVideoPath(text)) {
         if (!videos.some((v) => v.url === text)) {
           videos.push({
             url: text, priority: getVideoPriority(text, !isOP),
@@ -3611,8 +3617,89 @@ function _applyVideoPlan(panel, parsed, plans) {
     }
   }
   panel._videoPlan = merged;
+  if (parsed.mode !== "collection") {
+    _pullRescuesIntoMain(panel, parsed, plans, merged.roles);
+    _untickOtherWorksScripts(panel, merged.roles);
+  }
   _dedupePackScripts(panel, parsed);
   panel.dispatchEvent(new CustomEvent("fpdl-plan-applied"));
+}
+
+// A reply's link the plan made the post's video (the OP's died, or a
+// script's video was never linked) joins Main, with a reply's script of its
+// length: Main is what the pairing preview reads and what pairs at send —
+// left in its comment group it was paired with nothing and set aside.
+function _pullRescuesIntoMain(panel, parsed, plans, roles) {
+  const gs = parsed.groupState;
+  if (!gs || !gs.itemGroup) return;
+  const moved = [];
+  for (const { rows } of plans) {
+    for (const r of rows) {
+      const role = roles[r.v.url];
+      if (role !== "chosen" && role !== "variant") continue;
+      if (r.src !== "comment" || r.row.dataset.touched) continue;
+      if ((gs.itemGroup[r.key] || "Main") === "Main") continue;
+      if (!moved.some((m) => m.row === r.row)) moved.push({ row: r.row, dur: r.v.probedDuration || 0 });
+    }
+  }
+  for (const m of moved) {
+    _moveItemToGroup(panel, parsed, m.row, "Main");
+    if (!m.dur) continue;
+    (parsed.scripts || []).forEach((s, i) => {
+      const key = `script-${i}`;
+      const g = gs.itemGroup[key] || "Main";
+      const d = Number(s.probedDuration) || 0;
+      if (g === "Main" || !d || Math.abs(d - m.dur) > Math.max(3, 0.02 * d)) return;
+      // Only a group without a video of its own: that group's script
+      // plays the rescued video.
+      const groupHasVideo = (parsed.videos || []).some((v, k) => gs.itemGroup[`video-${k}`] === g);
+      if (groupHasVideo) return;
+      const row = panel.querySelector(`.funpairdl-item[data-key="${key}"]`);
+      if (row && !row.dataset.touched) _moveItemToGroup(panel, parsed, row, "Main");
+    });
+  }
+}
+
+// Pure: a pack script's work name, for matching it with a pack video:
+// the name without ".funscript", its axis and its "(Hardcore)" tags, in
+// lowercase letters and digits only.
+function _packWorkKey(name) {
+  let s = String(name || "").replace(/\.funscript$/i, "");
+  s = s.replace(/\.(pitch|roll|twist|surge|sway|suck|suckmanual|valve|l[0-9]|r[0-9]|v[0-9]|a[0-9])$/i, "");
+  s = s.replace(/[\(\[（【][^\)\]）】]*[\)\]）】]/g, " ");
+  return s.toLowerCase().replace(/[^a-z0-9\u3040-\u30ff\u3400-\u9fff]+/g, "");
+}
+
+// A creator's archive linked from one work's post: the scripts that go
+// with the archive's OTHER works (their videos the plan left out) stay
+// home too.
+function _untickOtherWorksScripts(panel, roles) {
+  const byPack = new Map();
+  panel.querySelectorAll(".funpairdl-bundle-cb").forEach((cb) => {
+    const k = cb.dataset.probeKey;
+    if (!byPack.has(k)) byPack.set(k, []);
+    byPack.get(k).push(cb);
+  });
+  for (const cbs of byPack.values()) {
+    const vids = cbs.filter((cb) => _isVideoFileName(cb.dataset.fileName || ""));
+    if (vids.length < 2) continue;
+    const stems = vids.map((cb) => ({
+      key: _packWorkKey((cb.dataset.fileName || "").replace(/\.[a-z0-9]{2,4}$/i, "")),
+      out: roles[cb.dataset.fileUrl] === "unrelated",
+    }));
+    for (const cb of cbs) {
+      if (!/\.funscript$/i.test(cb.dataset.fileName || "")) continue;
+      const k = _packWorkKey(cb.dataset.fileName);
+      if (k.length < 4) continue;
+      const hits = stems.filter((v) => v.key && (v.key.includes(k) || k.includes(v.key)));
+      if (!hits.length || !hits.every((v) => v.out)) continue;
+      const fileRow = cb.closest(".funpairdl-bundle-file");
+      if (fileRow && fileRow.dataset.touched) continue;
+      _setChecked(panel, cb, false);
+      if (fileRow) fileRow.title = `${cb.dataset.fileName || ""}
+合集裡另一部作品的腳本，不屬於這帖`;
+    }
+  }
 }
 
 // The parsed script behind a row key ("script-3", "ss-1-0", "cs-2").

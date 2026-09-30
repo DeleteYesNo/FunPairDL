@@ -289,6 +289,8 @@ async def _probe_uncached(
 
     if provider == "faptap":
         return await _probe_faptap(url, session)
+    if provider == "filester":
+        return await _probe_filester(url, session)
 
     if provider == "mediafire":
         return await _probe_mediafire(url, session)
@@ -372,11 +374,16 @@ async def _iwara_gone_check(url: str, result: dict) -> dict:
 
 
 async def _duration_from_formats(formats: list[dict], session: aiohttp.ClientSession) -> float | None:
-    """yt-dlp named no length (rule34video, a generic page's player): read
-    it from the video file's own header — a few small ranged GETs. The
-    length is what tells a trailer from the full video and pairs a
-    script with its cut."""
-    from funpairdl.utils.media_duration import probe_media_duration
+    return (await _meta_from_formats(formats, session)).get("duration")
+
+
+async def _meta_from_formats(formats: list[dict], session: aiohttp.ClientSession) -> dict:
+    """yt-dlp named no length or frame (rule34video, a generic page's
+    player): read them from the video file's own header — a few small
+    ranged GETs. The length tells a trailer from the full video and pairs a
+    script with its cut; the frame tells a portrait 1080p copy from a
+    landscape render of the same length."""
+    from funpairdl.utils.media_duration import probe_media_meta
     direct = [f for f in formats
               if str(f.get("url") or "").startswith("http")
               and str(f.get("protocol") or "https") in ("http", "https")
@@ -386,18 +393,18 @@ async def _duration_from_formats(formats: list[dict], session: aiohttp.ClientSes
     for f in direct[:2]:
         headers = dict(f.get("http_headers") or {})
         try:
-            d = await asyncio.wait_for(probe_media_duration(f["url"], session, headers=headers), 25)
-            if d:
-                return d
+            m = await asyncio.wait_for(probe_media_meta(f["url"], session, headers=headers), 25)
+            if m.get("duration"):
+                return m
             # A CDN with a lapsed certificate (seen on video hosts) still
             # serves the bytes: the length is read without verifying it.
             async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as s2:
-                d = await asyncio.wait_for(probe_media_duration(f["url"], s2, headers=headers), 25)
-            if d:
-                return d
+                m = await asyncio.wait_for(probe_media_meta(f["url"], s2, headers=headers), 25)
+            if m.get("duration"):
+                return m
         except Exception as e:  # noqa: BLE001 — a missing length is no probe failure
             logger.debug("duration from formats failed: %s", e)
-    return None
+    return {}
 
 
 async def _probe_ytdlp(url: str, session: aiohttp.ClientSession) -> dict:
@@ -507,11 +514,17 @@ async def _probe_ytdlp(url: str, session: aiohttp.ClientSession) -> dict:
             a.pop("_url", None)
 
         duration = info.get("duration") or None
-        if not duration:
-            duration = await _duration_from_formats(candidates, session)
-        # The largest format's frame: 2:1 is a VR render, 16:9 a 2D one.
         sized = [f for f in formats if f.get("width") and f.get("height")]
-        top = max(sized, key=lambda f: f["width"] * f["height"]) if sized else {}
+        file_meta = {}
+        if not duration or not sized:
+            # The file's own header: its length, and its frame when the
+            # formats name none.
+            file_meta = await _meta_from_formats(candidates, session)
+            duration = duration or file_meta.get("duration")
+        # The largest format's frame: 2:1 is a VR render, 16:9 a 2D one.
+        top = max(sized, key=lambda f: f["width"] * f["height"]) if sized else (
+            {"width": file_meta["width"], "height": file_meta["height"]}
+            if file_meta.get("width") and file_meta.get("height") else {})
 
         return {
             "success": True,
@@ -870,6 +883,25 @@ async def _probe_pmvhaven(url: str, session: aiohttp.ClientSession) -> dict:
         }
     except Exception as e:
         logger.info("PMVHaven probe failed for %s: %s", url[:80], e)
+        return {"success": False, "error": str(e)}
+
+
+async def _probe_filester(url: str, session: aiohttp.ClientSession) -> dict:
+    """filester: the API's token names the file; size, length and frame
+    from ranged reads of it."""
+    try:
+        from funpairdl.providers.filester import fetch_token, media_url, ranged_size
+        from funpairdl.utils.media_duration import looks_like_video, probe_media_meta
+        data = await fetch_token(url, session)
+        direct = media_url(data)
+        name = data.get("name") or ""
+        result = {"success": True, "provider": "filester", "filename": name,
+                  "size": await ranged_size(direct, session)}
+        if looks_like_video(name):
+            result.update(_meta_fields(await probe_media_meta(direct, session, {}, name)))
+        return result
+    except Exception as e:  # noqa: BLE001
+        logger.info("filester probe failed for %s: %s", url[:80], e)
         return {"success": False, "error": str(e)}
 
 

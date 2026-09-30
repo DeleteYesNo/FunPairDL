@@ -32,7 +32,7 @@ from pathlib import Path
 # Words that describe an encode, not the content. Two names that differ
 # only in these are the same video twice.
 _ENCODE_TOKEN_RE = re.compile(
-    r"^(?:\d{3,4}p|[248]k|uhd|fhd|qhd|hd|sd|h\.?26[45]|x26[45]|hevc|avc|av1|vp9|"
+    r"^(?:\d{3,4}p|[248]k|[248]k\d{2}(?:fps)?|\d{3,4}p\d{2}|uhd|fhd|qhd|hd|sd|h\.?26[45]|x26[45]|hevc|avc|av1|vp9|"
     r"small(?:er)?|(?:un)?compressed|comp|re-?encoded?|reenc|lite|low|mini|tiny|web|rf\d{1,2}|"
     r"\d+(?:\.\d+)?[mg]b|\d{2,3}fps|hq|lq|mq|high|medium|med|original|orig|source|src|"
     r"bitrate|crf\d*|q\d{1,2}|\d{3,4}x\d{3,4}|mp4|mkv|webm|mov|sound|with[-_]?sound)$",
@@ -85,6 +85,8 @@ class VideoSpec:
     pack: str = ""               # the folder/list link this file came in ("" = a plain link)
     width: int = 0               # frame size when a probe read it (0 = unknown)
     fmt: str = ""                # filled in: "flat" | "vr" | "passthrough" | "" (unknown)
+    crowded: bool = False        # filled in: its length is shared by several scripts' works
+    stray: bool = False          # filled in: matches none of the post's works (another work)
     key: str = ""                # filled in: mirror key
     stem: str = ""               # filled in: comparison stem
     tokens: set[str] = field(default_factory=set)
@@ -310,8 +312,13 @@ def _classify(spec: VideoSpec, ref: VideoSpec,
     if _duration_differs(spec.duration, ref.duration):
         tag = QueueManager._variant_tag(spec.stem + ".mp4", ref.stem + ".mp4") or f"{int(round(spec.duration))}s"
         return "variant", frozenset({"__dur__", str(int(round(spec.duration)))}), tag
-    if (spec.duration >= 20 and ref.duration >= 20 and abs(spec.duration - ref.duration) <= 0.5):
-        a, b = _core_tokens(spec.stem), _core_tokens(ref.stem)
+    if (spec.duration >= 20 and ref.duration >= 20 and abs(spec.duration - ref.duration) <= 0.5
+            and not (spec.crowded or ref.crowded)
+            and _sequel_marks(spec.tokens) == _sequel_marks(ref.tokens)):
+        # All the names' words, bracketed ones too: a slug keeps a
+        # "[Studio] … (Full)" name's words unbracketed.
+        word = lambda t: not (_ENCODE_TOKEN_RE.match(t) or _OPAQUE_TOKEN_RE.match(t) or _is_id(t))  # noqa: E731
+        a, b = {t for t in spec.tokens if word(t)}, {t for t in ref.tokens if word(t)}
         if a | b and len(a & b) / len(a | b) < 0.34:
             # One exact length under two unrelated host titles ("Booru - If
             # it exists…" / "Clip (Sound) Booru Video #…"): one video.
@@ -378,11 +385,22 @@ def _qualifies(spec: VideoSpec, floor: str, top_height: int) -> bool:
     return not h or h >= need
 
 
-def _order(cands: list[VideoSpec], prefs: Prefs, pending: set[str] | None = None) -> list[VideoSpec]:
+def _order(cands: list[VideoSpec], prefs: Prefs, pending: set[str] | None = None,
+           script_lens: tuple[float, ...] = ()) -> list[VideoSpec]:
     """Best pick first. A dead link (failed probe) is never the pick while a
     live one exists; an unanswered ambiguity (`pending`) is never the pick —
-    it rides last as a fallback until the user says what it is."""
+    it rides last as a fallback until the user says what it is. A copy of
+    the script's exact length goes before one a few seconds off (a trimmed
+    re-upload plays the script out of sync)."""
     pending = pending or set()
+
+    def fits(s: VideoSpec) -> bool:
+        return any(abs(s.duration - sl) <= 1.0 for sl in script_lens)
+    sync = {id(s): 0 for s in cands}
+    if any(s.duration and fits(s) for s in cands):
+        for s in cands:
+            if s.duration and not fits(s):
+                sync[id(s)] = 1
     heights = [s.height or _height_from_name(s.stem) for s in cands]
     top = max(heights) if heights else 0
 
@@ -391,12 +409,12 @@ def _order(cands: list[VideoSpec], prefs: Prefs, pending: set[str] | None = None
 
     if prefs.pick_mode == "best_quality":
         def k(s: VideoSpec):
-            return (1 if s.failed else 0, 1 if s.url in pending else 0,
+            return (1 if s.failed else 0, 1 if s.url in pending else 0, sync[id(s)],
                     0 if _qualifies(s, prefs.min_resolution, top) else 1,
                     -h_of(s), -(s.size or 0), 0 if s.source == "OP" else 1, s.priority)
     else:
         def k(s: VideoSpec):
-            return (1 if s.failed else 0, 1 if s.url in pending else 0,
+            return (1 if s.failed else 0, 1 if s.url in pending else 0, sync[id(s)],
                     0 if _qualifies(s, prefs.min_resolution, top) else 1,
                     0 if s.size else 1, s.size or 0, 0 if s.source == "OP" else 1, s.priority)
     return sorted(cands, key=k)
@@ -514,6 +532,9 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
     for v in videos:
         if v.duration and v.duration >= 60 and not v.failed:
             by_len.setdefault(v.key, v.duration)
+    _mark_crowded_and_strays(videos, scripts or [], title)
+    for k in [k for k in by_len if any(v.key == k and v.crowded for v in videos)]:
+        by_len.pop(k)  # renders of several characters share one length
     marks = {}
     for v in videos:
         if v.key in by_len and v.key not in marks:
@@ -526,7 +547,7 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
     for k1 in list(by_len):
         for k2 in list(by_len):
             if k1 < k2 and k1 in by_len and k2 in by_len and _same_len(by_len[k1], by_len[k2]):
-                if k1.startswith("pack:") and k2.startswith("pack:"):
+                if k1.startswith("pack:") and k2.startswith("pack:") and not _same_pack_twins(k1, k2):
                     continue  # two files in packs are two videos
                 if marks.get(k1, set()) != marks.get(k2, set()):
                     continue  # "part2" is the sequel, not a copy (a series keeps one length)
@@ -547,13 +568,24 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
     if s_lens:
         rep: dict[str, VideoSpec] = {}
         for v in videos:
-            if v.duration and not v.failed and v.key not in rep:
+            if v.duration and not v.failed and not v.crowded and v.key not in rep:
                 rep[v.key] = v
         for sl in sorted(set(round(x, 1) for x in s_lens)):
             ks = [k for k, v in rep.items() if not _duration_differs(v.duration, sl)]
             packs = [k for k in ks if k.startswith("pack:")]
             if len(packs) > 1:
-                continue  # a folder's files are its works
+                # A folder's files are its works; a link of this length
+                # joins the one file of its frame shape (a portrait 1080p
+                # copy of the portrait 4K render), else stays apart.
+                for k in [k for k in ks if not k.startswith("pack:")]:
+                    ar = _aspect(rep[k])
+                    same = [p for p in packs if ar and _aspect(rep[p]) and abs(_aspect(rep[p]) - ar) <= 0.02 * ar]
+                    if len(same) == 1 and _sequel_marks(rep[k].tokens) == _sequel_marks(rep[same[0]].tokens):
+                        for v in videos:
+                            if v.key == k:
+                                v.key = same[0]
+                        rep.pop(k, None)
+                continue
             target = packs[0] if packs else next((k for k in ks if any(
                 v.key == k and v.source == "OP" for v in videos)), ks[0] if ks else None)
             if target is None:
@@ -612,6 +644,8 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
 
     for key, members in by_key.items():
         related = (not op_keys) or (key in op_keys) or _post_work(members)
+        if all(m.stray for m in members if not m.failed) and any(not m.failed for m in members):
+            related = False  # another work: a folder's other files, a character no script names
         if not related:
             for v in members:
                 roles[v.url] = "unrelated"
@@ -635,7 +669,9 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
         for v in members:
             if v is ref:
                 kind, ckey, tag = "mirror", frozenset(), ""
-            elif key.startswith("pack:"):
+            elif key.startswith("pack:") and not (v.pack and ref.pack):
+                # A host retitles a folder file freely; two files of the
+                # folder carry their real names, which decide.
                 kind, ckey, tag = _classify_in_pack(v, ref, credit_words, title_words)
             else:
                 kind, ckey, tag = _classify(v, ref, credit_words, title_words)
@@ -668,7 +704,8 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
 
         for ckey, c in clusters.items():
             ordered = _order(c["members"], prefs,
-                             {u for u, r in roles.items() if r == "ambiguous"})
+                             {u for u, r in roles.items() if r == "ambiguous"},
+                             tuple(float(s.get("duration") or 0) for s in (scripts or []) if s.get("duration")))
             chosen, rest = ordered[0], ordered[1:]
             is_primary = ckey == frozenset()
             if chosen.failed:
@@ -709,14 +746,15 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
                 "members": member_roles, "reason": reason,
             })
 
-    _apply_format_pref(groups, roles, {v.url: v for v in videos}, cores, prefs)
+    _apply_format_pref(groups, roles, {v.url: v for v in videos}, cores, prefs, scripts)
     return {"groups": groups, "ambiguous": ambiguous, "roles": roles}
 
 
 _FORMAT_ORDER = {"flat": ("flat", "vr", "passthrough"), "vr": ("vr", "passthrough", "flat")}
 
 
-def _apply_format_pref(groups: list[dict], roles: dict, specs: dict, cores: dict, prefs: Prefs) -> None:
+def _apply_format_pref(groups: list[dict], roles: dict, specs: dict, cores: dict, prefs: Prefs,
+                       scripts: list[dict] | None = None) -> None:
     """One video offered as 2D and as VR (and passthrough) — the same work,
     the same length — keeps one way of watching: the 2D render by default,
     the VR one, or all of them (``vr_versions``). The others become role
@@ -728,13 +766,19 @@ def _apply_format_pref(groups: list[dict], roles: dict, specs: dict, cores: dict
     if len({fmt[id(g)] for g in live}) < 2:
         return
 
+    s_lens = [float(s.get("duration") or 0) for s in (scripts or []) if s.get("duration")]
+
     def same_media(a: dict, b: dict) -> bool:
         sa, sb = specs[a["chosen"]], specs[b["chosen"]]
         if sa.duration and sb.duration:
             if abs(sa.duration - sb.duration) > 1.0:
                 return False
             ca, cb = cores.get(sa.url, frozenset()), cores.get(sb.url, frozenset())
-            return a["key"] == b["key"] or len(ca & cb) >= 2
+            # Named alike — or both the length of one script: a folder's
+            # "<Work>VR8K60FPS.mp4" beside the post's 2D link.
+            return (a["key"] == b["key"] or len(ca & cb) >= 2
+                    or any(not _duration_differs(sa.duration, sl) and not _duration_differs(sb.duration, sl)
+                           for sl in s_lens))
         return a["key"] == b["key"]
 
     parent = {id(g): id(g) for g in live}
@@ -780,6 +824,84 @@ def _apply_format_pref(groups: list[dict], roles: dict, specs: dict, cores: dict
                      reason=f"同一影片的 {label} 版；設定只下載 {FORMAT_LABEL[keep]} 版")
             for u in g["members"]:
                 roles[u] = "format"
+
+
+def _aspect(v: VideoSpec) -> float:
+    return v.width / v.height if v.width and v.height else 0.0
+
+
+_STOP_WORDS = frozenset({"the", "and", "of", "a", "an", "in", "on", "with", "to", "no", "x", "vs", "ft",
+                         "by", "for", "full", "free", "flat", "vr", "2d", "3d"})
+
+
+def _same_pack_twins(k1: str, k2: str) -> bool:
+    """Two keys of files in one folder whose names are one render's
+    ("<Work> - Nude.mp4" / "4k-full-nude-<work>_1080p.mp4"): most words
+    shared. Different renders ("Nude" / "Clothed") share most too — the
+    classification below keeps those apart; this only lets them meet."""
+    a, b = set(k1[5:].split()), set(k2[5:].split())
+    return bool(a | b) and len(a & b) / len(a | b) >= 0.6
+
+
+def _mark_crowded_and_strays(videos: list[VideoSpec], scripts: list[dict], title: str) -> None:
+    """Fill in `crowded` and `stray`.
+
+    Crowded: a length several scripts share under different names (a
+    post of four characters rendered from one animation, a script each).
+    Videos of that length are one character each — never copies of one
+    another by length — and one no script names ("Eren Jaeger (Attack…"
+    beside Mikasa/Pieck scripts) is a stray.
+
+    Stray also: a file of a folder holding several videos that matches
+    nothing of the post — not its title's or scripts' words, not a
+    script's length, not the length of a file that does (a creator's
+    whole archive linked from one work's post)."""
+    s_items = [(_core_tokens(_script_stem(str(s.get("name") or ""))), float(s.get("duration") or 0))
+               for s in scripts]
+    s_items = [(c, d) for c, d in s_items if c]
+    common = frozenset.intersection(*[c for c, _ in s_items]) if len(s_items) >= 2 else frozenset()
+    by_len: list[tuple[float, list[frozenset]]] = []
+    for c, d in s_items:
+        if not d:
+            continue
+        slot = next((x for x in by_len if abs(x[0] - d) <= 0.6), None)
+        if slot is None:
+            slot = (d, [])
+            by_len.append(slot)
+        own = c - common - _STOP_WORDS
+        if own and own not in slot[1]:
+            slot[1].append(own)
+    for d, works in by_len:
+        if len(works) < 2:
+            continue
+        names = frozenset().union(*works)
+        for v in videos:
+            if v.duration and abs(v.duration - d) <= 1.0:
+                v.crowded = True
+                if not (v.tokens & names):
+                    v.stray = True
+
+    per_pack: dict[str, int] = {}
+    for v in videos:
+        if v.pack:
+            per_pack[v.pack] = per_pack.get(v.pack, 0) + 1
+    in_big = [v for v in videos if v.pack and per_pack[v.pack] >= 2 and not v.stray]
+    if not in_big or not (s_items or title):
+        return
+    post_words = (_core_tokens(title or "") | frozenset().union(*[c for c, _ in s_items] or [frozenset()])) - _STOP_WORDS
+    s_lens = [d for _c, d in s_items if d]
+    related = [v for v in videos if not v.pack or per_pack[v.pack] < 2]
+    for v in in_big:
+        words = _core_tokens(v.stem) - _STOP_WORDS
+        if (words & post_words) or (v.duration and any(not _duration_differs(v.duration, sl) for sl in s_lens)):
+            related.append(v)
+    rel_lens = [v.duration for v in related if v.duration and not v.failed]
+    for v in in_big:
+        if v in related:
+            continue
+        if v.duration and any(abs(v.duration - d) <= 1.0 for d in rel_lens):
+            continue  # a render of a video that belongs (character alt, VR copy)
+        v.stray = True
 
 
 def _pick_reason(chosen: VideoSpec, rest: list[VideoSpec], prefs: Prefs) -> str:

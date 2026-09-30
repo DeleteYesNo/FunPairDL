@@ -1236,3 +1236,15 @@ def test_a_packs_cover_image_is_no_video(tmp_path):
                                                   "https://mega.nz/f/j": "cover.jpg"})
     kinds = {i.filename: i.file_type for i in pair.items}
     assert kinds == {"Garden Party.mp4": FileType.VIDEO, "cover.jpg": FileType.OTHER}
+
+
+def test_a_token_dead_heat_goes_to_the_video_of_the_scripts_length():
+    full = PairItem(url="https://tube/v/1", filename="Hana Full.mp4", file_type=FileType.VIDEO)
+    loop = PairItem(url="https://tube/v/2", filename="Hana Loop.mp4", file_type=FileType.VIDEO)
+    other = PairItem(url="https://tube/v/3", filename="Mira Full.mp4", file_type=FileType.VIDEO)
+    s = _vi("Studio Hana Ride.funscript", FileType.FUNSCRIPT)
+    groups = QueueManager().plan_bundle_split(
+        [full, loop, other, s], None, "T",
+        durations={full.url: 63.2, loop.url: 31.0, other.url: 63.2, s.url: 63.2})
+    g = next(g for g in groups if g["scripts"])
+    assert g["videos"][0] is full

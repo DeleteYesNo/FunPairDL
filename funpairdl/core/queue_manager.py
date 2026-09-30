@@ -2140,6 +2140,8 @@ class QueueManager:
             for t in toks:
                 _df[t] = _df.get(t, 0) + 1
 
+        s_url_for_tokens: list[str] = []
+
         def _find_video_by_tokens(name: str):
             stoks = _tokens(name)
             best, best_score, second_score = None, 0.0, 0.0
@@ -2158,7 +2160,21 @@ class QueueManager:
             # name) is no match either — the document-order rescue below
             # places such a script on the video still without one, which
             # beats handing it to whichever video happened to come first.
-            if best_score < 0.5 or best_score == second_score:
+            if best_score < 0.5:
+                return None
+            if best_score == second_score:
+                # A dead heat ("Mikasa" shared by "Mikasa Full" and "Mikasa
+                # Loop"): the one of the script's length, when just one is.
+                ds = durations.get(s_url_for_tokens[0]) if s_url_for_tokens else None
+                tied = [v for v, vtoks in video_tokens
+                        if abs(sum(1.0 / _df[t] for t in (stoks & vtoks)) - best_score) < 1e-9]
+                if ds:
+                    fit = [v for v in tied
+                           if (durations.get(v.url) or durations.get(v.resolved_url or ""))
+                           and abs((durations.get(v.url) or durations.get(v.resolved_url or "")) - ds)
+                           <= max(3.0, 0.02 * ds)]
+                    if len(fit) == 1:
+                        return fit[0]
                 return None
             return best
 
@@ -2225,6 +2241,7 @@ class QueueManager:
                     # Within a second is the same cut, not a guess.
                     how = "length" if abs(dv - durations[s.url]) <= 1.0 else "duration"
             if v is None:
+                s_url_for_tokens[:] = [s.url]
                 v = _find_video_by_tokens(base)
                 if v is not None:
                     how = "tokens"

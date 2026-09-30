@@ -468,3 +468,63 @@ class TestPostEvidence:
             _v("https://up/alternate/7194008_alternate_334950.720p.mp4", duration=59.71, source="comment"),
         ], Prefs(), title="Garden Night", scripts=[{"name": "Garden night.funscript", "duration": 59.9}])
         assert len([g for g in res["groups"] if g.get("chosen")]) == 1
+
+
+class TestArchivesAndCharacters:
+    def test_a_creator_archive_keeps_only_the_posts_work(self):
+        pack = "https://mega.nz/folder/arc"
+        names = ["OtherWorkCowgirl60FPS.mp4", "Lumi Taming 4K60FPS.mp4", "LumiDoggyVR8K60FPS.mp4",
+                 "ThirdWorkVR8K.mp4", "LumiDriverAlt4K60FPS.mp4"]
+        shapes = [(60, 3840, 2160, 900), (40, 3840, 2160, 250), (40, 8192, 4096, 320), (30, 8192, 4096, 260),
+                  (40, 2160, 3840, 200)]
+        vids = []
+        for i, (n, (d, w, h, sz)) in enumerate(zip(names, shapes)):
+            v = _p(f"https://mega.nz/folder/arc/file/{i}", n, pack=pack, size=sz)
+            v.duration, v.width, v.height = d, w, h
+            vids.append(v)
+        link = _v("https://tube/v/1", "[Studio] Lumi Doggy POV Driver 1080p", duration=40.0, height=1080, size=40)
+        link.width = 607                     # a portrait 1080p copy of the portrait render
+        vids.append(link)
+        res = plan_videos(vids, Prefs(), title="Studio - Lumi Doggy Flat and VR 8K",
+                          scripts=[{"name": "LumiDoggy (Normal).funscript", "duration": 40.04}])
+        r = res["roles"]
+        assert r["https://mega.nz/folder/arc/file/0"] == "unrelated"     # another work of the archive
+        assert r["https://mega.nz/folder/arc/file/3"] == "unrelated"
+        assert r["https://mega.nz/folder/arc/file/2"] == "format"        # the VR render of the post's work
+        assert r["https://mega.nz/folder/arc/file/1"] == "chosen"        # the landscape render
+        assert r["https://tube/v/1"] == "chosen"                          # the portrait one, its small copy
+        assert r["https://mega.nz/folder/arc/file/4"] == "alternate"
+
+    def test_characters_of_one_length_keep_their_own_videos(self):
+        vids = [_v(f"https://tube/v/{n}", n, duration=d) for n, d in [
+            ("Hana Full", 63.211), ("Mira Full", 63.211), ("Hana Loop", 31.04), ("Mira Loop", 31.04),
+            ("Guardsman (Series… Video #1 | Dev (1)", 63.211)]]
+        res = plan_videos(vids, Prefs(), scripts=[
+            {"name": "Studio Hana Ride.funscript", "duration": 63.211},
+            {"name": "Studio Mira Ride.funscript", "duration": 63.211},
+            {"name": "Studio Hana Ride Loop.funscript", "duration": 31.064},
+            {"name": "Studio Mira Ride Loop.funscript", "duration": 31.064}])
+        r = res["roles"]
+        for n in ("Hana Full", "Mira Full", "Hana Loop", "Mira Loop"):
+            assert r[f"https://tube/v/{n}"] == "chosen", n
+        assert r["https://tube/v/Guardsman (Series… Video #1 | Dev (1)"] == "unrelated"
+
+    def test_one_folders_4k_and_1080p_of_a_render_are_one_video(self):
+        pack = "https://mega.nz/folder/hu"
+        files = [("[Studio] Garden Dream (Full) - Nude.mp4", 651), ("[Studio] Garden Dream (Full) - Clothed.mp4", 652),
+                 ("4k-full-nude-garden-dream-studio_1080p.mp4", 249), ("4k-full-clothed-garden-dream-studio_1080p.mp4", 250)]
+        vids = []
+        for i, (n, sz) in enumerate(files):
+            v = _p(f"https://mega.nz/folder/hu/file/{i}", n, pack=pack, size=sz)
+            v.duration, v.height = 432.0, 2160 if sz > 600 else 1080
+            vids.append(v)
+        res = plan_videos(vids, Prefs(), scripts=[{"name": "Studio Garden Dream (Full) - Nude.funscript", "duration": 432.7}])
+        chosen = sorted(u for u, r in res["roles"].items() if r in ("chosen", "variant"))
+        assert chosen == ["https://mega.nz/folder/hu/file/2", "https://mega.nz/folder/hu/file/3"]
+
+    def test_the_copy_of_the_scripts_exact_length_is_the_pick(self):
+        res = plan_videos([
+            _v("https://pd/u/a", "Garden Night.mp4", duration=453.37, size=237),
+            _v("https://ph/b", "Garden Night", duration=450.0, size=100),
+        ], Prefs(), scripts=[{"name": "Garden Night.funscript", "duration": 453.37}])
+        assert res["roles"]["https://pd/u/a"] == "chosen"

@@ -82,6 +82,8 @@ VIDEO_HOSTS = [
     "fanbox.cc",
     "pmvhaven.com",
     "faptap.net",
+    "filester.gg",
+    "filester.me",
     "mediafire.com",
     "vik1ngfile.site",
     "vikingfile.com",

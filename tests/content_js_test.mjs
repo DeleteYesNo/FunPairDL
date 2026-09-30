@@ -681,6 +681,12 @@ check("external script row shows its host", extRow.includes('<span class="funpai
   check("saved labels: a dragged row is", labels.c, "Mine");
 }
 
+// ── a pack script's work name ──
+{
+  check("pack work key: axis and tags go", ctx._packWorkKey("Work Night (Hardcore).pitch.funscript"), "worknight");
+  check("pack work key: plain", ctx._packWorkKey("WorkNight.funscript"), "worknight");
+}
+
 // ── send prefs: header controls override the settings ──
 {
   const p = ctx._currentPrefs({ video_pick_mode: "best_quality", collect_other_authors: false });
