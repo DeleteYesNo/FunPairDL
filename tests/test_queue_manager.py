@@ -27,6 +27,27 @@ class TestPlanBundleSplit:
     """plan_bundle_split is the preview the panel shows AND the split the
     queue performs; a user plan (url → label) overrides the name heuristic."""
 
+    def test_scripters_names_beat_slugs_and_page_titles(self):
+        # A host's slug ("heroine-a-full") or page title ("… | Rule 34 Video
+        # #<id>") names the folder worse than the script beside it.
+        items = [
+            _vi("heroine-a-full.mp4", FileType.VIDEO),
+            _vi("Artist Heroine A Reverse Cowgirl.funscript", FileType.FUNSCRIPT),
+            _vi("heroine-a-loop.mp4", FileType.VIDEO),
+            _vi("Artist Heroine A Reverse Cowgirl Loop.funscript", FileType.FUNSCRIPT),
+            _vi("Heroine B (Series… Rule 34 Video #10000000001 _ Rule34 Dev.mp4", FileType.VIDEO),
+            _vi("Artist Heroine B Reverse Cowgirl.funscript", FileType.FUNSCRIPT),
+            _vi("pixie_bath-scene.mp4", FileType.VIDEO),
+            _vi("pixie_bath-scene.funscript", FileType.FUNSCRIPT),
+        ]
+        groups = QueueManager().plan_bundle_split(items, None, "Pack")
+        by_video = {g["videos"][0].filename: g["name"] for g in groups}
+        assert by_video["heroine-a-full.mp4"] == "Artist Heroine A Reverse Cowgirl"
+        assert by_video["heroine-a-loop.mp4"] == "Artist Heroine A Reverse Cowgirl Loop"
+        assert by_video["Heroine B (Series… Rule 34 Video #10000000001 _ Rule34 Dev.mp4"] ==             "Artist Heroine B Reverse Cowgirl"
+        # a slug beside a slug: nothing better, the video's stays
+        assert by_video["pixie_bath-scene.mp4"] == "pixie_bath-scene"
+
     def _items(self):
         items = []
         for n in ["Alpha", "Beta", "Gamma"]:

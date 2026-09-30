@@ -532,8 +532,11 @@ function extractLinksFromElement(containerEl, isOP) {
             isBundle: isBundleUrl(href),
           });
         }
-      } else if (!SKIP_DOMAINS.some((d) => host.includes(d)) && !NON_VIDEO_HOSTS.some((d) => host.includes(d))) {
-        // Unknown external link — detect if URL or link text suggests a video page
+      } else if (!isKnown && !isNonVideoPath(href)
+                 && !SKIP_DOMAINS.some((d) => host.includes(d)) && !NON_VIDEO_HOSTS.some((d) => host.includes(d))) {
+        // Unknown external link — detect if URL or link text suggests a video page.
+        // A known host's profile (pornhub.com/model/<x>/videos, an "actor
+        // info" credit) is no video page of an unknown site either.
         const path = u.pathname.toLowerCase();
         // …or IS a video file ("direct link" to host/…_720p.mp4 in a reply).
         const hasVideoPath = /\/(video|watch|view_video|embed|play|clip|videos)/.test(path)
@@ -1809,12 +1812,25 @@ function _cleanScriptStem(filename) {
 
 /** Derive an initial display name for an Alt group from its items. */
 function _deriveAltDisplayName(parsed, groupName) {
+  // Main's own name tells the Alt apart from nothing (an OP's re-upload
+  // under the same file name), and a hash name ("0f3e9a7c…c5d6") names
+  // nothing: neither is a label — the backend falls back to the scripter.
+  const mainStems = new Set(parsed.scripts
+    .filter((s) => (s.autoGroup || "Main") === "Main")
+    .map((s) => _cleanScriptStem(s.filename).toLowerCase()));
   for (let i = 0; i < parsed.scripts.length; i++) {
     if ((parsed.scripts[i].autoGroup || "Main") !== groupName) continue;
     const stem = _cleanScriptStem(parsed.scripts[i].filename);
-    if (stem) return stem;
+    if (!stem || mainStems.has(stem.toLowerCase()) || _isHashName(stem)) continue;
+    return stem;
   }
   return "";
+}
+
+// A name that is only a hex digest or a long number ("0f3e9a7c21b84d5e…",
+// "1719834234"): an upload's hash, not a title.
+function _isHashName(stem) {
+  return /^(?:[0-9a-f]{16,}|\d{8,})$/i.test(String(stem || "").trim());
 }
 
 /** Build initial group state from auto-detected groups in `parsed`. */
@@ -5575,7 +5591,9 @@ async function _refreshWorkPlan(panel, parsed) {
     } catch (e) { plan = null; }
     if (seq !== panel._workPlanSeq) return;   // a newer request superseded this one
     panel._workPlanKey = key;
-    panel._workPlanSplit = !!(plan && plan.split);
+    // One group is the pair itself (the backend never splits it): its
+    // label only names the work, and nothing was guessed apart.
+    panel._workPlanSplit = !!(plan && plan.split && Array.isArray(plan.groups) && plan.groups.length >= 2);
     panel._workPlanOrder = [];
     // Labels the backend seeded last time — a row still carrying its seeded
     // label was never touched by the user, so a fresh plan (names change as

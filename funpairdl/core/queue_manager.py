@@ -1871,6 +1871,27 @@ class QueueManager:
         rest = re.sub(r"[\[\(【][^\]\)】]*[\]\)】]", " ", rest)
         return cls._match_key(f"{lead} {rest}")
 
+    _SITE_TITLE_RE = re.compile(
+        r"\brule\s?34\b|#\d{5,}|\b(?:hanime1|xvideos|pornhub|spankbang|eporner|xhamster)\b", re.IGNORECASE)
+
+    @classmethod
+    def _machine_title(cls, stem: str) -> bool:
+        """A name a host made, not a person: a URL slug ("heroine-a-full",
+        "some_work-720p") or a page title carrying the site ("… | Rule 34
+        Video #<id> | Rule34 Dev")."""
+        st = (stem or "").strip()
+        return bool(st) and ((not re.search(r"\s", st) and bool(re.search(r"[-_]", st)))
+                             or bool(cls._SITE_TITLE_RE.search(st)))
+
+    @classmethod
+    def _worded_title(cls, stem: str) -> bool:
+        """A script name a person wrote: two or more words, none a hash."""
+        from funpairdl.core.video_plan import _is_id
+        if cls._machine_title(stem):
+            return False
+        words = [t for t in re.findall(r"[^\W_]+", (stem or "").lower()) if len(t) >= 2]
+        return len(words) >= 2 and not any(_is_id(t) for t in words)
+
     @staticmethod
     def _clean_title(title: str) -> str:
         """Clean article title: remove common prefixes/tags that aren't part of the name."""
@@ -2330,9 +2351,14 @@ class QueueManager:
             if title_src == real_stem and g_scripts:
                 # A host title that shares no word with the scripts ("Booru -
                 # If it exists… / 1234567") names nothing: the scripter's
-                # file names the work.
-                s_base = _strip_axis(g_scripts[0].filename)
-                if not (_tokens(real_stem) & _tokens(s_base)):
+                # file names the work. Nor does a URL slug ("heroine-a-full")
+                # or a site's page title ("<name> | Rule 34 Video #<id>")
+                # beside a script named in words ("<Artist> Heroine A Reverse
+                # Cowgirl").
+                mains = [sc for sc in g_scripts if self._parse_axis(sc.filename)[0] == "L0"] or g_scripts
+                s_base = min((_strip_axis(sc.filename) for sc in mains), key=len)
+                if not (_tokens(real_stem) & _tokens(s_base)) or (
+                        self._machine_title(real_stem) and self._worded_title(s_base)):
                     title_src = s_base
             name = sanitize_filename(self._clean_title(title_src))
             if not name:  # title cleaned away to nothing — fall back to the stem
@@ -3368,9 +3394,13 @@ class QueueManager:
                      main_authors: set[str]) -> str:
         """Variant label for an Alt group: the panel's display name, else
         the group's scripter when it is not Main's, else "Alt"."""
+        from funpairdl.core.video_plan import _is_id, _tokens
         cfg = pair.alt_group_config.get(gname, {})
         disp = (cfg.get("display_name") or "").strip()
-        if disp:
+        # A file's hash name ("0f3e9a7c…c5d6.funscript" twice, a revision
+        # the OP re-uploaded) names nothing: fall through to the scripter.
+        words = _tokens(disp)
+        if disp and not (words and all(_is_id(t) for t in words)):
             return lib.sanitize_label(disp)
         authors = {it.author.strip() for it in items if (it.author or "").strip()}
         if len(authors) == 1:

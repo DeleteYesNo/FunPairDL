@@ -467,6 +467,24 @@ class TestExplicitGroups:
         assert (out / "c1.mp4").exists() and (out / "c1.funscript").exists() and (out / "op.mp4").exists()
         assert not (out / "funlib.json").exists()
 
+    def test_hash_display_name_is_no_label(self, tmp_path):
+        # The OP re-uploads a fixed script under the same hash file name:
+        # the name says nothing, so the Alt is labelled like any other.
+        _touch(tmp_path / "main.mp4")
+        _touch(tmp_path / "0f3e9a7c21b84d5e6f708192a3b4c5d6.funscript", size=300)
+        _touch(tmp_path / "0f3e9a7c21b84d5e6f708192a3b4c5d6 (2).funscript", size=20)
+        pair = _make_pair(str(tmp_path), "Topic", [
+            PairItem(url="http://x/m.mp4", filename="main.mp4", file_type=FileType.VIDEO, group="Main"),
+            PairItem(url="http://x/a.funscript", filename="0f3e9a7c21b84d5e6f708192a3b4c5d6.funscript",
+                     file_type=FileType.FUNSCRIPT, group="Main"),
+            PairItem(url="http://x/b.funscript", filename="0f3e9a7c21b84d5e6f708192a3b4c5d6 (2).funscript",
+                     file_type=FileType.FUNSCRIPT, group="Alt 1"),
+        ])
+        pair.alt_group_config = {"Alt 1": {"display_name": "0f3e9a7c21b84d5e6f708192a3b4c5d6"}}
+        _organize(pair)
+        assert (tmp_path / "Topic.funscript").exists()
+        assert (tmp_path / "Topic (Alt).funscript").exists()
+
     def test_display_name_brackets_are_dropped_and_labels_unique(self, tmp_path):
         _touch(tmp_path / "op.mp4")
         _touch(tmp_path / "op.funscript")

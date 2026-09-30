@@ -55,6 +55,34 @@ check("x.com /status/ tweet is a video", ctx.isNonVideoPath("https://x.com/u/sta
 check("pixeldrain file is a video path", ctx.isNonVideoPath("https://pixeldrain.com/u/abc123"), false);
 check("pornhub model page is non-video", ctx.isNonVideoPath("https://pornhub.com/model/foo"), true);
 
+// ── Alt names: a hash or Main's own file name is no label ──
+check("hash name", ctx._isHashName("7d1c0e5b9a2f48c6b3e1d0a9f8e7c6b5"), true);
+check("a title is no hash", ctx._isHashName("Demo Knight Remake"), false);
+{
+  const parsed = { scripts: [
+    { filename: "0f3e9a7c21b84d5e6f708192a3b4c5d6.funscript", autoGroup: "Main" },
+    { filename: "0f3e9a7c21b84d5e6f708192a3b4c5d6.funscript", autoGroup: "Alt 1" },
+    { filename: "Sample Work (Soft).funscript", autoGroup: "Alt 2" },
+  ] };
+  check("alt name: Main's own hash name is none", ctx._deriveAltDisplayName(parsed, "Alt 1"), "");
+  check("alt name: a real name stays", ctx._deriveAltDisplayName(parsed, "Alt 2") !== "", true);
+}
+
+// ── extractLinksFromElement: a known host's profile is no unknown video page ──
+{
+  const anchors = (hrefs) => ({
+    querySelectorAll: (sel) => sel === "a[href]"
+      ? hrefs.map(([href, text]) => ({ getAttribute: () => href, textContent: text, closest: () => null }))
+      : [],
+  });
+  const got = ctx.extractLinksFromElement(anchors([
+    ["https://www.pornhub.com/model/somecreator/videos", "PH"],
+    ["https://www.pornhub.com/view_video.php?viewkey=abc123", "video"],
+  ]), true).videos.map((v) => v.url);
+  check("links: a host's /model/<x>/videos credit is not a video", got.includes("https://www.pornhub.com/model/somecreator/videos"), false);
+  check("links: the host's video page still is", got.includes("https://www.pornhub.com/view_video.php?viewkey=abc123"), true);
+}
+
 // ── detectAxis: only known axes are axes; other dot-words belong to the name ──
 check("axis: raw suffix is the main script", ctx.detectAxis("Title ver.!!.raw.funscript"), "main");
 check("axis: raw + pitch → pitch", ctx.detectAxis("Title ver.!!.raw.pitch.funscript"), "pitch");
