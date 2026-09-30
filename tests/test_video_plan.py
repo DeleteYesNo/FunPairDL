@@ -528,3 +528,11 @@ class TestArchivesAndCharacters:
             _v("https://ph/b", "Garden Night", duration=450.0, size=100),
         ], Prefs(), scripts=[{"name": "Garden Night.funscript", "duration": 453.37}])
         assert res["roles"]["https://pd/u/a"] == "chosen"
+
+    def test_script_flavours_of_one_length_are_no_characters(self):
+        res = plan_videos([
+            _v("https://tube/v/1", "The Visit (Studio) 4K60FPS", duration=170.09),
+            _v("https://disk/i/2", "The_Visit_(Studio)_4K60FPS.mp4", duration=170.09),
+        ], Prefs(), scripts=[{"name": "SMOOTH The_Visit_(Studio)_4K60FPS.funscript", "duration": 170.095},
+                             {"name": "The_Visit_(Studio)_4K60FPS_maxinterval.funscript", "duration": 170.095}])
+        assert sorted(res["roles"].values()) == ["alternate", "chosen"]

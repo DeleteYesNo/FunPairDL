@@ -874,12 +874,16 @@ def _mark_crowded_and_strays(videos: list[VideoSpec], scripts: list[dict], title
     for d, works in by_len:
         if len(works) < 2:
             continue
+        near = [v for v in videos if v.duration and abs(v.duration - d) <= 1.0]
+        # Characters, not script flavours ("SMOOTH …" / "… maxinterval"):
+        # the videos of that length carry the scripts' distinguishing words.
+        if sum(1 for w in works if any(v.tokens & w for v in near)) < 2:
+            continue
         names = frozenset().union(*works)
-        for v in videos:
-            if v.duration and abs(v.duration - d) <= 1.0:
-                v.crowded = True
-                if not (v.tokens & names):
-                    v.stray = True
+        for v in near:
+            v.crowded = True
+            if not (v.tokens & names):
+                v.stray = True
 
     per_pack: dict[str, int] = {}
     for v in videos:

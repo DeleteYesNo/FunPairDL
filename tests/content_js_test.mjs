@@ -685,6 +685,9 @@ check("external script row shows its host", extRow.includes('<span class="funpai
 {
   check("pack work key: axis and tags go", ctx._packWorkKey("Work Night (Hardcore).pitch.funscript"), "worknight");
   check("pack work key: plain", ctx._packWorkKey("WorkNight.funscript"), "worknight");
+  check("first word: CamelCase", ctx._firstWord("DracaeneStripSmash.funscript"), "dracaene");
+  check("first word: spaced", ctx._firstWord("Jubilee Reverse Cowgirl(Hardcore).funscript"), "jubilee");
+  check("first word: digits split", ctx._firstWord("Jubilee4K60FPS.mp4"), "jubilee");
 }
 
 // ── send prefs: header controls override the settings ──

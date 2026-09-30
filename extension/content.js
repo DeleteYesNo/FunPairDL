@@ -2565,7 +2565,10 @@ function setupProbing(panel, parsed) {
       v.probedSize = Number(info.size) || 0;
       v.probedHeight = Math.max(0, Number(info.height) || 0, ...((info.formats || []).map((f) => Number(f.height) || 0)));
       // The frame's width too: 2:1 is a VR render of what 16:9 shows in 2D.
-      v.probedWidth = Number(info.width) || 0;
+      // Scaled to the height kept above — a header read from the smallest
+      // format (202x360) is the shape of the 1080p one (606x1080).
+      const fw = Number(info.width) || 0, fh = Number(info.height) || 0;
+      v.probedWidth = fw && fh && v.probedHeight ? Math.round(fw * v.probedHeight / fh) : fw;
       v.probedFormats = (info.formats || []).map((f) => ({ height: Number(f.height) || 0, size: Number(f.size) || 0 }));
       updateVideoSize(probeKey, info);
       showProbeExtras(sizeEl, probeKey, info);
@@ -3670,6 +3673,15 @@ function _packWorkKey(name) {
   return s.toLowerCase().replace(/[^a-z0-9\u3040-\u30ff\u3400-\u9fff]+/g, "");
 }
 
+// Pure: the first word of a file name, CamelCase split ("DracaeneStripSmash"
+// → "dracaene", "Jubilee Reverse Cowgirl" → "jubilee").
+function _firstWord(name) {
+  const s = String(name || "").replace(/^[\[\(（【][^\]\)）】]*[\]\)）】]\s*/, "")
+    .replace(/([a-z])([A-Z])/g, "$1 $2").replace(/([A-Za-z])(\d)/g, "$1 $2");
+  const m = /[A-Za-z]+/.exec(s);
+  return m ? m[0].toLowerCase() : "";
+}
+
 // A creator's archive linked from one work's post: the scripts that go
 // with the archive's OTHER works (their videos the plan left out) stay
 // home too.
@@ -3683,15 +3695,19 @@ function _untickOtherWorksScripts(panel, roles) {
   for (const cbs of byPack.values()) {
     const vids = cbs.filter((cb) => _isVideoFileName(cb.dataset.fileName || ""));
     if (vids.length < 2) continue;
-    const stems = vids.map((cb) => ({
-      key: _packWorkKey((cb.dataset.fileName || "").replace(/\.[a-z0-9]{2,4}$/i, "")),
-      out: roles[cb.dataset.fileUrl] === "unrelated",
-    }));
+    const stems = vids.map((cb) => {
+      const name = (cb.dataset.fileName || "").replace(/\.[a-z0-9]{2,4}$/i, "");
+      return { key: _packWorkKey(name), first: _firstWord(name), out: roles[cb.dataset.fileUrl] === "unrelated" };
+    });
     for (const cb of cbs) {
       if (!/\.funscript$/i.test(cb.dataset.fileName || "")) continue;
       const k = _packWorkKey(cb.dataset.fileName);
       if (k.length < 4) continue;
-      const hits = stems.filter((v) => v.key && (v.key.includes(k) || k.includes(v.key)));
+      // "Jubilee Reverse Cowgirl(Hardcore)" goes with "Jubilee4K60FPS.mp4":
+      // a name contains the other, or both start with the same word.
+      const fw = _firstWord(cb.dataset.fileName || "");
+      const hits = stems.filter((v) => v.key && (v.key.includes(k) || k.includes(v.key)
+        || (fw.length >= 4 && v.first === fw)));
       if (!hits.length || !hits.every((v) => v.out)) continue;
       const fileRow = cb.closest(".funpairdl-bundle-file");
       if (fileRow && fileRow.dataset.touched) continue;
