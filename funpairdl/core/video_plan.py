@@ -400,6 +400,11 @@ def _order(cands: list[VideoSpec], prefs: Prefs, pending: set[str] | None = None
     if any(s.duration and fits(s) for s in cands):
         for s in cands:
             if s.duration and not fits(s):
+                sync[id(s)] = 2
+            elif not s.duration:
+                # Unknown length is a guess beside a link known to fit: a
+                # reply's folder file "(Maker) Work.mp4" turned out to be
+                # the three scenes back to back.
                 sync[id(s)] = 1
     heights = [s.height or _height_from_name(s.stem) for s in cands]
     top = max(heights) if heights else 0
@@ -665,6 +670,19 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
             0 if ((v.pack if in_pack else v.source == "OP") or
                   not any((o.pack if in_pack else o.source == "OP") for o in live)) else 1,
             len(v.tokens), v.priority))
+        # A reference of unknown length (a folder file, a host that gives
+        # none) can't vouch that links of DIFFERENT lengths are all copies
+        # of it: the one named most like it stands for its length, and a
+        # link of another length is another video ("<Work> Cowgirl" 33 s,
+        # "<Work> Doggy" 30 s beside "(<Creator>) <Work>.mp4").
+        len_ref = None
+        if not ref.duration:
+            known = [m for m in live if m is not ref and m.duration]
+            if len(known) >= 2:
+                def _likeness(m: VideoSpec) -> float:
+                    u = m.tokens | ref.tokens
+                    return len(m.tokens & ref.tokens) / len(u) if u else 0.0
+                len_ref = max(known, key=lambda m: (_likeness(m), m.source == "OP", -len(m.tokens)))
         clusters: dict[frozenset, dict] = {}
         for v in members:
             if v is ref:
@@ -675,6 +693,9 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
                 kind, ckey, tag = _classify_in_pack(v, ref, credit_words, title_words)
             else:
                 kind, ckey, tag = _classify(v, ref, credit_words, title_words)
+            if (len_ref is not None and v is not len_ref and kind in ("mirror", "reencode")
+                    and not ckey and v.duration and _duration_differs(v.duration, len_ref.duration)):
+                kind, ckey, tag = _classify(v, len_ref, credit_words, title_words)
             if (kind == "variant" and v.failed and not ref.failed and "__dur__" not in ckey
                     and not _paren_diff(v, ref, credit_words, title_words)):
                 # A dead link titled a little differently ("Stream-Vid: Work"

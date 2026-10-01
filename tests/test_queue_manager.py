@@ -27,6 +27,20 @@ class TestPlanBundleSplit:
     """plan_bundle_split is the preview the panel shows AND the split the
     queue performs; a user plan (url → label) overrides the name heuristic."""
 
+    def test_exact_length_beats_a_name_match_of_another_length(self):
+        # "Pixie Purr (2 loops)": the long loop's video is named after the
+        # post, the short loop's is not; both scripts carry the post's name.
+        long_v = _vi("Pixie Purr.mp4", FileType.VIDEO)
+        short_v = _vi("clip by somebody.webm", FileType.VIDEO)
+        s_short = _vi("Maker Pixie Purr Normal Loop.funscript", FileType.FUNSCRIPT)
+        s_long = _vi("Maker Pixie Purr Accelerating Loop.funscript", FileType.FUNSCRIPT)
+        durations = {long_v.url: 107.65, short_v.url: 47.404, s_short.url: 47.404, s_long.url: 107.668}
+        groups = QueueManager().plan_bundle_split([long_v, short_v, s_short, s_long], None, "Pack",
+                                                  durations=durations)
+        by_video = {g["videos"][0].url: [sc.url for sc in g["scripts"]] for g in groups}
+        assert by_video[short_v.url] == [s_short.url]
+        assert by_video[long_v.url] == [s_long.url]
+
     def test_scripters_names_beat_slugs_and_page_titles(self):
         # A host's slug ("heroine-a-full") or page title ("… | Rule 34 Video
         # #<id>") names the folder worse than the script beside it.

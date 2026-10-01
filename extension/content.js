@@ -328,7 +328,9 @@ function detectAxis(filename) {
   const stem = (filename || "").trim().replace(/\.funscript$/i, "");
   const parts = stem.split(".");
   for (let i = parts.length - 1; i >= 1; i--) {
-    const p = parts[i].trim().toLowerCase();
+    // ".twist(1)": a browser's numbering of a second download is no part
+    // of the axis name.
+    const p = parts[i].trim().replace(/\s*\(\d+\)$/, "").toLowerCase();
     if (!AXIS_SUFFIX_SET.has(p)) continue;
     return AXIS_MAIN_ALIASES.has(p) ? "main" : p;
   }
@@ -3731,7 +3733,25 @@ function _untickOtherWorksScripts(panel, roles) {
       if (fileRow) fileRow.title = `${cb.dataset.fileName || ""}
 合集裡另一部作品的腳本，不屬於這帖`;
     }
+    // A folder none of whose videos is this post's (an uploader's whole
+    // share): its loose files — audio, pictures — are not this post's either.
+    const drop = new Set(_strayPackExtras(cbs.map((cb) => cb.dataset.fileName || ""), stems.map((v) => v.out)));
+    for (const cb of cbs) {
+      if (!drop.has(cb.dataset.fileName || "")) continue;
+      const fileRow = cb.closest(".funpairdl-bundle-file");
+      if (fileRow && fileRow.dataset.touched) continue;
+      _setChecked(panel, cb, false);
+      if (fileRow) fileRow.title = `${cb.dataset.fileName || ""}
+合集裡沒有這帖的影片，這個檔也不屬於這帖`;
+    }
   }
+}
+
+// Pure: the files of a pack that are neither videos nor scripts, when every
+// one of its videos is another work's (`videosOut`, one flag per video).
+function _strayPackExtras(names, videosOut) {
+  if (!videosOut.length || !videosOut.every(Boolean)) return [];
+  return names.filter((n) => n && !/\.funscript$/i.test(n) && !_isVideoFileName(n));
 }
 
 // The parsed script behind a row key ("script-3", "ss-1-0", "cs-2").

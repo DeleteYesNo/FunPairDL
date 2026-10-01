@@ -1958,9 +1958,11 @@ class QueueManager:
         parts = stem.split(".")
         # Scan components from right to left for a known axis
         for part in reversed(parts):
-            canonical = cls._ERODECK_AXIS_MAP.get(part.lower())
+            # ".twist(1)": a browser's numbering of a second download.
+            bare = re.sub(r"\s*\(\d+\)$", "", part)
+            canonical = cls._ERODECK_AXIS_MAP.get(bare.lower())
             if canonical:
-                return canonical, part
+                return canonical, bare
         # Second pass: a known axis word with a qualifier glued on
         # (".suckManual", ".twist_v2"). Treating these as the main axis
         # renamed a suction script to "<base>.funscript" and shoved the real
@@ -2248,6 +2250,29 @@ class QueueManager:
                 v = _find_video(_key(base, strip_prefix=True))
             if v is not None:
                 how = "name"
+                # The script names more than the video it contains ("<Work>
+                # (Pornhub Version)" beside "<Work>.mp4"): the one other
+                # video that carries those words too is the more specific.
+                vt = _tokens(next(r for x, r, _ in video_info if x is v))
+                st = _tokens(base)
+                extra = st - vt
+                if extra:
+                    core = st & vt
+                    better = [x for x, r, _ in video_info
+                              if x is not v and extra <= _tokens(r) and core <= _tokens(r)]
+                    if len(better) == 1:
+                        v = better[0]
+                # The post's title names every video it links ("<Work>",
+                # "<Work> Normal Loop" / "… Accelerating Loop"): a name
+                # match of the wrong length yields to the one video of the
+                # script's exact length.
+                ds = durations.get(s.url)
+                dv = durations.get(v.url) or durations.get(v.resolved_url or "")
+                if ds and dv and abs(dv - ds) > max(3.0, 0.02 * dv):
+                    exact = _find_video_by_duration(s)
+                    de = exact is not None and (durations.get(exact.url) or durations.get(exact.resolved_url or ""))
+                    if exact is not None and exact is not v and de and abs(de - ds) <= 1.0:
+                        v, how = exact, "length"
             if v is None:
                 v = _find_video_by_link(s)
                 if v is not None:
@@ -3117,6 +3142,9 @@ class QueueManager:
             r"|x26[45]|h\.?26[45]|hevc|av1|avc|c?rf\d{1,2}|10bit|8bit|hdr|(?:un)?compressed)(?![a-z0-9])",
             " ", s,
         )
+        # "Harbor's Warning" names "The Harbor's Warning.mp4": the
+        # article is no part of the name. ("A" stays — "Heroine A" / "B".)
+        s = re.sub(r"(?<![a-z0-9])the(?![a-z0-9])", " ", s)
         # Keep alphanumerics of ANY script (CJK included) — only drop
         # punctuation/space. Using [a-z0-9] here would erase Chinese/Japanese
         # names entirely and make CJK works unmatchable.

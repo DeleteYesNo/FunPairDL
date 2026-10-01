@@ -68,6 +68,12 @@ check("a title is no hash", ctx._isHashName("Demo Knight Remake"), false);
   check("alt name: a real name stays", ctx._deriveAltDisplayName(parsed, "Alt 2") !== "", true);
 }
 
+// ── a folder of other works: its loose files go too ──
+check("stray pack: audio of an all-other-works folder is dropped",
+  ctx._strayPackExtras(["A.mp4", "B.mp4", "A.funscript", "song.wav"], [true, true]).join(","), "song.wav");
+check("stray pack: a folder with a video of the post keeps its files",
+  ctx._strayPackExtras(["A.mp4", "B.mp4", "cover.jpg"], [true, false]).length, 0);
+
 // ── extractLinksFromElement: a known host's profile is no unknown video page ──
 {
   const anchors = (hrefs) => ({
@@ -88,6 +94,7 @@ check("axis: raw suffix is the main script", ctx.detectAxis("Title ver.!!.raw.fu
 check("axis: raw + pitch → pitch", ctx.detectAxis("Title ver.!!.raw.pitch.funscript"), "pitch");
 check("axis: raw + surge → surge", ctx.detectAxis("Title ver.!!.raw.surge.funscript"), "surge");
 check("axis: plain name is main", ctx.detectAxis("Title.funscript"), "main");
+check("axis: a browser's (1) numbering is no part of the axis", ctx.detectAxis("Title 1.twist(1).funscript"), "twist");
 check("axis: known axis, any case", ctx.detectAxis("Title.Roll.funscript"), "roll");
 check("axis: erodeck code", ctx.detectAxis("Title.R2.funscript"), "r2");
 check("axis: L0 is main", ctx.detectAxis("Title.L0.funscript"), "main");

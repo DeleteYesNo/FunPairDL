@@ -269,6 +269,28 @@ class TestPacks:
             assert g["chosen"] == pack_file
             assert res["roles"][link] == "alternate"
 
+    def test_links_of_other_lengths_are_no_copies_of_a_lengthless_pack_file(self):
+        # Three scenes of a work linked by the OP (33 / 30 / 45 s) and a
+        # reply's folder file "(Maker) Work.mp4" of unknown length: the
+        # file anchors them by name, but three lengths are three videos.
+        res = plan_videos([
+            _v("https://tube/v/1", "Heroine Vale cowgirl", duration=33.387),
+            _v("https://tube/v/2", "Heroine Vale Doggystyle [Maker]", duration=30.102),
+            _v("https://tube/v/3", "Heroine Vale [Maker]", duration=45.099),
+            _p("https://pd/f/1", "(Maker) Heroine Vale.mp4", source="comment"),
+        ], Prefs(), scripts=[{"name": "(Maker) Heroine Vale Cowgirl.funscript", "duration": 33.408},
+                             {"name": "(Maker) Heroine Vale Doggy.funscript", "duration": 30.05},
+                             {"name": "(Maker) Heroine Vale Mating Press.funscript", "duration": 45.12}])
+        groups = [_group_of(res, u) for u in ("https://tube/v/1", "https://tube/v/2", "https://tube/v/3")]
+        assert len({id(g) for g in groups}) == 3          # three videos, none a copy of another
+        assert all(g["chosen"] for g in groups)            # each one downloads
+        assert res["roles"]["https://tube/v/1"] == "variant"
+        assert res["roles"]["https://tube/v/2"] == "variant"
+        # the link known to fit the third script goes before the folder
+        # file of unknown length (it was the scenes back to back)
+        assert res["roles"]["https://tube/v/3"] == "chosen"
+        assert res["roles"]["https://pd/f/1"] == "alternate"
+
     def test_slug_named_pack_file_keeps_the_tag_words(self):
         res = plan_videos([
             _p("https://pd/u/s1", "studiox-pip-ember-alt-scene-2-no-wm-4k_2160p.mp4"),
