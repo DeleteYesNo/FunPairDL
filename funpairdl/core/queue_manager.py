@@ -2737,9 +2737,10 @@ class QueueManager:
         """
         durations = {it.url: it.duration for it in pair.items if it.duration}
         from funpairdl.core import plan_cases
-        plan_cases.record("split", pair.name, [it.url for it in pair.items], plan_cases.split_request(
-            pair.items, pair.bundle_plan, pair.name, pair.alt_group_config, None, durations, None),
-            source_url=pair.source_url)
+        if sum(1 for it in pair.items if it.file_type == FileType.VIDEO) >= 2:  # one video never splits
+            plan_cases.record("split", pair.name, [it.url for it in pair.items], plan_cases.split_request(
+                pair.items, pair.bundle_plan, pair.name, pair.alt_group_config, None, durations, None),
+                source_url=pair.source_url)
         groups = self.plan_bundle_split(
             pair.items, pair.bundle_plan, pair.name, pair.alt_group_config, durations=durations)
         # One work is no split. (A single group — character alts joined to
