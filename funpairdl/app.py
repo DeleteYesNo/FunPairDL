@@ -106,6 +106,12 @@ def _run_app():
     loop = install_qasync_loop(app)
     worker_loop = start_worker_loop()
 
+    # The planners' inputs, kept locally for regression replay
+    # (tools/replay_plans.py).
+    from funpairdl.constants import CONFIG_DIR as _cfg_dir
+    from funpairdl.core import plan_cases
+    plan_cases.enable(_cfg_dir / "plan_cases")
+
     # Create queue manager
     from pathlib import Path
     qm = QueueManager(

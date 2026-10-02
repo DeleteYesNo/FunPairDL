@@ -2466,6 +2466,24 @@ class QueueManager:
         if not groups:
             return None
 
+        # A reply's script that found no video of a post of several works
+        # (a combined "Scene 1 2 3 4" script, VR scripts of videos never
+        # linked) is no more the first work's than any other's: it stays a
+        # work of its own, scripts only, one per reply group.
+        if len(groups) >= 2 and unmatched_scripts:
+            by_alt: dict[str, list[PairItem]] = {}
+            for s in unmatched_scripts:
+                if (s.group or "Main") != "Main" and not _label(s):
+                    by_alt.setdefault(s.group, []).append(s)
+            for alt, ss in by_alt.items():
+                disp = (alt_group_config.get(alt, {}).get("display_name") or "").strip()
+                name = (sanitize_filename(self._clean_title(disp or _strip_axis(ss[0].filename)))
+                        or sanitize_filename(_strip_axis(ss[0].filename)))
+                groups.append({"name": name, "label": "", "videos": [], "scripts": ss, "others": [],
+                               "script_basis": {s.url: "none" for s in ss}})
+            taken = {id(s) for ss in by_alt.values() for s in ss}
+            unmatched_scripts = [s for s in unmatched_scripts if id(s) not in taken]
+
         # Scripts nobody claimed (likely shared/generic) and "other" files go
         # with the first group.
         if unmatched_scripts:
@@ -2717,9 +2735,13 @@ class QueueManager:
 
         Returns new pairs if split occurred, or None if no split needed.
         """
+        durations = {it.url: it.duration for it in pair.items if it.duration}
+        from funpairdl.core import plan_cases
+        plan_cases.record("split", pair.name, [it.url for it in pair.items], plan_cases.split_request(
+            pair.items, pair.bundle_plan, pair.name, pair.alt_group_config, None, durations, None),
+            source_url=pair.source_url)
         groups = self.plan_bundle_split(
-            pair.items, pair.bundle_plan, pair.name, pair.alt_group_config,
-            durations={it.url: it.duration for it in pair.items if it.duration})
+            pair.items, pair.bundle_plan, pair.name, pair.alt_group_config, durations=durations)
         # One work is no split. (A single group — character alts joined to
         # their work — once "split" into an identical pair that split
         # again, forever.) Its first video is the work's; organize makes

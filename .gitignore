@@ -12,6 +12,8 @@ funpairdl.log*
 *.log
 
 # Dev / analysis artifacts
+# real posts' plan inputs, for tools/replay_plans.py
+plan_cases/
 analysis_output.txt
 _lost_*.json
 _lost_report.txt

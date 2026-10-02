@@ -31,6 +31,12 @@ def run():
     settings = Settings.load()
     settings.save()
 
+    # The planners' inputs, kept locally for regression replay
+    # (tools/replay_plans.py).
+    from funpairdl.constants import CONFIG_DIR as _cfg_dir
+    from funpairdl.core import plan_cases
+    plan_cases.enable(_cfg_dir / "plan_cases")
+
     qm = QueueManager(
         download_dir=Path(settings.download_dir),
         num_segments=settings.max_segments,

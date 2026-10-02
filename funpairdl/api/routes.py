@@ -283,6 +283,9 @@ async def bundle_plan(req: BundlePlanRequest) -> dict:
             durations[s.url] = float(s.duration)
         if s.link:
             links[s.url] = s.link
+    from funpairdl.core import plan_cases
+    plan_cases.record("bundle", req.name or "", [i.url for i in items], plan_cases.split_request(
+        items, None, req.name or "", None, hints, durations, links))
     groups = qm.plan_bundle_split(
         items, None, req.name or "", hints=hints, durations=durations, links=links)
     if not groups:
@@ -325,6 +328,16 @@ async def video_plan(req: VideoPlanRequest) -> dict:
                         priority=float(v.priority), failed=bool(v.failed),
                         pack=v.pack or "", width=int(v.width or 0))
               for v in req.videos if v.url]
+    from dataclasses import asdict
+
+    from funpairdl.core import plan_cases
+    plan_cases.record("video", req.title or "", [v.url for v in videos], {
+        "videos": [{k: getattr(v, k) for k in ("url", "name", "source", "size", "height", "duration",
+                                               "priority", "failed", "pack", "width")} for v in videos],
+        "prefs": asdict(prefs), "decisions": dict(req.decisions or {}),
+        "credits": list(req.credits or []), "title": req.title or "",
+        "scripts": [dict(s) for s in (req.scripts or [])],
+    })
     return await asyncio.to_thread(plan_videos, videos, prefs, dict(req.decisions or {}),
                                    list(req.credits or []), req.title or "",
                                    [dict(s) for s in (req.scripts or [])])

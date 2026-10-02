@@ -27,6 +27,29 @@ class TestPlanBundleSplit:
     """plan_bundle_split is the preview the panel shows AND the split the
     queue performs; a user plan (url → label) overrides the name heuristic."""
 
+    def test_a_replys_unmatched_script_is_its_own_work_in_a_split(self):
+        # Two scenes and their scripts, plus a reply's combined script that
+        # fits neither: it is not the first scene's variant.
+        items = [_vi("Show Scene 1.mp4", FileType.VIDEO), _vi("Show Scene 1.funscript", FileType.FUNSCRIPT),
+                 _vi("Show Scene 2.mp4", FileType.VIDEO), _vi("Show Scene 2.funscript", FileType.FUNSCRIPT)]
+        combined = _vi("Show Scenes 1 2 3.funscript", FileType.FUNSCRIPT)
+        combined.group = "Alt 1"
+        durations = {items[0].url: 160, items[1].url: 160, items[2].url: 140, items[3].url: 140,
+                     combined.url: 574.7}
+        groups = QueueManager().plan_bundle_split(
+            items + [combined], None, "Pack", {"Alt 1": {"display_name": "Show Scenes 1 2 3"}},
+            durations=durations)
+        own = [g for g in groups if combined in g["scripts"]]
+        assert len(own) == 1 and own[0]["videos"] == [] and own[0]["scripts"] == [combined]
+        assert own[0]["name"] == "Show Scenes 1 2 3"
+        assert len(groups) == 3
+
+    def test_a_replys_script_stays_a_variant_of_a_single_work(self):
+        v, s = _vi("Show.mp4", FileType.VIDEO), _vi("Show.funscript", FileType.FUNSCRIPT)
+        alt = _vi("Show (other take).funscript", FileType.FUNSCRIPT)
+        alt.group = "Alt 1"
+        assert QueueManager().plan_bundle_split([v, s, alt], None, "Show") is None
+
     def test_exact_length_beats_a_name_match_of_another_length(self):
         # "Pixie Purr (2 loops)": the long loop's video is named after the
         # post, the short loop's is not; both scripts carry the post's name.
