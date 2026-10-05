@@ -558,3 +558,44 @@ class TestArchivesAndCharacters:
         ], Prefs(), scripts=[{"name": "SMOOTH The_Visit_(Studio)_4K60FPS.funscript", "duration": 170.095},
                              {"name": "The_Visit_(Studio)_4K60FPS_maxinterval.funscript", "duration": 170.095}])
         assert sorted(res["roles"].values()) == ["alternate", "chosen"]
+
+
+class TestNamesHostsWrite:
+    def test_numbered_files_of_one_folder_are_each_a_video(self):
+        pack = "https://mega.nz/folder/loops"
+        files = [("Maker Sound Warning-1203344_loop.mp4", 50.0), ("Maker Sound Warning-1209955_loop.mp4", 48.0),
+                 ("Maker Sound Warning-1215566_loop.mp4", 48.0), ("Maker-1221177_loop.mp4", 64.0),
+                 ("Maker-1226788_loop.mp4", 64.0), ("Maker-1232399_loop.mp4", 67.0)]
+        vids = []
+        for i, (n, d) in enumerate(files):
+            v = _p(f"https://mega.nz/folder/loops/file/{i}", n, pack=pack, size=100 + i)
+            v.duration = d
+            vids.append(v)
+        res = plan_videos(vids, Prefs(), title="[Maker] Short loop collection")
+        assert sorted(set(res["roles"].values())) == ["chosen"]
+
+    def test_a_glued_render_name_is_a_variant_not_a_copy(self):
+        res = plan_videos([
+            _v("https://mega.nz/file/plain", "SongHMV.mp4", size=307, height=1080, duration=157.0),
+            _v("https://mega.nz/file/bar", "SongHMVBeatbar.mp4", size=303, height=1080, duration=157.0),
+        ], Prefs(), title="[Maker] Song HMV", scripts=[{"name": "Maker Song HMV.funscript", "duration": 157}])
+        r = res["roles"]
+        assert r["https://mega.nz/file/plain"] == "chosen"
+        assert r["https://mega.nz/file/bar"] == "variant"
+        assert _group_of(res, "https://mega.nz/file/bar")["tag"] == "Beatbar"
+
+    def test_a_page_titles_subtitle_is_no_variant(self):
+        res = plan_videos([
+            _v("https://pd/u/a", "[Maker] Garden Lucy.mp4", size=49, height=2160, duration=75.256),
+            _v("https://tube/v/1/maker-garden-lucy-beach-day-special/",
+               "[Maker] Garden Lucy | Beach Day Special", size=42, height=2160, duration=75.257, source="comment"),
+        ], Prefs(), title="[Maker] Garden Lucy", scripts=[{"name": "Maker Garden Lucy.funscript", "duration": 75}])
+        assert len([g for g in res["groups"] if g.get("chosen")]) == 1
+
+    def test_a_title_in_one_bracket_meets_its_folder_file(self):
+        res = plan_videos([
+            _p("https://pd/u/f1", "【maker MMD R18】Wife.mp4", size=94),
+            _v("https://iw/v/1/maker-mmd-r18wife", "【maker MMD R18】Wife", height=540, duration=130.0),
+        ], Prefs(), scripts=[{"name": "【maker MMD R18】Wife.funscript", "duration": 128.3}])
+        assert res["roles"]["https://pd/u/f1"] == "chosen"
+        assert res["roles"]["https://iw/v/1/maker-mmd-r18wife"] == "alternate"

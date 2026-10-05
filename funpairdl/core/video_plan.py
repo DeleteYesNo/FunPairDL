@@ -158,11 +158,24 @@ _GLUED_ENCODE_RE = re.compile(r"(?<=[a-z])(\d{2,3}fps|\d{3,4}p)(?![a-z0-9])")
 # A run of kana/CJK/hangul is one word: a Japanese or Chinese title
 # names its work as surely as Latin letters do (it used to read as no words).
 _WORD_RE = re.compile(r"[a-z0-9]+|[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uff66-\uff9f]+")
+# Words glued in CamelCase are words ("SongHMVBeatbar" is Song, HMV,
+# Beatbar): read as one, the Beatbar render shared no word with the
+# plain one and passed for a copy of it. Two lowercase letters before the
+# capital, so "VaM" and "McMom" stay whole.
+_CAMEL_RE = re.compile(r"(?<=[a-z]{2})(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z]{2,})")
 
 
 def _tokens(stem: str) -> set[str]:
-    low = _GLUED_ENCODE_RE.sub(r" \1", (stem or "").lower())
+    low = _GLUED_ENCODE_RE.sub(r" \1", _CAMEL_RE.sub(" ", stem or "").lower())
     return {_SYNONYMS.get(t, t) for t in _WORD_RE.findall(low)}
+
+
+def _pipe_tail(stem: str) -> set[str]:
+    """The words after " | " in a host's page title ("<Work> | Beach Day
+    Special", "<Song> | <Game> HMV"): the uploader's subtitle, not a
+    render's name."""
+    parts = re.split(r"\s+[|\uff5c]\s+", stem or "", maxsplit=1)
+    return _tokens(parts[1]) if len(parts) == 2 else set()
 
 
 _SEQUEL_RE = re.compile(r"^(?:part|pt|ep|episode|vol|chapter|ch|scene)\d+$")
@@ -183,14 +196,18 @@ _YEAR_RE = re.compile(r"^(?:19|20)\d\d$")
 _BRACKET_RE = re.compile(r"[\[\(【][^\]\)】]*[\]\)】]")
 
 
+def _words(tokens: set[str]) -> frozenset[str]:
+    """Tokens that are words: encode, version and id tokens and years dropped."""
+    return frozenset(t for t in tokens
+                     if not _ENCODE_TOKEN_RE.match(t) and not _OPAQUE_TOKEN_RE.match(t)
+                     and not _is_id(t) and not _YEAR_RE.match(t))
+
+
 def _core_tokens(stem: str) -> frozenset[str]:
     """The words that name the work: bracketed tags (an outfit, an id), encode
     words and version words dropped. "Work Title (nude) [1080p] v2" and
     "Work Title" agree on {"work", "title"}."""
-    bare = _BRACKET_RE.sub(" ", stem or "")
-    return frozenset(t for t in _tokens(bare)
-                     if not _ENCODE_TOKEN_RE.match(t) and not _OPAQUE_TOKEN_RE.match(t)
-                     and not _is_id(t) and not _YEAR_RE.match(t))
+    return _words(_tokens(_BRACKET_RE.sub(" ", stem or "")))
 
 
 _SQUARE_RE = re.compile(r"[\[【]([^\]】]*)[\]】]")
@@ -231,10 +248,14 @@ def _pack_anchor(v: "VideoSpec", anchors: list["VideoSpec"], cores: dict) -> "Vi
     contain one another (2+ shared words) and their creators don't
     conflict; the anchor whose creator the link names wins, then the
     closest name. None when nothing fits or two fit equally."""
-    vc, vcr = cores[v.url], _creators(v.stem)
+    vcr = _creators(v.stem)
     best: list[tuple[float, VideoSpec]] = []
     for a in anchors:
-        ac, acr = cores[a.url], _creators(a.stem)
+        ac, vc, acr = cores[a.url], cores[v.url], _creators(a.stem)
+        if len(ac) < 2 or len(vc) < 2:
+            # A title that is nearly all bracket ("【Maker MMD R18】Wife")
+            # leaves one core word: the whole names decide.
+            ac, vc = _words(a.tokens), _words(v.tokens)
         shared = ac & vc
         # Two shared words — or one long kana/CJK run, which names a work
         # as surely ("<Japanese title>.mp4" beside its iwara page).
@@ -325,8 +346,15 @@ def _classify(spec: VideoSpec, ref: VideoSpec,
             # (Character alts share most of their name and stay variants.)
             return "mirror", frozenset(), ""
     keep = lambda t: not _is_id(t) and t not in credits and not _ENCODE_TOKEN_RE.match(t)  # noqa: E731
-    diff = _one_sided({t for t in spec.tokens - ref.tokens if keep(t)},
-                      {t for t in ref.tokens - spec.tokens if keep(t)}, title_words)
+    a_only = {t for t in spec.tokens - ref.tokens if keep(t)}
+    b_only = {t for t in ref.tokens - spec.tokens if keep(t)}
+    for x, y, st in ((a_only, b_only, spec.stem), (b_only, a_only, ref.stem)):
+        tail = _pipe_tail(st)
+        if x and not y and len(tail) >= 2 and x <= tail:
+            # "<Work> | Beach Day Special" beside "<Work>.mp4": a reply's
+            # "alternate source" downloaded twice, as a variant.
+            x.clear()
+    diff = _one_sided(a_only, b_only, title_words)
     if any(re.fullmatch(r"c?rf\d*", t) for t in diff):
         # HandBrake's "-P4-RF35": the preset number rides with the quality.
         diff = {t for t in diff if not re.fullmatch(r"p\d", t)}
@@ -525,6 +553,18 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
     anchors = [v for v in videos if v.pack]
     for a in anchors:
         a.key = _pack_key(a, own_cores[a.url])
+    # Files of one folder named alike but for a number — a booru's post ids
+    # ("<Artist>-1203344_loop", "<Artist>-1209955_loop") — are that many
+    # videos: the number is their name. (Read as ids, six loops of one
+    # length passed for copies of a seventh and were never downloaded.)
+    alike: dict[tuple[str, str], list[VideoSpec]] = {}
+    for a in anchors:
+        alike.setdefault((a.pack, a.key), []).append(a)
+    for group in alike.values():
+        nums = [frozenset(t for t in a.tokens if t.isdigit() and len(t) >= 4) for a in group]
+        if len(group) >= 2 and all(nums) and len(set(nums)) == len(nums):
+            for a, n in zip(group, nums):
+                a.key += " #" + " #".join(sorted(n))
     for v in videos:
         if not v.pack and anchors:
             a = _pack_anchor(v, anchors, own_cores)
@@ -861,6 +901,9 @@ def _same_pack_twins(k1: str, k2: str) -> bool:
     shared. Different renders ("Nude" / "Clothed") share most too — the
     classification below keeps those apart; this only lets them meet."""
     a, b = set(k1[5:].split()), set(k2[5:].split())
+    na, nb = {t for t in a if t.startswith("#")}, {t for t in b if t.startswith("#")}
+    if na and nb and na != nb:
+        return False  # numbered files of one folder
     return bool(a | b) and len(a & b) / len(a | b) >= 0.6
 
 
