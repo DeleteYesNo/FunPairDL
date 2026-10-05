@@ -2747,11 +2747,19 @@ class QueueManager:
         words = [w for w in (self._name_words(pair.name), self._name_words(v.filename)) if len(w) >= 2]
         if not words:
             return None
+        # A post/file number is the name of a loop among its siblings
+        # ("<Artist>-1203344_loop" is not "<Artist> Warning-1209955_loop",
+        # though the words, ids aside, contain each other and the lengths agree).
+        nums = lambda s: set(re.findall(r"(?<!\d)\d{5,}(?!\d)", s or ""))  # noqa: E731
+        own_nums = nums(v.filename) | nums(pair.name)
         cands: list[Path] = []
         for root in self._library_dirs():
             try:
                 for d in root.iterdir():
                     if not d.is_dir() or lib.is_meta_dir(d.name):
+                        continue
+                    dn = nums(d.name)
+                    if own_nums and dn and not (own_nums & dn):
                         continue
                     dw = self._name_words(d.name)
                     if len(dw) >= 2 and any(w <= dw or dw <= w for w in words):

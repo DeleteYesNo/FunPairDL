@@ -116,11 +116,13 @@ _LABEL_STRIP_RE = re.compile(r'[()\[\]{}（）【】<>:"/\\|?*\x00-\x1f]')
 
 def sanitize_label(label: str, fallback: str = "Alt") -> str:
     """A variant label: no brackets, no path characters, single spaces,
-    at most 60 characters. Case is kept."""
+    at most 60 characters, no separator at either end ("-max", "_easy" —
+    what follows "<Work>" in "<Work>-max" — read "max", "easy"). Case is
+    kept."""
     s = _LABEL_STRIP_RE.sub(" ", label or "")
-    s = " ".join(s.split()).strip(" .")
+    s = " ".join(s.split()).strip(" ._-~")
     if len(s) > 60:
-        s = s[:60].rstrip(" .")
+        s = s[:60].rstrip(" ._-~")
     return s or fallback
 
 

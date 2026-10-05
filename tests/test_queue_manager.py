@@ -1295,6 +1295,15 @@ class TestLibraryAlreadyHolds:
         asyncio.run(qm._skip_library_copies(pair))
         assert any(i.file_type == FileType.VIDEO for i in pair.items)
 
+    def test_a_sibling_loop_of_another_number_is_another_video(self, tmp_path, monkeypatch):
+        qm, root, _work, _other = self._setup(tmp_path, monkeypatch)
+        sib = root / "Maker Sound Warning-1209955_loop"
+        sib.mkdir()
+        (sib / "Maker Sound Warning-1209955_loop.mp4").write_bytes(_mp4(48.0) + bytes(1_200_000))
+        pair = self._pair(tmp_path, "Maker-1221177_loop", "Maker-1221177_loop.mp4", 9_999_999, 48.0)
+        asyncio.run(qm._skip_library_copies(pair))
+        assert any(i.file_type == FileType.VIDEO for i in pair.items)
+
     def test_video_only_pair_is_done(self, tmp_path, monkeypatch):
         qm, _root, _work, other = self._setup(tmp_path, monkeypatch)
         pair = self._pair(tmp_path, "x", "x.mp4", (other / "Studio Date.mp4").stat().st_size, scripts=())

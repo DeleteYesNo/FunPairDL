@@ -15,6 +15,9 @@ def test_sanitize_label_drops_brackets_and_path_chars():
     assert lib.sanitize_label("a/b\\c:d") == "a b c d"
     assert lib.sanitize_label("   ") == "Alt"
     assert lib.sanitize_label("样本(示例风格)") == "样本 示例风格"
+    assert lib.sanitize_label("-max") == "max"
+    assert lib.sanitize_label("_easy") == "easy"
+    assert lib.sanitize_label(" - ") == "Alt"
 
 
 def test_unique_label_numbers_from_two():
