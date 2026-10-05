@@ -4025,7 +4025,14 @@ function _batchDecisions(st) {
     }
     out.push({ kind: "novideo", text });
   }
-  if ((st.scriptLens || []).length >= 2) {
+  if (st.checkedScripts === 0 && st.checkedVideos > 0 && !st.mergeInto) {
+    // The script sits behind a Patreon/fanbox link: a video alone is an
+    // orphan in the library.
+    out.push({ kind: "noscript", text: "這帖沒有可下載的腳本（只有影片）：送出只會下載影片，不要就取消勾選這帖" });
+  }
+  // Scripts alone (no video link at all) of several lengths are several
+  // scenes: the queue files each as a work of its own — nothing to ask.
+  if ((st.scriptLens || []).length >= 2 && st.hasVideos !== false) {
     const lens = st.scriptLens.map((c) => `${c.n} 支 ${formatDuration(c.dur)}`).join("、");
     const vid = st.videoDuration ? `，影片 ${formatDuration(st.videoDuration)}` : "";
     out.push({ kind: "scriptlen", text: `腳本長度不一致（${lens}${vid}）：不是同一支影片的腳本，請取消不屬於這支影片的` });
@@ -4143,8 +4150,10 @@ function _batchAssess(card) {
     const chosen = rows.find((r) => ticked(r) && _planDuration(panel, parsed, r.v.url, r.v.probedDuration));
     videoDuration = chosen ? Number(_planDuration(panel, parsed, chosen.v.url, chosen.v.probedDuration)) : 0;
   }
+  const checkedScripts = panel.querySelectorAll('.funpairdl-item[data-kind="script"] input[type="checkbox"][name]:checked').length + bundleScripts;
   const st = {
     ambiguous,
+    checkedScripts,
     workPlanSplit: !!panel._workPlanSplit,
     workBasis: _weakestBasis(Object.values(panel._workScriptBasis || {})),
     bundleBasis: [...panel.querySelectorAll(".funpairdl-bundle-group[data-basis]")].map((el) => el.dataset.basis),
@@ -4180,7 +4189,6 @@ function _batchAssess(card) {
   card.dataset.tier = tier;
 
   // Header: a one-line summary of what will be sent.
-  const checkedScripts = panel.querySelectorAll('.funpairdl-item[data-kind="script"] input[type="checkbox"][name]:checked').length + bundleScripts;
   const variants = rows.filter((r) => roles[r.v.url] === "variant" && ticked(r)).length;
   const alternates = rows.reduce((n, r) => n + ((ticked(r) && panel._alternates && panel._alternates[r.v.url]) ? panel._alternates[r.v.url].length : 0), 0);
   const parts = [];
@@ -4468,8 +4476,11 @@ function _batchSelKey(url) {
 function _userLabels(panel) {
   if (!panel) return {};
   const seeded = panel._workPlanSeeded || {};
+  const packSeeded = panel._packSeeded || {};
   const out = {};
-  for (const [u, lb] of Object.entries(panel._bundlePlan || {})) if (seeded[u] !== lb) out[u] = lb;
+  for (const [u, lb] of Object.entries(panel._bundlePlan || {})) {
+    if (seeded[u] !== lb && packSeeded[u] !== lb) out[u] = lb;
+  }
   return out;
 }
 
@@ -5267,6 +5278,16 @@ function _renderBundleGroups(panel, dropdown, groups) {
   // over the backend's suggestion for the files it names.
   _applyBundlePlanToDom(dropdown, panel._bundlePlan);
   _syncBundlePlanFromDom(panel, dropdown);
+  // The backend's split is a guess, like the work plan's: a reply's pack
+  // planned here before the video plan moved it into Main must not pin
+  // those labels as the user's (the post's video left its script's work).
+  panel._packSeeded = panel._packSeeded || {};
+  groups.forEach((g, i) => {
+    const name = g.name || `Group ${i + 1}`;
+    for (const url of [...(g.videos || []), ...(g.scripts || [])]) {
+      if (panel._bundlePlan[url] === name) panel._packSeeded[url] = name;
+    }
+  });
   _refreshBundleGroupCounts(dropdown);
   _wireBundleGroups(panel, dropdown);
 }
@@ -5478,7 +5499,7 @@ function _mainWorkRows(panel, parsed) {
           if (/\.funscript$/i.test(name)) {
             scripts.push({ url, name, row: fileRow, cb: bcb, duration: 0, link: "" });
           } else if (_isVideoFileName(name)) {
-            videos.push({ url, name, row: fileRow, cb: bcb, hints: "",
+            videos.push({ url, name, row: fileRow, cb: bcb, hints: "", work: _planWork(panel, url),
                           duration: _planDuration(panel, parsed, url, Number(bcb.dataset.duration) || 0) });
           }
         }
@@ -5487,7 +5508,7 @@ function _mainWorkRows(panel, parsed) {
       if (v.isBundle || v.probedIsBundle || isBundleUrl(v.url)) return;
       videos.push({
         url: v.url, name: v.probedFilename || "", row,
-        hints: (v.probedTags || []).join(" "),
+        hints: (v.probedTags || []).join(" "), work: _planWork(panel, v.url),
         duration: _planDuration(panel, parsed, v.url, v.probedDuration || 0),
       });
     } else if (row.dataset.kind === "script") {
@@ -5499,6 +5520,18 @@ function _mainWorkRows(panel, parsed) {
     }
   });
   return { videos, scripts };
+}
+
+// The work a video belongs to in the video plan (its group key): a render
+// and the variant the user said it has share one, and the work plan keeps
+// them together. The plan's own variants are guesses (the song's video
+// beside its HMV, a reply's copy) the script-less rule still weighs.
+function _planWork(panel, url) {
+  const plan = panel._videoPlan;
+  const g = plan && (plan.groups || []).find((gr) => gr.chosen === url);
+  if (!g || (g.kind !== "primary" && g.kind !== "variant")) return "";
+  if (g.kind === "variant" && (panel._encodeDecisions || {})[url] !== "variant") return "";
+  return String(g.key || "");
 }
 
 // The length of a planned video: its own probe's, else a copy's in its
@@ -5573,6 +5606,15 @@ async function _refreshWorkPlan(panel, parsed) {
   if (!block) return;
   const rows = _mainWorkRows(panel, parsed);
   const all = [...rows.videos, ...rows.scripts];
+  // Main's rows still wearing a pack's own guessed sub-group label: that
+  // guess is this plan's to replace, like its own seeds.
+  for (const r of all) {
+    const lb = panel._bundlePlan[r.url];
+    if (lb && (panel._packSeeded || {})[r.url] === lb) {
+      panel._workPlanSeeded = panel._workPlanSeeded || {};
+      panel._workPlanSeeded[r.url] = lb;
+    }
+  }
   if (rows.videos.length < 2 && panel._workGroupsExtra.length === 0) {
     block.hidden = true;
     for (const r of all) _setWorkBadge(r.row, null);
@@ -5592,7 +5634,7 @@ async function _refreshWorkPlan(panel, parsed) {
   // Ask the backend once per distinct row set; drags and renames only
   // re-render.
   const key = JSON.stringify([
-    rows.videos.map((r) => [r.url, r.name, r.hints || "", r.duration || 0]),
+    rows.videos.map((r) => [r.url, r.name, r.hints || "", r.duration || 0, r.work || ""]),
     rows.scripts.map((r) => [r.url, r.name, r.duration || 0, r.link || ""]),
   ]);
   if (panel._workPlanKey !== key) {
@@ -5603,6 +5645,7 @@ async function _refreshWorkPlan(panel, parsed) {
         name: parsed.title || "",
         videos: rows.videos.map((r) => ({
           url: r.url, name: r.name, hints: r.hints || "", duration: r.duration || null,
+          work: r.work || "",
         })),
         scripts: rows.scripts.map((r) => ({
           url: r.url, name: r.name, duration: r.duration || null, link: r.link || "",

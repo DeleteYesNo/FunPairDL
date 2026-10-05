@@ -150,7 +150,8 @@ def run_case(case: dict) -> object:
         items.append(pi)
     groups = qm.plan_bundle_split(
         items, req.get("plan"), req.get("name") or "", req.get("alt_group_config"),
-        hints=req.get("hints"), durations=req.get("durations"), links=req.get("links"))
+        hints=req.get("hints"), durations=req.get("durations"), links=req.get("links"),
+        works=req.get("works"))
     if not groups:
         return None
     return [{"name": g["name"], "label": g.get("label", ""),
@@ -159,7 +160,7 @@ def run_case(case: dict) -> object:
              "others": [o.url for o in g.get("others") or []]} for g in groups]
 
 
-def split_request(items, plan, name, alt_group_config, hints, durations, links) -> dict:
+def split_request(items, plan, name, alt_group_config, hints, durations, links, works=None) -> dict:
     """plan_bundle_split's inputs as JSON."""
     return {
         "name": name or "",
@@ -171,4 +172,5 @@ def split_request(items, plan, name, alt_group_config, hints, durations, links) 
         "hints": dict(hints or {}) or None,
         "durations": {k: float(v) for k, v in (durations or {}).items() if v} or None,
         "links": dict(links or {}) or None,
+        "works": dict(works or {}) or None,
     }

@@ -589,6 +589,13 @@ check("external script row shows its host", extRow.includes('<span class="funpai
   check("tier: gone post kept for its scripts", ctx._batchTier([], { nothingSelected: false, gone: true, goneAction: "keep" }), "auto");
   const keep = ctx._batchDecisions({ hasVideos: true, checkedVideos: 0, probeFailedAll: true, gone: true, goneAction: "keep" });
   check("tier: kept gone post asks nothing about videos", keep.length, 0);
+  const scenes = ctx._batchDecisions({ hasVideos: false, checkedVideos: 0, checkedScripts: 3,
+    scriptLens: [{ dur: 29, n: 2 }, { dur: 45, n: 1 }] });
+  check("tier: scripts of several scenes and no video ask nothing", scenes.length, 0);
+  const orphan = ctx._batchDecisions({ hasVideos: true, checkedVideos: 1, checkedScripts: 0 });
+  check("tier: a video without any script asks", orphan.map((d) => d.kind).join(), "noscript");
+  const merging = ctx._batchDecisions({ hasVideos: true, checkedVideos: 1, checkedScripts: 0, mergeInto: "F:/lib/Work" });
+  check("tier: no script into a library work asks nothing more", merging.length, 0);
 
   check("tier: dead", ctx._batchTier([], { dead: true }), "dead");
   check("tier: library has it all -> done", ctx._batchTier([], { nothingSelected: true, libraryHasWork: true }), "done");

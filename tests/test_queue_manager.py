@@ -44,6 +44,38 @@ class TestPlanBundleSplit:
         assert own[0]["name"] == "Show Scenes 1 2 3"
         assert len(groups) == 3
 
+    def test_scripts_of_several_scenes_without_a_video_are_works_each(self):
+        # VR scripts of renders sold on Patreon: no video link at all.
+        names = ["Show_Scene01_VR.funscript", "Show_Scene01_VR.pitch.funscript",
+                 "Show_Scene02_VR.funscript", "Show_Scene03_VR.funscript"]
+        items = [_vi(n, FileType.FUNSCRIPT) for n in names]
+        durations = {items[0].url: 45.15, items[1].url: 45.15, items[2].url: 29.317, items[3].url: 29.317}
+        groups = QueueManager().plan_bundle_split(items, None, "Show VR", durations=durations)
+        assert [g["name"] for g in groups] == ["Show_Scene01_VR", "Show_Scene02_VR", "Show_Scene03_VR"]
+        assert [len(g["scripts"]) for g in groups] == [2, 1, 1]
+        assert all(g["videos"] == [] for g in groups)
+
+    def test_scripts_of_two_lengths_without_a_video_are_two_works(self):
+        a, b = _vi("Maker_Doggy_VR.funscript", FileType.FUNSCRIPT), _vi("Maker_Ride_VR.funscript", FileType.FUNSCRIPT)
+        groups = QueueManager().plan_bundle_split([a, b], None, "Maker VR", durations={a.url: 60.08, b.url: 66.55})
+        assert len(groups) == 2
+
+    def test_flavours_of_one_script_without_a_video_stay_one_work(self):
+        a, b = _vi("Show.funscript", FileType.FUNSCRIPT), _vi("Show (soft).funscript", FileType.FUNSCRIPT)
+        assert QueueManager().plan_bundle_split([a, b], None, "Show", durations={a.url: 90, b.url: 90.2}) is None
+
+    def test_a_variant_the_video_plan_named_stays_with_its_work(self):
+        # Folder files of no known length: "<Work> edit.mp4", answered "another
+        # version", has no script of its own name — it is the work's variant.
+        v, e = _vi("Maker Wife.mp4", FileType.VIDEO), _vi("Maker Wife edit.mp4", FileType.VIDEO)
+        s = _vi("Maker Wife.funscript", FileType.FUNSCRIPT)
+        qm = QueueManager()
+        groups = qm.plan_bundle_split([v, e, s], None, "Maker Wife")
+        assert groups is not None and len(groups) == 2          # the name heuristic alone splits
+        groups = qm.plan_bundle_split([v, e, s], None, "Maker Wife",
+                                      works={v.url: "maker wife", e.url: "maker wife"})
+        assert len(groups) == 1 and groups[0]["videos"] == [v, e] and groups[0]["scripts"] == [s]
+
     def test_a_replys_script_stays_a_variant_of_a_single_work(self):
         v, s = _vi("Show.mp4", FileType.VIDEO), _vi("Show.funscript", FileType.FUNSCRIPT)
         alt = _vi("Show (other take).funscript", FileType.FUNSCRIPT)
@@ -1294,6 +1326,34 @@ def test_a_packs_cover_image_is_no_video(tmp_path):
                                                   "https://mega.nz/f/j": "cover.jpg"})
     kinds = {i.filename: i.file_type for i in pair.items}
     assert kinds == {"Garden Party.mp4": FileType.VIDEO, "cover.jpg": FileType.OTHER}
+
+
+def test_subtitles_and_a_dub_track_beside_videos_are_no_videos(tmp_path):
+    qm = QueueManager(download_dir=tmp_path)
+    urls = ["https://pd/u/v", "https://pd/u/s", "https://pd/u/a"]
+    pair = qm.add_pair(name="Show", video_urls=urls, script_urls=[],
+                       filenames=dict(zip(urls, ["Show_1080P.mp4", "Show_ENSUB.srt", "Show_ENDUB.aac"])))
+    kinds = {i.filename: i.file_type for i in pair.items}
+    assert kinds == {"Show_1080P.mp4": FileType.VIDEO, "Show_ENSUB.srt": FileType.OTHER,
+                     "Show_ENDUB.aac": FileType.OTHER}
+
+
+def test_an_audio_only_post_keeps_its_audio(tmp_path):
+    qm = QueueManager(download_dir=tmp_path)
+    pair = qm.add_pair(name="Voice", video_urls=["https://pd/u/a"], script_urls=[],
+                       filenames={"https://pd/u/a": "Voice.mp3"})
+    assert [i.file_type for i in pair.items] == [FileType.VIDEO]
+
+
+def test_each_episodes_subtitles_go_with_its_episode():
+    items, durations = [], {}
+    for n in (1, 2):
+        items += [PairItem(url=f"https://pd/u/v{n}", filename=f"Show e0{n}_SBS.mkv", file_type=FileType.VIDEO),
+                  _vi(f"Show e0{n}_SBS.funscript", FileType.FUNSCRIPT),
+                  PairItem(url=f"https://pd/u/s{n}", filename=f"Show e0{n}_SBS.ass", file_type=FileType.OTHER)]
+    groups = QueueManager().plan_bundle_split(items, None, "Show")
+    by_name = {g["name"]: [o.filename for o in g["others"]] for g in groups}
+    assert by_name == {"Show e01_SBS": ["Show e01_SBS.ass"], "Show e02_SBS": ["Show e02_SBS.ass"]}
 
 
 def test_a_token_dead_heat_goes_to_the_video_of_the_scripts_length():

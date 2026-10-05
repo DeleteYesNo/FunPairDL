@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
@@ -267,14 +268,18 @@ async def bundle_plan(req: BundlePlanRequest) -> dict:
     hints: dict[str, str] = {}
     durations: dict[str, float] = {}
     links: dict[str, str] = {}
+    works: dict[str, str] = {}
     for v in req.videos:
+        name = v.name or qm._guess_filename(v.url, "video")
         items.append(PairItem(
-            url=v.url, file_type=FileType.VIDEO,
-            filename=v.name or qm._guess_filename(v.url, "video")))
+            url=v.url, filename=name,
+            file_type=FileType.OTHER if Path(name).suffix.lower() in qm._OTHER_EXTS else FileType.VIDEO))
         if v.hints:
             hints[v.url] = v.hints
         if v.duration:
             durations[v.url] = float(v.duration)
+        if v.work:
+            works[v.url] = v.work
     for s in req.scripts:
         items.append(PairItem(
             url=s.url, file_type=FileType.FUNSCRIPT,
@@ -285,9 +290,9 @@ async def bundle_plan(req: BundlePlanRequest) -> dict:
             links[s.url] = s.link
     from funpairdl.core import plan_cases
     plan_cases.record("bundle", req.name or "", [i.url for i in items], plan_cases.split_request(
-        items, None, req.name or "", None, hints, durations, links))
+        items, None, req.name or "", None, hints, durations, links, works))
     groups = qm.plan_bundle_split(
-        items, None, req.name or "", hints=hints, durations=durations, links=links)
+        items, None, req.name or "", hints=hints, durations=durations, links=links, works=works)
     if not groups:
         return {"split": False, "groups": []}
     return {

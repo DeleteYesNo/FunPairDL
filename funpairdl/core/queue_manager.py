@@ -418,6 +418,12 @@ class QueueManager:
                 item.duration = float(grp_durations.get(url) or 0.0)
                 pair.items.append(item)
 
+        if any(it.file_type == FileType.VIDEO and not it.is_bundle
+               and Path(it.filename).suffix.lower() not in self._AUDIO_EXTS for it in pair.items):
+            for it in pair.items:
+                if it.file_type == FileType.VIDEO and Path(it.filename).suffix.lower() in self._AUDIO_EXTS:
+                    it.file_type = FileType.OTHER
+
         # Bundle arrangement from the panel (per group and/or top level).
         for grp in groups:
             for u, lb in (grp.get("bundle_plan") or {}).items():
@@ -1991,6 +1997,54 @@ class QueueManager:
                     return canonical
         return ""
 
+    def _script_only_works(self, scripts: list[PairItem], others: list[PairItem],
+                           durations: dict[str, float]) -> list[dict] | None:
+        """A post of scripts and no video (a paid video, VR renders on
+        Patreon): scripts of other scenes — another length, another
+        scene/part number — are works of their own, each with its axis
+        files, not "(Alt)" variants of the first ("<Work>_Doggy" 60 s beside
+        "<Work>_Ridin" 66 s; "Scene01" … "Scene03"). None when they are one
+        work (one length, flavours of one script)."""
+        from funpairdl.core.video_plan import _duration_differs, _sequel_marks, _tokens
+
+        def base_of(name: str) -> str:
+            stem = name[: -len(".funscript")] if name.lower().endswith(".funscript") else name
+            parts = stem.rsplit(".", 1)
+            if len(parts) == 2 and self._parse_axis(name)[0] != "L0":
+                stem = parts[0]
+            return stem
+
+        bases: dict[str, list[PairItem]] = {}
+        for s in scripts:
+            bases.setdefault(base_of(s.filename).lower(), []).append(s)
+        if len(bases) < 2:
+            return None
+        info = []
+        for ss in bases.values():
+            main = [s for s in ss if self._parse_axis(s.filename)[0] == "L0"] or ss
+            dur = next((durations.get(s.url) or durations.get(s.resolved_url or "") for s in main
+                        if durations.get(s.url) or durations.get(s.resolved_url or "")), 0.0)
+            base = base_of(main[0].filename)
+            info.append({"base": base, "dur": dur, "marks": _sequel_marks(_tokens(base)), "scripts": ss})
+        works: list[list[dict]] = []
+        for x in info:
+            home = next((w for w in works if all(
+                y["marks"] == x["marks"] and not _duration_differs(y["dur"], x["dur"]) for y in w)), None)
+            if home is None:
+                works.append([x])
+            else:
+                home.append(x)
+        if len(works) < 2:
+            return None
+        groups = []
+        for w in works:
+            ss = [s for x in w for s in x["scripts"]]
+            name = sanitize_filename(self._clean_title(w[0]["base"])) or sanitize_filename(w[0]["base"])
+            groups.append({"name": name, "label": "", "videos": [], "scripts": ss, "others": [],
+                           "script_basis": {s.url: "name" for s in ss}, "basis": "name"})
+        groups[0]["others"].extend(others)
+        return groups
+
     def plan_bundle_split(
         self,
         items: list[PairItem],
@@ -2000,6 +2054,7 @@ class QueueManager:
         hints: dict[str, str] | None = None,
         durations: dict[str, float] | None = None,
         links: dict[str, str] | None = None,
+        works: dict[str, str] | None = None,
     ) -> list[dict] | None:
         """Decide how a multi-work bundle splits into pairs — without touching
         the queue. Returns None when no split is due (one video, or a mirror
@@ -2014,6 +2069,8 @@ class QueueManager:
         heuristic only places what is left. The /bundle/plan endpoint calls
         this with no plan so the panel can show the heuristic's outcome
         before sending — the preview and the real split are one code path.
+        `works` (video url → the video plan's work key) keeps a variant
+        with its work.
         """
         alt_group_config = alt_group_config or {}
         hints = hints or {}
@@ -2033,6 +2090,8 @@ class QueueManager:
             if lb and lb not in labels:
                 labels.append(lb)
 
+        if not videos and not labels:
+            return self._script_only_works(scripts, others, durations)
         # One video is one work, whatever labels say: labels seeded by a
         # preview of a larger selection (the user then unchecked a video)
         # must not split the lone video from its scripts.
@@ -2484,14 +2543,37 @@ class QueueManager:
             taken = {id(s) for ss in by_alt.values() for s in ss}
             unmatched_scripts = [s for s in unmatched_scripts if id(s) not in taken]
 
-        # Scripts nobody claimed (likely shared/generic) and "other" files go
-        # with the first group.
+        # Scripts nobody claimed (likely shared/generic) go with the first
+        # group; an "other" file goes with the video it is named after
+        # ("<ep02>.ass", "<ep02>.en.srt"), else with the first group.
         if unmatched_scripts:
             groups[0]["scripts"].extend(unmatched_scripts)
             for s in unmatched_scripts:
                 groups[0]["script_basis"][s.url] = "none"
-        if others:
-            groups[0]["others"].extend(others)
+        for o in others:
+            stem = Path(o.filename).stem.lower()
+            home, best = groups[0], 0
+            for g in groups:
+                for v in g["videos"]:
+                    vs = Path(v.filename).stem.lower()
+                    if len(vs) > best and (stem == vs or stem.startswith(vs + ".")):
+                        home, best = g, len(vs)
+            home["others"].append(o)
+
+        # The video plan judged two videos one work (a render and its
+        # "edit" the user called a variant): the variant's script-less group
+        # joins its work instead of standing as a work with nothing to play.
+        works = {k: v for k, v in (works or {}).items() if v}
+        for g in [g for g in groups if works and g["videos"] and not g["scripts"]]:
+            keys = {works.get(v.url) for v in g["videos"]}
+            if None in keys or len(keys) != 1:
+                continue
+            home = next((h for h in groups if h is not g and h["scripts"]
+                         and any(works.get(v.url) in keys for v in h["videos"])), None)
+            if home is not None:
+                home["videos"].extend(g["videos"])
+                home["others"].extend(g["others"])
+                groups.remove(g)
 
         # Group confidence = its weakest script: a group holding one guessed
         # ("order") script is a guess as a whole.
@@ -3124,7 +3206,12 @@ class QueueManager:
     _VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".wmv", ".ts", ".flv"}
     # Files a pack carries beside its videos and scripts.
     _OTHER_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".txt", ".nfo", ".md",
-                   ".pdf", ".zip", ".rar", ".7z", ".url", ".html"}
+                   ".pdf", ".zip", ".rar", ".7z", ".url", ".html",
+                   # subtitles: typed as videos, each became a work of its own
+                   ".srt", ".ass", ".ssa", ".vtt", ".sub", ".idx", ".sup", ".lrc"}
+    # An audio track beside the videos (an English dub) is an attachment; a
+    # post whose only media is audio keeps it as its "video".
+    _AUDIO_EXTS = {".aac", ".mp3", ".wav", ".flac", ".m4a", ".ogg", ".opus", ".wma"}
 
     # Trailing bracket groups made only of post qualifiers: "(Requested, HQ
     # Multi-Axis Script)", "[Multi-Axis]", "(Suggested)", "(Soft & Hardcore

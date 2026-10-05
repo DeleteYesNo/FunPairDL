@@ -98,6 +98,9 @@ class BundleFileSpec(BaseModel):
     duration: float | None = None
     # A script's metadata.video_url — names its video outright.
     link: str = ""
+    # A video's work in the video plan (/video/plan group key): a render and
+    # its variant share it and stay one work.
+    work: str = ""
 
 
 class BundlePlanRequest(BaseModel):
