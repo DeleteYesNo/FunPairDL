@@ -3523,6 +3523,14 @@ async function _refreshVideoPlan(panel, parsed) {
   const planScripts = (parsed.mode === "collection"
     ? [...(parsed.sections || []).flatMap((sec) => sec.scripts), ...(parsed.commentScripts || [])]
     : (parsed.scripts || [])).map((s) => ({ name: s.filename || "", duration: s.probedDuration || 0 }));
+  // A pack's own scripts name its works too ("<Song> [<iwara id>].funscript"
+  // beside the folder's "<Song> [<iwara id>].mp4"): without them a folder of
+  // renders looked script-less, and two dances to one song a second apart
+  // were taken for one video on two hosts.
+  panel.querySelectorAll(".funpairdl-bundle-cb").forEach((cb) => {
+    const name = cb.dataset.fileName || "";
+    if (/\.funscript$/i.test(name)) planScripts.push({ name, duration: Number(cb.dataset.duration) || 0 });
+  });
   const decisions = panel._encodeDecisions || {};
   const specs = scopes.map((sc) => sc.map(({ v, src }) => spec(v, src)));
   const key = JSON.stringify([specs, prefs.video_pick_mode, prefs.min_resolution,

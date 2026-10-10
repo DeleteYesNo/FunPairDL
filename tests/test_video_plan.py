@@ -599,3 +599,42 @@ class TestNamesHostsWrite:
         ], Prefs(), scripts=[{"name": "【maker MMD R18】Wife.funscript", "duration": 128.3}])
         assert res["roles"]["https://pd/u/f1"] == "chosen"
         assert res["roles"]["https://iw/v/1/maker-mmd-r18wife"] == "alternate"
+
+class TestSiteIds:
+    """A pack of renders to one song, each with its iwara link and a script
+    set naming that render's id (synthetic names)."""
+    PACK = "https://mega.example/folder/mockpack"
+
+    def _pack_file(self, fid, name, dur):
+        v = _p(f"{self.PACK}/file/{fid}", name, pack=self.PACK)
+        v.duration = dur
+        return v
+
+    def test_a_link_with_a_pack_files_id_is_that_files_copy(self):
+        res = plan_videos([
+            self._pack_file("f1", "Iwara - Mock Song Dancer A [AAAAaaaa1111] [Source].mp4", 155.0),
+            self._pack_file("f2", "Iwara - Mock Song Dancer B [BBBBbbbb2222] [Source].mp4", 156.0),
+            _v("https://www.iwara.tv/video/AAAAaaaa1111", "舞者甲", duration=157.0),
+            _v("https://www.iwara.tv/video/BBBBbbbb2222", "Mock Song Dancer B", duration=158.0),
+        ], Prefs(), scripts=[
+            {"name": "Iwara - Mock Song Dancer A [AAAAaaaa1111] [Source].funscript", "duration": 0},
+            {"name": "Iwara - Mock Song Dancer B [BBBBbbbb2222] [Source].funscript", "duration": 0},
+        ])
+        roles = res["roles"]
+        assert roles[f"{self.PACK}/file/f1"] == "chosen" and roles[f"{self.PACK}/file/f2"] == "chosen"
+        assert _group_of(res, "https://www.iwara.tv/video/AAAAaaaa1111")["chosen"] == f"{self.PACK}/file/f1"
+        assert _group_of(res, "https://www.iwara.tv/video/BBBBbbbb2222")["chosen"] == f"{self.PACK}/file/f2"
+
+    def test_links_named_by_different_scripts_are_not_one_video_by_length(self):
+        # A pack's render and another dancer's link to the same song, a
+        # second apart, each the video of its own script set: two works,
+        # not the pack file and a copy of it.
+        res = plan_videos([
+            self._pack_file("f3", "Iwara - Mock Song Dancer C [CCCCcccc3333] [Source].mp4", 156.0),
+            _v("https://www.iwara.tv/video/DDDDdddd4444", "舞者丁", duration=157.0),
+        ], Prefs(), scripts=[
+            {"name": "Iwara - Mock Song Dancer C [CCCCcccc3333] [Source].funscript", "duration": 0},
+            {"name": "Iwara - Dancer D [DDDDdddd4444] [Source].funscript", "duration": 0},
+        ])
+        assert res["roles"][f"{self.PACK}/file/f3"] == "chosen"
+        assert res["roles"]["https://www.iwara.tv/video/DDDDdddd4444"] == "chosen"

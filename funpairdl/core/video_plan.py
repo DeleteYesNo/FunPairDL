@@ -567,7 +567,12 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
                 a.key += " #" + " #".join(sorted(n))
     for v in videos:
         if not v.pack and anchors:
-            a = _pack_anchor(v, anchors, own_cores)
+            # A link whose site id is the "[<id>]" of a pack file's name is
+            # that file's other copy, whatever the host titles it ("<Dancer>"
+            # on iwara beside "Iwara - <Song> <Dancer> [<id>] [Source].mp4").
+            vid = set(_SITE_ID_RE.findall(v.url or ""))
+            a = next((x for x in anchors if vid & set(_BRACKET_ID_RE.findall(x.name or ""))), None) if vid else None
+            a = a or _pack_anchor(v, anchors, own_cores)
             if a is not None:
                 v.key = a.key
 
@@ -589,6 +594,7 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
         # A host that rounds to whole seconds (iwara, MEGA) is a second off.
         tol = 1.0 if float(a).is_integer() or float(b).is_integer() else 0.5
         return abs(a - b) <= tol
+    named = _script_named_ids(videos, scripts or [])
     for k1 in list(by_len):
         for k2 in list(by_len):
             if k1 < k2 and k1 in by_len and k2 in by_len and _same_len(by_len[k1], by_len[k2]):
@@ -596,6 +602,13 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
                     continue  # two files in packs are two videos
                 if marks.get(k1, set()) != marks.get(k2, set()):
                     continue  # "part2" is the sequel, not a copy (a series keeps one length)
+                n1 = {named[v.url] for v in videos if v.key == k1 and v.url in named}
+                n2 = {named[v.url] for v in videos if v.key == k2 and v.url in named}
+                if n1 and n2 and not (n1 & n2):
+                    # Each is the video of its own script set (the scripts
+                    # carry each one's site id): two dances to one song, a
+                    # second apart, not one video on two hosts.
+                    continue
                 keep, drop = (k2, k1) if k2.startswith("pack:") else (k1, k2)
                 for v in videos:
                     if v.key == drop:
@@ -905,6 +918,26 @@ def _same_pack_twins(k1: str, k2: str) -> bool:
     if na and nb and na != nb:
         return False  # numbered files of one folder
     return bool(a | b) and len(a & b) / len(a | b) >= 0.6
+
+
+_SITE_ID_RE = re.compile(r"(?:iwara\.tv|rule34video\.com)/videos?/([A-Za-z0-9]{6,})", re.IGNORECASE)
+_BRACKET_ID_RE = re.compile(r"\[([A-Za-z0-9]{10,24})\]")
+
+
+def _script_named_ids(videos: list[VideoSpec], scripts: list[dict]) -> dict[str, str]:
+    """video url → its site id, for videos a script's name carries the id of
+    ("Iwara - <Song> [<id>] [Source].funscript"). The id comes from the
+    video's link or a "[<id>]" in its file name."""
+    s_names = "\n".join(str(s.get("name") or "") for s in scripts)
+    if not s_names:
+        return {}
+    out: dict[str, str] = {}
+    for v in videos:
+        for vid in [*_SITE_ID_RE.findall(v.url or ""), *_BRACKET_ID_RE.findall(v.name or "")]:
+            if len(vid) >= 8 and vid in s_names:
+                out[v.url] = vid
+                break
+    return out
 
 
 def _mark_crowded_and_strays(videos: list[VideoSpec], scripts: list[dict], title: str) -> None:
