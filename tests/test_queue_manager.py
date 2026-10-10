@@ -55,6 +55,19 @@ class TestPlanBundleSplit:
         assert [len(g["scripts"]) for g in groups] == [2, 1, 1]
         assert all(g["videos"] == [] for g in groups)
 
+    def test_a_script_set_placed_by_position_stays_together(self):
+        # Three renders of one dance; one multi-axis script set whose names
+        # share nothing with the videos. Placing file by file handed the L0,
+        # the roll+twist and the sway to three different works.
+        vids = [_vi(f"Mock Render {c}.mp4", FileType.VIDEO) for c in "ABC"]
+        base = "Iwara_-_SampleSet_Q9_Source"
+        scripts = [_vi(f"{base}{sfx}.funscript", FileType.FUNSCRIPT)
+                   for sfx in ("", ".roll", ".twist", ".sway (1)")]
+        groups = QueueManager().plan_bundle_split(vids + scripts, None, "Mock Dance Pack")
+        holders = [g for g in groups if g["scripts"]]
+        assert len(holders) == 1
+        assert sorted(s.filename for s in holders[0]["scripts"]) == sorted(s.filename for s in scripts)
+
     def test_scripts_of_two_lengths_without_a_video_are_two_works(self):
         a, b = _vi("Maker_Doggy_VR.funscript", FileType.FUNSCRIPT), _vi("Maker_Ride_VR.funscript", FileType.FUNSCRIPT)
         groups = QueueManager().plan_bundle_split([a, b], None, "Maker VR", durations={a.url: 60.08, b.url: 66.55})

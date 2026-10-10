@@ -2128,9 +2128,12 @@ class QueueManager:
             if base.lower().endswith(".funscript"):
                 base = base[: -len(".funscript")]
             parts = base.rsplit(".", 1)
+            # ".sway (1)": a browser's numbering of a second download (as in
+            # _parse_axis) — still that axis of the same set.
+            bare = re.sub(r"\s*\(\d+\)$", "", parts[1]) if len(parts) == 2 else ""
             if len(parts) == 2 and (
-                parts[1].lower() in self._ERODECK_AXIS_MAP
-                or self._axis_from_prefixed(parts[1])
+                bare.lower() in self._ERODECK_AXIS_MAP
+                or self._axis_from_prefixed(bare)
             ):
                 base = parts[0]
             return base
@@ -2399,19 +2402,41 @@ class QueueManager:
         if unmatched_scripts:
             vrank = {id(v): r for r, v in enumerate(h_videos)}
             srank = {id(s): r for r, s in enumerate(h_scripts)}
-            still_unmatched: list[PairItem] = []
+            # One script set (Work.funscript + Work.roll/.twist/… .funscript)
+            # is one work: a leftover axis whose set already sits with a video
+            # follows it, and a set placed by position goes as one. Placing
+            # file by file dealt a set's axes out to every script-less video
+            # (three renders of one dance got the L0, roll+twist and sway).
+            def _set_key(s: PairItem) -> str:
+                return _strip_axis(s.filename).strip().lower()
+            home: dict[str, tuple[PairItem, str]] = {}
+            for v, _, _ in video_info:
+                for sc in matched[id(v)]:
+                    home.setdefault(_set_key(sc), (v, basis.get(id(sc), "order")))
+            sets: dict[str, list[PairItem]] = {}
             for s in unmatched_scripts:
-                rs = srank.get(id(s), 0)
+                sets.setdefault(_set_key(s), []).append(s)
+            still_unmatched: list[PairItem] = []
+            for key, members in sets.items():
+                if key in home:
+                    v, how = home[key]
+                    for s in members:
+                        matched[id(v)].append(s)
+                        basis[id(s)] = how
+                    continue
+                lead = next((s for s in members if self._parse_axis(s.filename)[0] == "L0"), members[0])
+                rs = srank.get(id(lead), 0)
                 cand = [v for v, _, _ in video_info if not matched[id(v)] and not _label(v)]
                 if not cand:
-                    still_unmatched.append(s)
+                    still_unmatched.extend(members)
                     continue
                 cand.sort(key=lambda v: (
                     abs(vrank.get(id(v), 0) - rs),
                     0 if vrank.get(id(v), 0) <= rs else 1,
                 ))
-                matched[id(cand[0])].append(s)
-                basis[id(s)] = "order"
+                for s in members:
+                    matched[id(cand[0])].append(s)
+                    basis[id(s)] = "order"
             unmatched_scripts = still_unmatched
 
         # Group naming: prefer a human title over the video's own stem. The
