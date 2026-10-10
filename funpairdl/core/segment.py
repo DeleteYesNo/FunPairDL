@@ -87,15 +87,29 @@ class SegmentDownloader:
         self._last_progress_time: float = 0
 
     @property
-    def is_complete(self) -> bool:
+    def expected(self) -> int:
+        """Bytes this segment must hold when done (0 = unknown)."""
         if not self.use_range:
-            # No-range plans carry placeholder range_end=0, so the range
-            # arithmetic below would yield a bogus 1-byte expectation and
-            # stamp any leftover partial as complete (audit [14]). Only a
-            # caller-supplied real total can prove completion.
-            return self.known_total > 0 and self.downloaded >= self.known_total
-        expected = self.range_end - self.range_start + 1
-        return self.downloaded >= expected
+            # No-range plans carry placeholder range_end=0; only a
+            # caller-supplied real total says how big the file is (audit [14]).
+            return max(self.known_total, 0)
+        return self.range_end - self.range_start + 1
+
+    @property
+    def is_complete(self) -> bool:
+        # Exactly the expected size: a bigger file is not "complete and then
+        # some" but bytes from another plan or another file — an earlier
+        # attempt that split the file differently left a longer .part, which
+        # used to be merged as-is and gave a larger, corrupt video.
+        return self.expected > 0 and self.downloaded == self.expected
+
+    def _discard(self, why: str) -> None:
+        logger.warning("Segment %d: discarding %s (%s)", self.index, self.temp_file.name, why)
+        try:
+            self.temp_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+        self.downloaded = 0
 
     def pause(self) -> None:
         self._pause_event.clear()
@@ -111,34 +125,19 @@ class SegmentDownloader:
         # Check for existing partial download
         if self.temp_file.exists():
             size = self.temp_file.stat().st_size
-            if self.use_range:
-                # Resumable: continue from where the file left off.
-                self.downloaded = size
-                if self.is_complete:
-                    logger.debug("Segment %d already complete", self.index)
-                    return
-            else:
+            self.downloaded = size
+            if self.is_complete:
+                logger.debug("Segment %d already complete", self.index)
+                return
+            if self.expected and size > self.expected:
+                self._discard(f"{size} bytes, segment holds {self.expected}")
+            elif not self.use_range:
                 # No-range downloads can't resume — the server always sends
                 # the file from byte 0, so any leftover partial (failed
                 # attempt, pause, stale .part0 from a previous run) is
-                # unresumable. Only a known real total may prove the file
-                # complete; otherwise delete it and restart (audit [14]).
-                if self.known_total > 0 and size >= self.known_total:
-                    self.downloaded = size
-                    logger.debug(
-                        "Segment %d already complete (matches known total)",
-                        self.index,
-                    )
-                    return
-                logger.debug(
-                    "Segment %d: discarding unresumable partial %s (%d bytes)",
-                    self.index, self.temp_file.name, size,
-                )
-                try:
-                    self.temp_file.unlink()
-                except OSError:
-                    pass
-                self.downloaded = 0
+                # unresumable (audit [14]).
+                self._discard(f"unresumable partial, {size} bytes")
+            # else: a shorter ranged partial — resume from where it left off
 
         async def _attempt(verify_tls: bool) -> None:
             if not self.use_range and self.downloaded > 0:
@@ -191,6 +190,14 @@ class SegmentDownloader:
                             message=f"Unexpected status {resp.status} for segment {self.index}",
                         )
 
+                    if self.use_range and resp.status == 200 and actual_start > 0:
+                        # The whole file from byte 0 would land at this
+                        # segment's offset.
+                        raise RuntimeError(
+                            f"Segment {self.index}: server ignored Range "
+                            f"(HTTP 200 for bytes={actual_start}-)"
+                        )
+
                     self.temp_file.parent.mkdir(parents=True, exist_ok=True)
 
                     # Buffer writes and flush to disk in a background thread
@@ -230,10 +237,27 @@ class SegmentDownloader:
                     if buf and not self._cancelled:
                         wm = mode if first_flush else "ab"
                         await asyncio.to_thread(_flush, bytes(buf), file_path, wm)
+                        buf.clear()  # written: the error path below must not write it again
 
                     # Always report final progress so download_task sees 100%
                     if self.on_progress and not self._cancelled:
                         self.on_progress(self.index, self.downloaded)
+
+                    # A stream that ends without an error is not proof the
+                    # segment is whole. Short: raise, and the retry resumes
+                    # from here. Long: those bytes belong elsewhere — drop.
+                    if not self._cancelled and self.expected:
+                        if self.downloaded > self.expected:
+                            got = self.downloaded
+                            self._discard(f"received {got} bytes, segment holds {self.expected}")
+                            raise RuntimeError(
+                                f"Segment {self.index}: received {got} bytes, expected {self.expected}"
+                            )
+                        if self.downloaded < self.expected:
+                            raise RuntimeError(
+                                f"Segment {self.index}: stream ended at {self.downloaded}"
+                                f"/{self.expected} bytes"
+                            )
 
             except asyncio.CancelledError:
                 # Best-effort flush so retries resume from where we left off

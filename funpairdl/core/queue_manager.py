@@ -1745,6 +1745,11 @@ class QueueManager:
                 if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
                     logger.error("Download task exception: %s", result)
 
+            # A video marked COMPLETED (downloaded, merged, or found already
+            # on disk) whose MP4 box chain does not fit the file is a broken
+            # download: drop it and let the next round fetch it again.
+            await self._fail_broken_videos(pair, output_dir)
+
         # Force-sync bytes for completed items: ensure downloaded_bytes ==
         # total_bytes so progress never shows a stale mid-download percentage.
         # Also defensively drop their segment records — dead weight that once
@@ -3967,6 +3972,35 @@ class QueueManager:
         pair.organized = False
         logger.info("Undo organize complete: %s", pair.name)
 
+    async def _fail_broken_videos(self, pair: Pair, output_dir: Path) -> None:
+        from funpairdl.utils.media_check import mp4_problem
+
+        # A file that was in the folder before this pair (merging scripts
+        # into a library work) is never this download's to judge or delete.
+        foreign = {n.lower() for n in (pair.foreign_files or [])}
+        for item in pair.items:
+            if item.state != ItemState.COMPLETED or item.file_type != FileType.VIDEO:
+                continue
+            if item.filename.lower() in foreign:
+                continue
+            path = output_dir / item.filename
+            try:
+                problem = await asyncio.to_thread(mp4_problem, path) if path.exists() else None
+            except OSError as e:
+                problem = f"unreadable: {e}"
+            if not problem:
+                continue
+            logger.error("Broken download, will retry: %s (%s)", item.filename, problem)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            item.state = ItemState.FAILED
+            item.error_message = f"Broken download ({problem})"
+            item.downloaded_bytes = 0
+            if self.on_item_updated:
+                self.on_item_updated(item)
+
     async def _recover_complete_items(self, pair: Pair, output_dir: Path) -> None:
         """Recover items whose data is already fully on disk.
 
@@ -3994,17 +4028,23 @@ class QueueManager:
                     self.on_item_updated(item)
                 continue
 
-            # Case 2: all segment temp files present and sum to expected size
+            # Case 2: every segment temp file present and exactly its range
+            # (a part holding more is from another plan — not this file's
+            # bytes), adding up to the expected size
             if not item.segments or item.total_bytes <= 0:
                 continue
             try:
                 seg_paths = [Path(seg.temp_file) for seg in item.segments]
                 if not all(p.exists() for p in seg_paths):
                     continue
+                exact = all(
+                    p.stat().st_size == seg.range_end - seg.range_start + 1
+                    for p, seg in zip(seg_paths, item.segments)
+                )
                 disk_total = sum(p.stat().st_size for p in seg_paths)
             except OSError:
                 continue
-            if disk_total < item.total_bytes:
+            if not exact or disk_total != item.total_bytes:
                 continue
 
             # Merge segments into output file

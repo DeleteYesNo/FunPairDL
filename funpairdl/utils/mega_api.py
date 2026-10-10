@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import logging
 import re
 import struct
@@ -983,6 +984,24 @@ async def _download_folder_file(
         )
 
 
+def _mega_part_path(output_path: Path) -> Path:
+    """Where a MEGA download is written until it is complete."""
+    return output_path.with_name(output_path.name + ".megapart")
+
+
+def _publish_mega_part(part_path: Path, output_path: Path, file_size: int) -> None:
+    """Trim MEGA's AES padding, check the size, and rename the finished part
+    to its final name — the only way a MEGA file reaches that name."""
+    if file_size > 0:
+        size = part_path.stat().st_size
+        if size > file_size:
+            with open(part_path, "r+b") as f:
+                f.truncate(file_size)
+        elif size < file_size:
+            raise RuntimeError(f"MEGA download is {size} bytes, expected {file_size}")
+    os.replace(part_path, output_path)
+
+
 async def _stream_decrypt(
     session, download_url: str, output_dir: Path, filename: str,
     file_size: int, k: tuple, iv: tuple,
@@ -1003,6 +1022,11 @@ async def _stream_decrypt(
     # name consistent with what MegaProvider.resolve stored on the item.
     filename = sanitize_filename(filename)
     output_path = output_dir / filename
+    # Written under a temporary name and renamed only when every byte is in:
+    # the segmented path pre-allocates the full size up front, and a
+    # half-written file under the final name looked "already on disk" to a
+    # restarted pair — the gaps stayed zero-filled for good.
+    part_path = _mega_part_path(output_path)
     key_bytes = _a32_to_bytes(k)
     iv_bytes = _a32_to_bytes(iv)
     base_ctr = int.from_bytes(iv_bytes + b"\0" * 8, "big")
@@ -1031,7 +1055,7 @@ async def _stream_decrypt(
     # block for tens of seconds on multi-GB files if done on the loop
     # (audit [1b]).
     def _preallocate():
-        with open(output_path, "wb") as f:
+        with open(part_path, "wb") as f:
             f.seek(file_size - 1)
             f.write(b"\0")
 
@@ -1050,7 +1074,7 @@ async def _stream_decrypt(
         # written, we resume from here. Only 16-byte-aligned prefixes are ever
         # committed mid-stream, so the AES-CTR counter realigns exactly.
         resume_pos = start
-        with open(output_path, "r+b") as seg_f:
+        with open(part_path, "r+b") as seg_f:
             for retry in range(_MEGA_SEGMENT_MAX_RETRIES):
                 ctr = Counter.new(128, initial_value=base_ctr + resume_pos // 16)
                 decryptor = AES.new(key_bytes, AES.MODE_CTR, counter=ctr)
@@ -1112,6 +1136,12 @@ async def _stream_decrypt(
                         pending -= len(data)
                     if on_progress:
                         on_progress(downloaded[0], file_size)
+                    if resume_pos <= end:
+                        # The stream ended cleanly but short: what is left of
+                        # the region is still zeros. Resume, like a drop.
+                        raise RuntimeError(
+                            f"MEGA segment {idx} ended at +{resume_pos - start}/{end - start + 1} bytes"
+                        )
                     return  # Success
                 except Exception as e:
                     # Best-effort: commit the aligned prefix of the buffer so
@@ -1153,14 +1183,9 @@ async def _stream_decrypt(
         await _aio.gather(*tasks, return_exceptions=True)
         raise
 
-    # Truncate to actual file size (MEGA pads to AES block boundary);
-    # stat+truncate off-loop like every other disk touch.
-    def _finalize():
-        if file_size > 0 and output_path.stat().st_size > file_size:
-            with open(output_path, "r+b") as f:
-                f.truncate(file_size)
-
-    await _aio.to_thread(_finalize)
+    # Truncate to actual file size (MEGA pads to AES block boundary), check
+    # it, then publish under the final name; off-loop like every disk touch.
+    await _aio.to_thread(_publish_mega_part, part_path, output_path, file_size)
 
     logger.info("MEGA download complete: %s (%d bytes, %d segments)", filename, file_size, n_seg)
     return output_path
@@ -1179,6 +1204,7 @@ async def _single_stream_decrypt(
     ctr = Counter.new(128, initial_value=base_ctr)
     decryptor = AES.new(key_bytes, AES.MODE_CTR, counter=ctr)
     downloaded = 0
+    part_path = _mega_part_path(output_path)
 
     async with session.get(
         download_url,
@@ -1186,7 +1212,7 @@ async def _single_stream_decrypt(
     ) as resp:
         if resp.status != 200:
             raise RuntimeError(f"MEGA download HTTP {resp.status}")
-        with open(output_path, "wb") as f:
+        with open(part_path, "wb") as f:
             # Same off-loop decrypt+write batching as the segmented path
             # (audit [1a]) — unknown-size files land here and can be large.
             def _flush(data: bytes):
@@ -1207,12 +1233,7 @@ async def _single_stream_decrypt(
             if buf:
                 await _aio.to_thread(_flush, bytes(buf))
 
-    def _finalize():
-        if file_size > 0 and output_path.stat().st_size > file_size:
-            with open(output_path, "r+b") as fh:
-                fh.truncate(file_size)
-
-    await _aio.to_thread(_finalize)
+    await _aio.to_thread(_publish_mega_part, part_path, output_path, file_size)
 
     logger.info("MEGA download complete: %s (%d bytes)", output_path.name, file_size)
     return output_path

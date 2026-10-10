@@ -286,6 +286,75 @@ def test_stream_decrypt_failure_cancels_and_raises(tmp_path, monkeypatch):
         ))
 
 
+def test_stream_decrypt_failure_leaves_no_file_under_final_name(tmp_path, monkeypatch):
+    # The segmented path pre-allocates the whole size. That file must never
+    # sit under the final name half-written: a restarted pair used to see a
+    # same-size file there, call it "already on disk", and keep the zeros.
+    import asyncio
+
+    size = 512 * 1024
+    k, iv, _plaintext, ct = _make_cipher_fixture(size)
+    monkeypatch.setattr(mega_api, "_MEGA_SEGMENT_MAX_RETRIES", 1)
+    with pytest.raises(RuntimeError):
+        asyncio.run(mega_api._stream_decrypt(
+            _FakeSession(ct, fail_at_start=size // 2 // 16 * 16), "http://fake/dl", tmp_path,
+            "out.bin", size, k, iv, None, 65536, max_segments=2,
+        ))
+    assert not (tmp_path / "out.bin").exists()
+
+
+class _ShortOnceSession(_FakeSession):
+    """Answers each segment's first request with half its bytes and no error
+    (a clean but short stream), then the rest on the resume."""
+
+    def __init__(self, ciphertext: bytes):
+        super().__init__(ciphertext)
+        self._seen: set[int] = set()
+
+    def get(self, url, headers=None, timeout=None):
+        a, _, b = (headers or {}).get("Range", "bytes=0-").split("=")[1].partition("-")
+        start, end = int(a), (int(b) if b else len(self._ct) - 1)
+        if end not in self._seen:  # a segment's first request (a resume keeps its end)
+            self._seen.add(end)
+            half = start + (end - start + 1) // 2 // 16 * 16
+            return _FakeResp(self._ct[start:half])
+        return _FakeResp(self._ct[start:end + 1])
+
+
+def test_stream_decrypt_resumes_a_clean_but_short_segment(tmp_path, monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)  # the resume back-off
+    size = 512 * 1024 + 37
+    k, iv, plaintext, ct = _make_cipher_fixture(size)
+    out = asyncio.run(mega_api._stream_decrypt(
+        _ShortOnceSession(ct), "http://fake/dl", tmp_path, "out.bin", size,
+        k, iv, None, 65536, max_segments=4,
+    ))
+    assert out.read_bytes() == plaintext
+    assert not (tmp_path / "out.bin.megapart").exists()
+
+
+async def _no_sleep(*_a, **_k):
+    return None
+
+
+def test_publish_mega_part_rejects_a_short_file(tmp_path):
+    part = tmp_path / "v.mp4.megapart"
+    part.write_bytes(b"x" * 10)
+    with pytest.raises(RuntimeError, match="10 bytes, expected 20"):
+        mega_api._publish_mega_part(part, tmp_path / "v.mp4", 20)
+    assert not (tmp_path / "v.mp4").exists()
+
+
+def test_publish_mega_part_trims_padding_and_renames(tmp_path):
+    part = tmp_path / "v.mp4.megapart"
+    part.write_bytes(b"y" * 32)  # AES block padding past the real size
+    mega_api._publish_mega_part(part, tmp_path / "v.mp4", 20)
+    assert (tmp_path / "v.mp4").read_bytes() == b"y" * 20
+    assert not part.exists()
+
+
 def test_ttl_cache_evicts_oldest_when_full(monkeypatch):
     ft = _FakeTime()
     monkeypatch.setattr(mega_api, "time", ft)

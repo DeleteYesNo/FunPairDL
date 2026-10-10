@@ -187,6 +187,25 @@ class DownloadTask:
 
         return supports_range
 
+    def _part_path(self, start: int | None, end: int | None) -> Path:
+        """A part file is named after the byte range it holds, so a part left
+        by an attempt that split the file differently (another segment
+        count, another total) is never taken for one of this plan's."""
+        tag = "full" if start is None else f"r{start}-{end}"
+        return self.parts_dir / f"{self.item.filename}.{tag}.part"
+
+    def _drop_stale_parts(self) -> None:
+        """Remove every part file of this item's name: leftovers from older
+        plans, and the old `<name>.partN` naming."""
+        prefix = self.item.filename + "."
+        try:
+            for p in self.parts_dir.iterdir():
+                n = p.name
+                if n.startswith(prefix) and (n.endswith(".part") or n[len(prefix):].startswith("part")):
+                    p.unlink(missing_ok=True)
+        except OSError:
+            pass
+
     def _plan_segments(self, supports_range: bool) -> list[SegmentDownloader]:
         total = self.item.total_bytes
         url = self.item.resolved_url or self.item.url
@@ -205,7 +224,7 @@ class DownloadTask:
                 url=url,
                 range_start=0,
                 range_end=max(total - 1, 0) if use_range else 0,
-                temp_file=self.parts_dir / f"{self.item.filename}.part0",
+                temp_file=self._part_path(0, max(total - 1, 0)) if use_range else self._part_path(None, None),
                 index=0,
                 headers=self.item.headers,
                 on_progress=self._update_progress,
@@ -225,7 +244,7 @@ class DownloadTask:
                     url=url,
                     range_start=start,
                     range_end=end,
-                    temp_file=self.parts_dir / f"{self.item.filename}.part{i}",
+                    temp_file=self._part_path(start, end),
                     index=i,
                     headers=self.item.headers,
                     on_progress=self._update_progress,
@@ -234,7 +253,7 @@ class DownloadTask:
 
         return segments
 
-    async def _merge_segments(self) -> None:
+    async def _merge_segments(self) -> int:
         """Merge all segment temp files into the final output file.
 
         Runs file I/O in a thread to avoid blocking the event loop.
@@ -244,7 +263,16 @@ class DownloadTask:
         parts_dir = self.parts_dir
         segments = self._segments
 
-        def _do_merge():
+        def _do_merge() -> int:
+            # Every part must hold exactly its range before anything is
+            # written: a wrong-sized part means a corrupt file, and the
+            # parts are kept so the retry only fetches what is missing.
+            for seg in segments:
+                size = seg.temp_file.stat().st_size if seg.temp_file.exists() else -1
+                if seg.expected and size != seg.expected:
+                    raise RuntimeError(
+                        f"part {seg.temp_file.name} is {size} bytes, expected {seg.expected}"
+                    )
             output_dir.mkdir(parents=True, exist_ok=True)
             with open(output, "wb") as out_f:
                 for seg in segments:
@@ -254,14 +282,21 @@ class DownloadTask:
                             if not chunk:
                                 break
                             out_f.write(chunk)
+            merged = output.stat().st_size
+            total = self.item.total_bytes
+            if total > 0 and merged != total:
+                output.unlink(missing_ok=True)
+                raise RuntimeError(f"merged file is {merged} bytes, expected {total}")
             # Clean up temp files (but keep .parts dir — other items may still use it)
             for seg in segments:
                 try:
                     seg.temp_file.unlink(missing_ok=True)
                 except OSError:
                     pass
+            self._drop_stale_parts()
+            return merged
 
-        await asyncio.to_thread(_do_merge)
+        return await asyncio.to_thread(_do_merge)
 
     async def download(self, session: aiohttp.ClientSession) -> None:
         """Execute the full download pipeline."""
@@ -300,13 +335,13 @@ class DownloadTask:
             if self._cancelled:
                 return
 
-            # Merge segments
-            await self._merge_segments()
+            # Merge segments (checks every part and the merged size)
+            merged = await self._merge_segments()
 
-            # Final progress update — handle unknown file size
+            # Final progress: what is actually on disk
             if self.item.total_bytes <= 0:
-                self.item.total_bytes = self.item.downloaded_bytes
-            self.item.downloaded_bytes = self.item.total_bytes
+                self.item.total_bytes = merged
+            self.item.downloaded_bytes = merged
             self.item.speed_bps = 0
             self._set_state(ItemState.COMPLETED)
 
