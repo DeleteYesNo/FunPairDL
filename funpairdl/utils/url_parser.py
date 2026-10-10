@@ -18,6 +18,7 @@ def detect_provider(url: str) -> str:
         "iwara.tv": "iwara",
         "discuss.eroscripts.com": "eroscripts",
         "hmvmania.com": "hmvmania",
+        "rule34video.com": "rule34video",
         "socigames.com": "socigames",
         "e621.net": "e621",
         "e926.net": "e621",
@@ -39,7 +40,7 @@ def detect_provider(url: str) -> str:
 
     # yt-dlp supported video sites (non-exhaustive, for display purposes)
     ytdlp_domains = [
-        "rule34video.com", "rule34.xxx", "hanime1.me",
+        "rule34.xxx", "hanime1.me",
         "bilibili.com", "b23.tv",
         # VK serves video as HLS/DASH; yt-dlp resolves it to a manifest the
         # HLS downloader (ffmpeg) handles. Routing it to "direct" instead made

@@ -226,7 +226,7 @@ def _meta_from_info(info: dict) -> ProbeMeta:
     # yt-dlp results carry a bare title with no file extension — persisting
     # that as item.filename yields extensionless files if the pair fails
     # before resolve. Let resolve (which knows the chosen format) name it.
-    if source in ("ytdlp", "rule34video", "rule34", "hanime1", "iwara", "bilibili"):
+    if source in ("ytdlp", "rule34", "hanime1", "iwara", "bilibili"):
         filename = ""
     if source == "direct":
         source = "head"
@@ -249,7 +249,10 @@ async def _probe_uncached(
     provider = detect_provider(url)
 
     # For yt-dlp sites, extract format info
-    if provider == "ytdlp" or provider in {"rule34video", "rule34", "hanime1", "iwara", "bilibili"}:
+    if provider == "rule34video":
+        return await _probe_rule34video(url, session)
+
+    if provider == "ytdlp" or provider in {"rule34", "hanime1", "iwara", "bilibili"}:
         result = await _probe_ytdlp(url, session)
         if provider == "iwara" and not result.get("success") and "login" in str(result.get("error", "")).lower():
             result = await _iwara_gone_check(url, result)
@@ -773,6 +776,46 @@ async def _probe_hmvmania(url: str, session: aiohttp.ClientSession) -> dict:
         }
     except Exception as e:
         logger.error("HMV Mania probe failed for %s: %s", url[:80], e)
+        return {"success": False, "error": str(e)}
+
+
+async def _probe_rule34video(url: str, session: aiohttp.ClientSession) -> dict:
+    """Rule34Video: the renditions from the page's player config (sized with
+    a 1-byte ranged GET each), the length from its JSON-LD, the frame from
+    the largest file's header."""
+    try:
+        from funpairdl.providers.rule34video import (
+            fetch_page, head_file, parse_duration, parse_sources, parse_title,
+        )
+
+        html, page_url = await fetch_page(session, url)
+        sources = parse_sources(html)
+        if not sources:
+            return {"success": False, "error": "No video sources on Rule34Video page"}
+        headers = {"User-Agent": BROWSER_USER_AGENT, "Referer": page_url}
+
+        async def _size(src: dict) -> int:
+            try:
+                return (await head_file(session, src["url"], headers))[1]
+            except Exception:
+                return 0
+
+        sizes = await asyncio.gather(*[_size(s) for s in sources])
+        formats = [{"height": s["height"], "size": z, "format_id": ""} for s, z in zip(sources, sizes)]
+        meta = await _meta_from_formats([{"url": sources[-1]["url"], "http_headers": headers}], session)
+        title = parse_title(html)
+        return {
+            "success": True,
+            "provider": "rule34video",
+            "title": title,
+            "filename": (title + ".mp4") if title else "",
+            "formats": formats,
+            "duration": parse_duration(html) or meta.get("duration"),
+            **({"width": int(meta["width"]), "height": int(meta["height"])}
+               if meta.get("width") and meta.get("height") else {}),
+        }
+    except Exception as e:
+        logger.error("Rule34Video probe failed for %s: %s", url[:80], e)
         return {"success": False, "error": str(e)}
 
 

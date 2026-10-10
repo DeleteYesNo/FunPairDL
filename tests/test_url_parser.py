@@ -21,7 +21,7 @@ class TestDetectProvider:
         assert detect_provider("https://e926.net/posts/1") == "e621"
 
     def test_ytdlp_sites_and_direct_fallback(self):
-        assert detect_provider("https://rule34video.com/video/1/x") == "ytdlp"
+        assert detect_provider("https://rule34video.com/video/1/x") == "rule34video"
         assert detect_provider("https://www.bilibili.com/video/BV1") == "ytdlp"
         # Unknown host (artist site) → direct; yt-dlp's generic extractor is
         # tried at resolve time, but the label is "direct".

@@ -18,6 +18,7 @@ _SKIP_DOMAINS = [
     "discuss.eroscripts.com",
     "eroscripts-discourse.eroscripts.com",
     "hmvmania.com",
+    "rule34video.com",
     "socigames.com",
     "e621.net",
     "e926.net",
