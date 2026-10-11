@@ -19,6 +19,8 @@ def detect_provider(url: str) -> str:
         "discuss.eroscripts.com": "eroscripts",
         "hmvmania.com": "hmvmania",
         "rule34video.com": "rule34video",
+        "drive.google.com": "gdrive",
+        "drive.usercontent.google.com": "gdrive",
         "socigames.com": "socigames",
         "e621.net": "e621",
         "e926.net": "e621",
@@ -90,6 +92,7 @@ _PROVIDER_LABELS = {
     "faptap": "Faptap",
     "filester": "filester",
     "mediafire": "MediaFire",
+    "gdrive": "Google Drive",
     "vikingfile": "ViKiNG FiLE",
 }
 

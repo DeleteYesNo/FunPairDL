@@ -11,6 +11,7 @@ from funpairdl.providers.ytdlp_generic import YtdlpGenericProvider
 from funpairdl.providers.eroscripts import EroScriptsProvider
 from funpairdl.providers.hmvmania import HmvManiaProvider
 from funpairdl.providers.rule34video import Rule34VideoProvider
+from funpairdl.providers.gdrive import GoogleDriveProvider
 from funpairdl.providers.socigames import SociGamesProvider
 from funpairdl.providers.e621 import E621Provider
 from funpairdl.providers.fanbox import FanboxProvider
@@ -45,6 +46,7 @@ class ProviderRegistry:
             EroScriptsProvider(),
             HmvManiaProvider(),
             Rule34VideoProvider(),
+            GoogleDriveProvider(),
             SociGamesProvider(),
             E621Provider(),
             JoiDbProvider(),

@@ -60,6 +60,8 @@ const VIDEO_PRIORITY = {
   "filester.me": 3,
   // File host: single files and folders (a folder is a pack)
   "mediafire.com": 3,
+  // Google Drive: shared files and folders (a folder is a pack)
+  "drive.google.com": 3,
   // File host whose link the page builds (read in the embedded browser)
   "vik1ngfile.site": 3,
   "vikingfile.com": 3,
@@ -130,6 +132,7 @@ function isBundleUrl(url) {
     if ((host.includes("mega.nz") || host.includes("mega.co.nz")) && path.includes("/folder/")) return true;
     if (host.includes("gofile.io") && /^\/d\//.test(path)) return true;
     if (host.includes("mediafire.com") && path.includes("/folder/")) return true;
+    if (host === "drive.google.com" && /\/drive\/(u\/\d+\/)?folders\//.test(path)) return true;
   } catch (e) {}
   return false;
 }
@@ -298,6 +301,7 @@ function getVideoLabel(url) {
     if (host.includes("faptap")) return "Faptap";
     if (host.includes("filester")) return "filester";
     if (host.includes("mediafire")) return "MediaFire";
+    if (host.includes("drive.google.com")) return "Google Drive";
     if (host.includes("vik1ngfile") || host.includes("vikingfile")) return "ViKiNG FiLE";
     if (host.includes("pornhub")) return "PornHub";
     if (host.includes("xvideos")) return "XVideos";

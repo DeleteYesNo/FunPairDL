@@ -298,6 +298,9 @@ async def _probe_uncached(
     if provider == "mediafire":
         return await _probe_mediafire(url, session)
 
+    if provider == "gdrive":
+        return await _probe_gdrive(url, session)
+
     if provider == "vikingfile":
         return await _probe_vikingfile(url, session)
 
@@ -971,6 +974,34 @@ async def _probe_faptap(url: str, session: aiohttp.ClientSession) -> dict:
         }
     except Exception as e:
         logger.info("Faptap probe failed for %s: %s", url[:80], e)
+        return {"success": False, "error": str(e)}
+
+
+async def _probe_gdrive(url: str, session: aiohttp.ClientSession) -> dict:
+    """Google Drive: a folder lists its files (a pack); a shared file gives
+    its name, size, length and frame."""
+    try:
+        from funpairdl.providers import gdrive as gd
+
+        if gd.is_folder_url(url):
+            files = await gd.list_folder(url, session)
+            if not files:
+                return {"success": False, "error": "Not a video: empty Google Drive folder"}
+            return {"success": True, "provider": "gdrive", "filename": f"{len(files)} files",
+                    "size": sum(f["size"] for f in files), "files": files}
+        fid = gd.file_id(url)
+        if not fid:
+            return {"success": False, "error": "Not a video: not a Google Drive file or folder link"}
+        filename, size = await gd.probe_file(fid, session)
+        from funpairdl.utils.media_duration import probe_media_meta
+        meta = await probe_media_meta(gd.download_url(fid), session, headers=dict(gd.HEADERS),
+                                      filename=filename)
+        return {"success": True, "provider": "gdrive", "filename": filename, "size": size,
+                "duration": meta.get("duration"),
+                **({"width": meta["width"], "height": meta["height"]}
+                   if meta.get("width") and meta.get("height") else {})}
+    except Exception as e:
+        logger.info("Google Drive probe failed for %s: %s", url[:80], e)
         return {"success": False, "error": str(e)}
 
 

@@ -658,6 +658,11 @@ class QueueManager:
         if (host == "mediafire.com" or host.endswith(".mediafire.com")) and "/folder/" in parsed.path:
             return True
 
+        # Google Drive folder: listed like a MediaFire one.
+        from funpairdl.providers.gdrive import is_folder_url as _gdrive_folder
+        if _gdrive_folder(url):
+            return True
+
         return False
 
     def remove_pair(self, pair_id: str) -> None:
@@ -1032,7 +1037,7 @@ class QueueManager:
             try:
                 url = bundle_item.url
                 provider = bundle_item.provider_name
-                if provider not in ("pixeldrain", "mega", "mediafire"):
+                if provider not in ("pixeldrain", "mega", "mediafire", "gdrive"):
                     # A self-healed item may lack a provider name, and one
                     # queued before its host had a provider says "direct".
                     provider = detect_provider(url)
@@ -1065,10 +1070,13 @@ class QueueManager:
                         bundle_item.is_bundle = False
                         bundle_item.filename = self._guess_filename(url, "video")
                         continue
-                elif provider == "mediafire":
+                elif provider in ("mediafire", "gdrive"):
                     # Each file stays a file-page URL: its download link
                     # changes per visit, so the provider reads it at resolve.
-                    from funpairdl.providers.mediafire import list_folder
+                    if provider == "gdrive":
+                        from funpairdl.providers.gdrive import list_folder
+                    else:
+                        from funpairdl.providers.mediafire import list_folder
                     async with aiohttp.ClientSession() as mf_session:
                         for f in await list_folder(url, mf_session):
                             resolved_files.append(ResolvedFile(
@@ -1103,7 +1111,7 @@ class QueueManager:
                         total_bytes=rf.total_size,
                         headers=rf.headers or {},
                         # A MediaFire file page is resolved like any link.
-                        resolved_url="" if provider == "mediafire" else rf.direct_url,
+                        resolved_url="" if provider in ("mediafire", "gdrive") else rf.direct_url,
                     )
                     new_items.append(new_item)
 
@@ -1711,8 +1719,8 @@ class QueueManager:
                         item, output_dir, pair.preferred_resolution, resolved.manifest_url))
                 else:
                     segments = self.num_segments
-                    if item.provider_name == "gofile":
-                        segments = min(segments, 4)
+                    if item.provider_name in ("gofile", "gdrive"):
+                        segments = min(segments, 4)  # both answer 500/429 to a crowd of ranges
 
                     dt = DownloadTask(
                         item=item,

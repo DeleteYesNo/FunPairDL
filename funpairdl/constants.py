@@ -85,6 +85,7 @@ VIDEO_HOSTS = [
     "filester.gg",
     "filester.me",
     "mediafire.com",
+    "drive.google.com",
     "vik1ngfile.site",
     "vikingfile.com",
 ]
