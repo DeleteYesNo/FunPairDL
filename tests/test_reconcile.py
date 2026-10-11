@@ -294,3 +294,42 @@ def test_a_set_identical_to_any_existing_variant_is_dropped(tmp_path, monkeypatc
     assert sorted(p.name for p in work.glob("*.funscript")) == [
         "Work (Heroine B).funscript", "Work (Heroine B).pitch.funscript",
         "Work.funscript", "Work.pitch.funscript"]
+
+
+def _cloud_folders_unresolvable(monkeypatch):
+    """A work moved to a cloud drive is a junction into an rclone (WinFsp)
+    mount: it reads fine, but Path.resolve() raises WinError 1005."""
+    import pathlib
+    real = pathlib.Path.resolve
+
+    def resolve(self, strict=False):
+        if any(part.startswith("Cloud") for part in self.parts):
+            raise OSError(22, "The volume does not contain a recognized file system")
+        return real(self, strict)
+    monkeypatch.setattr(pathlib.Path, "resolve", resolve)
+
+
+def test_cloud_folders_in_the_library_do_not_stop_the_search(tmp_path, monkeypatch):
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    _stub_settings(monkeypatch, reconcile_on_redownload=True, library_paths=[str(lib)])
+    (tmp_path / "dl").mkdir()
+    qm = QueueManager(download_dir=tmp_path / "dl")
+    _existing_work(lib, "Cloud Other", b"OTHER", {"Cloud Other.funscript": "X"})
+    work = _existing_work(lib, "Cloud Work", b"VIDEO", {"Cloud Work.funscript": "MAIN"})
+    pair, temp = _redownload_pair(tmp_path / "dl", "Cloud Work", b"VIDEO",
+                                  {"Cloud Work.funscript": "MAIN", "Cloud Work.roll.funscript": "ROLL"})
+    _cloud_folders_unresolvable(monkeypatch)
+
+    assert qm._reconcile_with_library(pair) is True
+    assert (work / "Cloud Work.roll.funscript").read_text() == "ROLL"
+    assert not (temp / "Cloud Work.mp4").exists()                    # duplicate video dropped
+
+
+def test_a_cloud_folder_is_a_valid_merge_target(tmp_path, monkeypatch):
+    _stub_settings(monkeypatch)
+    qm = QueueManager(download_dir=tmp_path)
+    work = _existing_work(tmp_path, "Cloud Work", b"VIDEO", {"Cloud Work.funscript": "MAIN"})
+    _cloud_folders_unresolvable(monkeypatch)
+
+    assert qm._merge_target(str(work)) == work

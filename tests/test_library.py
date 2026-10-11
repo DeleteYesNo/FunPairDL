@@ -1,6 +1,9 @@
 """Library layout helpers shared with FunLib: flat variant naming, sidecar
 merge, variants inferred from disk, and FunLib's recycle-bin log."""
 import json
+import sys
+
+import pytest
 
 from funpairdl.core import library as lib
 from funpairdl.core.queue_manager import QueueManager
@@ -262,3 +265,23 @@ def test_topic_meta_from_json():
     assert "author" not in m
     assert m["posted_by"] == "opname" and m["posted_by_url"].endswith("/u/opname")
     assert normalize_tag("Len 25 60") == "len-25-60"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="directory junctions are Windows-only")
+def test_iter_work_dirs_lists_junctions_without_following_them(tmp_path):
+    # a work moved to the cloud drive is a junction; one whose drive is not
+    # mounted is still listed (reading it fails later, callers handle that)
+    import _winapi
+    root, elsewhere = tmp_path / "lib", tmp_path / "elsewhere"
+    (root / "Local Work").mkdir(parents=True)
+    (root / "No Video" / "Script Only").mkdir(parents=True)
+    (root / "_trash").mkdir()
+    (root / "stray.txt").write_text("x")
+    (elsewhere / "Cloud Work").mkdir(parents=True)
+    (elsewhere / "Gone Work").mkdir()
+    _winapi.CreateJunction(str(elsewhere / "Cloud Work"), str(root / "Cloud Work"))
+    _winapi.CreateJunction(str(elsewhere / "Gone Work"), str(root / "Gone Work"))
+    (elsewhere / "Gone Work").rmdir()
+
+    names = [d.name for d in lib.iter_work_dirs(root)]
+    assert names == ["Cloud Work", "Gone Work", "Local Work", "Script Only"]

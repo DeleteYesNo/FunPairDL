@@ -52,6 +52,19 @@ def in_trash(path: Path) -> bool:
     return any(p.lower() == TRASH_DIR for p in Path(path).parts)
 
 
+def real_path(p: Path | str) -> Path:
+    """``p.resolve()``, or ``p`` made absolute when it can't be resolved.
+
+    A work folder moved to a cloud drive is a directory junction into an
+    rclone (WinFsp) mount, and Windows can't resolve that one
+    (``WinError 1005``) although the folder reads fine — it is still a
+    library work, never a reason to give up."""
+    try:
+        return Path(p).resolve()
+    except OSError:
+        return Path(os.path.abspath(p))
+
+
 def library_roots(download_dir: Path | str | None = None, extra: list[str] | None = None) -> list[Path]:
     """download_dir plus the configured library_paths, deduped, existing
     only. Reads settings when nothing is passed."""
@@ -86,24 +99,37 @@ def has_media(folder: Path) -> bool:
     return False
 
 
+def _subdirs(folder: Path) -> list[Path]:
+    """Folders directly in ``folder``, sorted, links included but not
+    followed: a work moved to a cloud drive is a directory junction into the
+    mount, and following ~2,000 of them cost ~20 s per walk of the library.
+    A link whose target is gone is yielded too — reading it fails later,
+    which callers already handle."""
+    out = []
+    try:
+        with os.scandir(folder) as it:
+            for e in it:
+                try:
+                    st = e.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if e.is_dir(follow_symlinks=False) or getattr(st, "st_file_attributes", 0) & 0x10:
+                    out.append(Path(e.path))  # 0x10: FILE_ATTRIBUTE_DIRECTORY
+    except OSError:
+        return []
+    return sorted(out)
+
+
 def iter_work_dirs(root: Path, include_no_video: bool = True):
     """Yield every work folder directly under ``root`` (and under
     ``root/No Video/``), skipping meta folders."""
-    try:
-        entries = sorted(root.iterdir())
-    except OSError:
-        return
-    for d in entries:
-        if not d.is_dir() or is_meta_dir(d.name):
+    for d in _subdirs(root):
+        if is_meta_dir(d.name):
             continue
         if d.name == NO_VIDEO_DIR:
             if include_no_video:
-                try:
-                    subs = sorted(d.iterdir())
-                except OSError:
-                    subs = []
-                for s in subs:
-                    if s.is_dir() and not is_meta_dir(s.name):
+                for s in _subdirs(d):
+                    if not is_meta_dir(s.name):
                         yield s
             continue
         yield d

@@ -514,10 +514,7 @@ class QueueManager:
         under a library root (never an arbitrary path from the API)."""
         if not (merge_into or "").strip():
             return None
-        try:
-            d = Path(merge_into).resolve()
-        except OSError:
-            return None
+        d = lib.real_path(merge_into)
         if not d.is_dir() or lib.in_trash(d):
             return None
         for root in self._library_dirs():
@@ -3392,11 +3389,7 @@ class QueueManager:
         # download lands in the existing folder, so we must exclude these when
         # scanning for "pre-existing" files; in Case B (different folder) same
         # names are fine because the paths differ.
-        def _rp(p: Path) -> Path:
-            try:
-                return p.resolve()
-            except OSError:
-                return p
+        _rp = lib.real_path
         incoming_paths = {_rp(out_dir / i.filename) for i in pair.items}
         src_video = (out_dir / videos[0].filename) if videos else None
         if src_video is not None and not src_video.exists():
@@ -3430,7 +3423,7 @@ class QueueManager:
             wkeys = {k for k in (wkey, self._title_key(pair.name)) if len(k) >= 2}
             if not wkeys:
                 return False
-            own = out_dir.resolve()
+            own = _rp(out_dir)
             # Folders another queued/active pair is still writing are not
             # "the library copy" — a sibling from the same auto-split (two
             # booru posts titled alike, differing only by "[id]") was merged
@@ -3448,9 +3441,11 @@ class QueueManager:
                 except OSError:
                     continue
                 for d in entries:
-                    if not d.is_dir() or lib.is_meta_dir(d.name) or d.resolve() == own:
-                        continue
+                    # the name first: is_dir() follows a cloud folder's link
+                    # through the mount, slow over a whole library
                     if not wkeys & {self._match_key(d.name), self._title_key(d.name)}:
+                        continue
+                    if not d.is_dir() or lib.is_meta_dir(d.name) or _rp(d) == own:
                         continue
                     if _rp(d) in busy:
                         continue
@@ -3517,7 +3512,7 @@ class QueueManager:
 
         def _move(sp: Path, target: Path) -> None:
             import shutil
-            if sp.resolve() == target.resolve():
+            if _rp(sp) == _rp(target):
                 return
             if target.exists():
                 sp.unlink(missing_ok=True)
@@ -3558,9 +3553,9 @@ class QueueManager:
 
         # 3) drop a duplicate downloaded video; clean up a separate temp folder
         if (src_video is not None and dest_video is not None
-                and src_video.resolve() != dest_video.resolve()):
+                and _rp(src_video) != _rp(dest_video)):
             src_video.unlink(missing_ok=True)
-        if dest.resolve() != out_dir.resolve():
+        if _rp(dest) != _rp(out_dir):
             try:
                 if out_dir.is_dir() and not any(out_dir.iterdir()):
                     out_dir.rmdir()
