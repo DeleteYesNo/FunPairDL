@@ -3871,8 +3871,18 @@ class QueueManager:
                 if dest == src:
                     continue
                 if dest.exists():
-                    logger.warning("Target exists, skipping: %s", dest)
-                    continue
+                    if self._same_file(src, dest):
+                        src.unlink(missing_ok=True)
+                        logger.info("Dropped duplicate of %s: %s", dest.name, src.name)
+                        continue
+                    # Two takes of one axis in one group — three replies'
+                    # attachments of one name — are two variants; the
+                    # second was left under its download name, outside
+                    # the work.
+                    extra = lib.unique_label(label, used_labels)
+                    used_labels.add(extra)
+                    new_name = lib.script_name(base_name, extra, suffix)
+                    dest = output_dir / new_name
                 try:
                     src.rename(dest)
                     s.filename = new_name

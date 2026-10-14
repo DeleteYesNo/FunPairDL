@@ -861,3 +861,23 @@ class TestRenders:
         self._organize(pair, "all")
         assert (out / "Garden Party (VR).mp4").exists()
         assert set(_variants(out)) == {"Main", "VR"}
+
+
+def test_two_takes_of_one_axis_in_one_alt_group_are_two_variants(tmp_path):
+    # three replies attached "<Name>.funscript": deduped to "(2)", "(3)" and
+    # planned into one Alt group; the second was left outside the work
+    _touch(tmp_path / "v.mp4")
+    _touch(tmp_path / "Name.funscript", size=300)
+    _touch(tmp_path / "Name (2).funscript", size=200)
+    _touch(tmp_path / "Name (3).funscript", size=150)
+    pair = _make_pair(str(tmp_path), "Work", [
+        PairItem(url="http://x/v.mp4", filename="v.mp4", file_type=FileType.VIDEO),
+        PairItem(url="http://x/1.funscript", filename="Name.funscript", file_type=FileType.FUNSCRIPT),
+        PairItem(url="http://x/2.funscript", filename="Name (2).funscript", file_type=FileType.FUNSCRIPT, group="Alt 1"),
+        PairItem(url="http://x/3.funscript", filename="Name (3).funscript", file_type=FileType.FUNSCRIPT, group="Alt 1"),
+    ])
+    _organize(pair)
+
+    left = sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("Name"))
+    assert left == []
+    assert len(_variants(tmp_path)) == 3
