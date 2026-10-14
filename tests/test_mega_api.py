@@ -484,3 +484,33 @@ def test_folder_file_key_iv_attrs_malformed_attr_raises_runtime_error():
     node["a"] = _b64url(b"12345")  # 5 bytes: not block-aligned
     with pytest.raises(RuntimeError, match="does not decrypt"):
         mega_api._folder_file_key_iv_attrs(node, FOLDER_KEY, ROOT)
+
+
+def test_pick_name_keeps_the_queue_name_of_the_same_type():
+    from funpairdl.utils.mega_api import _pick_name
+    assert _pick_name("Work (2).mp4", "Work.mp4") == "Work (2).mp4"
+    assert _pick_name("ypg0DJxR", "Work.mp4") == "Work.mp4"  # guessed, no extension
+    assert _pick_name("", "Work.mp4") == "Work.mp4"
+    assert _pick_name("Work (2).mp4", "") == "Work (2).mp4"
+
+
+def test_download_writes_under_the_queue_name_not_megas(tmp_path, monkeypatch):
+    # the pair renamed its video "(2)" to dodge a file already in the work
+    # folder; writing MEGA's own name replaced that file
+    import asyncio
+    from funpairdl.utils import mega_api
+    seen = {}
+
+    async def fake_post(session, url, payload):
+        return {"g": "https://example.invalid/dl", "s": 10}
+
+    async def fake_stream(session, url, output_dir, filename, *a, **k):
+        seen["name"] = filename
+        return output_dir / filename
+
+    monkeypatch.setattr(mega_api, "_mega_api_post", fake_post)
+    monkeypatch.setattr(mega_api, "_stream_decrypt", fake_stream)
+    key = "A" * 43
+    out = asyncio.run(mega_api.download_mega_file(
+        f"https://mega.nz/file/abcdEFGH#{key}", tmp_path, filename="Work (2).mp4"))
+    assert seen["name"] == "Work (2).mp4" and out.name == "Work (2).mp4"

@@ -837,8 +837,13 @@ async def download_mega_file(
     chunk_size: int = 65536,
     sid: str = "",
     max_segments: int = 8,
+    filename: str = "",
 ) -> Path:
     """Download and decrypt a MEGA file (standalone or from folder).
+
+    ``filename`` is the on-disk name the queue chose (it may differ from the
+    file's name on MEGA, e.g. "<work> (2).mp4" next to an existing video);
+    empty means MEGA's own name.
 
     Supports:
         - mega.nz/file/HANDLE#KEY (standalone file)
@@ -869,16 +874,25 @@ async def download_mega_file(
         logger.warning("MEGA download without session ID — anonymous mode (bandwidth limited)")
 
     if info["type"] == "folder_file":
-        return await _download_folder_file(info, output_dir, on_progress, chunk_size, sid, max_segments)
+        return await _download_folder_file(info, output_dir, on_progress, chunk_size, sid, max_segments, filename)
     if info["type"] == "file":
-        return await _download_standalone_file(info, output_dir, on_progress, chunk_size, sid, max_segments)
+        return await _download_standalone_file(info, output_dir, on_progress, chunk_size, sid, max_segments, filename)
 
     raise ValueError(f"Cannot download MEGA URL (type={info['type']}): {url}")
 
 
+def _pick_name(given: str, mega_name: str) -> str:
+    """The queue's name for the file when it has one of the same type as
+    MEGA's (a name guessed before the file was resolved may lack the
+    extension), else MEGA's own name."""
+    if given and (not mega_name or Path(given).suffix.lower() == Path(mega_name).suffix.lower()):
+        return given
+    return mega_name
+
+
 async def _download_standalone_file(
     info: dict, output_dir: Path, on_progress, chunk_size: int, sid: str,
-    max_segments: int = 8,
+    max_segments: int = 8, filename: str = "",
 ) -> Path:
     """Download a standalone MEGA file (mega.nz/file/HANDLE#KEY)."""
     import aiohttp
@@ -902,16 +916,15 @@ async def _download_standalone_file(
         k = _file_key(full_key)
         iv = (full_key[4], full_key[5])
 
-        filename = ""
+        mega_name = ""
         if "at" in data:
             try:
                 attrs = _decrypt_attr(_base64_url_decode(data["at"]), k)
                 if attrs and "n" in attrs:
-                    filename = attrs["n"]
+                    mega_name = attrs["n"]
             except Exception:
                 pass
-        if not filename:
-            filename = f"mega_{info['handle']}"
+        filename = _pick_name(filename, mega_name) or f"mega_{info['handle']}"
 
         return await _stream_decrypt(
             session, download_url, output_dir, filename, file_size, k, iv,
@@ -921,7 +934,7 @@ async def _download_standalone_file(
 
 async def _download_folder_file(
     info: dict, output_dir: Path, on_progress, chunk_size: int, sid: str,
-    max_segments: int = 8,
+    max_segments: int = 8, filename: str = "",
 ) -> Path:
     """Download a file from within a MEGA folder.
 
@@ -955,11 +968,8 @@ async def _download_folder_file(
         # streaming with an unvalidated key would write garbage to disk.
         k, iv, attrs = _folder_file_key_iv_attrs(target, folder_key, share_root)
 
-        filename = ""
-        if attrs and "n" in attrs:
-            filename = attrs["n"]
-        if not filename:
-            filename = f"mega_{file_handle}"
+        mega_name = attrs["n"] if attrs and "n" in attrs else ""
+        filename = _pick_name(filename, mega_name) or f"mega_{file_handle}"
 
         file_size = target.get("s", 0)
 

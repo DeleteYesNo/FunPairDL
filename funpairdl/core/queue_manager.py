@@ -1332,6 +1332,9 @@ class QueueManager:
                 item.url, output_dir, on_progress=_on_progress,
                 sid=settings.mega_sid,
                 max_segments=settings.max_segments,
+                # The name the pair settled on, not MEGA's: a "(2)" given to
+                # dodge a file already in the folder must not be undone here.
+                filename=item.filename,
             )
 
             item.filename = result_path.name
