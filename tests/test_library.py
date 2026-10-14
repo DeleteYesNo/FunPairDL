@@ -285,3 +285,23 @@ def test_iter_work_dirs_lists_junctions_without_following_them(tmp_path):
 
     names = [d.name for d in lib.iter_work_dirs(root)]
     assert names == ["Cloud Work", "Gone Work", "Local Work", "Script Only"]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="directory junctions are Windows-only")
+def test_library_video_index_does_not_list_cloud_works(tmp_path):
+    # listing every cloud work is a cloud round trip each: the index of
+    # library videos by size covers local works only
+    import _winapi
+    from funpairdl.core.queue_manager import QueueManager
+    root, elsewhere = tmp_path / "lib", tmp_path / "elsewhere"
+    (root / "Local Work").mkdir(parents=True)
+    (root / "Local Work" / "Local Work.mp4").write_bytes(b"x" * 11)
+    (elsewhere / "Cloud Work").mkdir(parents=True)
+    (elsewhere / "Cloud Work" / "Cloud Work.mp4").write_bytes(b"x" * 22)
+    _winapi.CreateJunction(str(elsewhere / "Cloud Work"), str(root / "Cloud Work"))
+    qm = QueueManager(download_dir=root)
+    qm._library_dirs = lambda: [root]
+
+    index = qm._library_video_index()
+    assert list(index) == [11]
+    assert lib.is_link(root / "Cloud Work") and not lib.is_link(root / "Local Work")

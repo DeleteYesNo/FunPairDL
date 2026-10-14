@@ -2689,30 +2689,36 @@ class QueueManager:
         return out
 
     _LIB_INDEX_TTL = 120.0
+    _lib_index_lock = threading.Lock()
 
     def _library_video_index(self) -> dict[int, list[Path]]:
         """{byte size: [video paths]} of every work folder in the library
         roots (one level deep), rebuilt at most every two minutes."""
         import time as _time
-        now = _time.monotonic()
-        cached = getattr(self, "_lib_index", None)
-        if cached and now - cached[0] < self._LIB_INDEX_TTL:
-            return cached[1]
-        index: dict[int, list[Path]] = {}
-        for root in self._library_dirs():
-            try:
-                dirs = [d for d in root.iterdir() if d.is_dir() and not lib.is_meta_dir(d.name)]
-            except OSError:
-                continue
-            for d in dirs:
-                try:
-                    for f in d.iterdir():
-                        if f.suffix.lower() in self._VIDEO_EXTS and f.is_file():
-                            index.setdefault(f.stat().st_size, []).append(f)
-                except OSError:
-                    continue
-        self._lib_index = (now, index)
-        return index
+        # Every pair starting at once asks together: one walk serves them all.
+        with self._lib_index_lock:
+            now = _time.monotonic()
+            cached = getattr(self, "_lib_index", None)
+            if cached and now - cached[0] < self._LIB_INDEX_TTL:
+                return cached[1]
+            index: dict[int, list[Path]] = {}
+            for root in self._library_dirs():
+                for d in lib.iter_work_dirs(root, include_no_video=False):
+                    # A work moved to a cloud drive is a junction into the
+                    # mount: listing ~4,500 of them is one cloud round trip
+                    # each, which held every starting pair for many minutes.
+                    if lib.is_link(d):
+                        continue
+                    try:
+                        with os.scandir(d) as it:
+                            for e in it:
+                                if (Path(e.name).suffix.lower() in self._VIDEO_EXTS
+                                        and e.is_file(follow_symlinks=False)):
+                                    index.setdefault(e.stat(follow_symlinks=False).st_size, []).append(Path(e.path))
+                    except OSError:
+                        continue
+            self._lib_index = (_time.monotonic(), index)
+            return index
 
     @staticmethod
     def _name_words(name: str) -> frozenset[str]:
@@ -2790,9 +2796,7 @@ class QueueManager:
         cands: list[Path] = []
         for root in self._library_dirs():
             try:
-                for d in root.iterdir():
-                    if not d.is_dir() or lib.is_meta_dir(d.name):
-                        continue
+                for d in lib.iter_work_dirs(root, include_no_video=False):
                     dn = nums(d.name)
                     if own_nums and dn and not (own_nums & dn):
                         continue

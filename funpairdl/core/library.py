@@ -120,6 +120,16 @@ def _subdirs(folder: Path) -> list[Path]:
     return sorted(out)
 
 
+def is_link(path: Path) -> bool:
+    """True for a symlink or a directory junction (any reparse point) —
+    a work folder that lives on a cloud drive. Never follows it."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return path.is_symlink() or bool(getattr(st, "st_file_attributes", 0) & 0x400)
+
+
 def iter_work_dirs(root: Path, include_no_video: bool = True):
     """Yield every work folder directly under ``root`` (and under
     ``root/No Video/``), skipping meta folders."""
