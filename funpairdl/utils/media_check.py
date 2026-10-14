@@ -30,6 +30,10 @@ def mp4_problem(path: Path) -> str | None:
             f.seek(off)
             head = f.read(16)
             if len(head) < 8:
+                if off:
+                    # Under 8 bytes after a whole chain can hold no box:
+                    # padding some uploaders leave (three spaces), not a cut.
+                    break
                 return f"box header cut off at byte {off}"
             box_size, box_type = struct.unpack(">I4s", head[:8])
             if box_size == 1:

@@ -115,6 +115,15 @@ def test_mp4_problem_accepts_a_whole_file(tmp_path):
     assert mp4_problem(p) is None
 
 
+def test_mp4_problem_accepts_a_few_padding_bytes_after_the_chain(tmp_path):
+    # some uploads end in three spaces after a whole ftyp/mdat/moov chain
+    p = tmp_path / "a.mp4"
+    p.write_bytes(_box(b"ftyp", b"isom") + _box(b"mdat", b"d" * 1000) + _box(b"moov", b"m" * 40) + b"   ")
+    assert mp4_problem(p) is None
+    p.write_bytes(_box(b"ftyp", b"isom") + _box(b"mdat", b"d" * 1000) + b"   ")
+    assert "no moov" in mp4_problem(p)
+
+
 def test_mp4_problem_flags_truncation_and_missing_index(tmp_path):
     whole = _box(b"ftyp", b"isom") + _box(b"moov", b"m" * 40) + _box(b"mdat", b"d" * 1000)
     p = tmp_path / "a.mp4"
