@@ -820,8 +820,36 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
                 "members": member_roles, "reason": reason,
             })
 
+    _merge_same_bytes(groups, roles, {v.url: v for v in videos})
     _apply_format_pref(groups, roles, {v.url: v for v in videos}, cores, prefs, scripts)
     return {"groups": groups, "ambiguous": ambiguous, "roles": roles}
+
+
+def _merge_same_bytes(groups: list[dict], roles: dict, specs: dict) -> None:
+    """Two groups whose chosen links have one exact byte count (a megabyte
+    or more) chose one file uploaded twice: a reply's re-upload under the
+    uploader's name ("Evooo" beside the OP's file), or a folder file and its
+    copy on a video site. The later group's links become alternates of the
+    earlier (a primary wins over a variant) — planned apart, the video was
+    downloaded twice and the copy left alone in a folder of its own."""
+    first: dict[int, dict] = {}
+    for g in list(groups):
+        spec = specs.get(g.get("chosen") or "")
+        if g.get("dead") or not spec or spec.failed or not spec.size or spec.size < 1_000_000:
+            continue
+        keep = first.setdefault(spec.size, g)
+        if keep is g:
+            continue
+        if keep["kind"] != "primary" and g["kind"] == "primary":
+            keep, g = g, keep
+            first[spec.size] = keep
+        moved = [g["chosen"]] + list(g["alternates"])
+        keep["alternates"] = list(keep["alternates"]) + moved
+        for u in moved:
+            keep["members"][u] = "mirror"
+            if roles.get(u) != "ambiguous":
+                roles[u] = "alternate"
+        groups.remove(g)
 
 
 _FORMAT_ORDER = {"flat": ("flat", "vr", "passthrough"), "vr": ("vr", "passthrough", "flat")}

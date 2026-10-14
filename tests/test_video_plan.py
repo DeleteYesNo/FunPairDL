@@ -638,3 +638,26 @@ class TestSiteIds:
         ])
         assert res["roles"][f"{self.PACK}/file/f3"] == "chosen"
         assert res["roles"]["https://www.iwara.tv/video/DDDDdddd4444"] == "chosen"
+
+
+class TestSameBytes:
+    def test_a_reupload_of_the_same_bytes_is_a_mirror_whatever_its_name(self):
+        # The OP's MEGA file and a reply's folder re-upload named after the
+        # uploader: same byte count, the folder copy's length unread.
+        res = plan_videos([
+            _v("https://mega.nz/file/x", "Elf.mp4", size=230_870_720, duration=85.0, priority=2.0),
+            _p("https://gofile.io/d/f1", "Uploader.mp4", pack="https://gofile.io/d/pack1",
+               size=230_870_720),
+        ], Prefs(pick_mode="smallest", min_resolution="1080"),
+            scripts=[{"name": "Elf.funscript", "duration": 85.5},
+                     {"name": "Uploader.funscript", "duration": 85.5}])
+        primaries = [g for g in res["groups"] if g["kind"] == "primary"]
+        assert len(primaries) == 1
+        assert sorted(res["roles"].values()) == ["alternate", "chosen"]
+
+    def test_small_files_of_one_size_stay_apart(self):
+        res = plan_videos([
+            _v("https://h/a", "One.mp4", size=500_000),
+            _v("https://h/b", "Two.mp4", size=500_000),
+        ])
+        assert res["roles"] == {"https://h/a": "chosen", "https://h/b": "chosen"}
