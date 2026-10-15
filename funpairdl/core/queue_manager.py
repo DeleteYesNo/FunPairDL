@@ -1877,9 +1877,7 @@ class QueueManager:
         alphanumerics. "Iwara - Work Title [abc123] [Source]" and the slug
         "work-title" both become "worktitle"."""
         import re
-        s = name or ""
-        if "." in s and not s.endswith("."):
-            s = Path(s).stem
+        s = cls._drop_ext(name or "")
         s = re.sub(r"^\s*(?:iwara|source(?:\s*video)?|mirror|video)\s*[-—–:]\s*", "", s, flags=re.IGNORECASE)
         # A leading bracket is an author/release tag that tells works apart
         # ("[Gweda] Mockie" vs "[Teamboobs] Mockie" — see pairing.normalize);
@@ -1889,6 +1887,16 @@ class QueueManager:
         rest = s[m.end():] if m else s
         rest = re.sub(r"[\[\(【][^\]\)】]*[\]\)】]", " ", rest)
         return cls._match_key(f"{lead} {rest}")
+
+    @staticmethod
+    def _drop_ext(name: str) -> str:
+        """"Work.mp4" → "Work". Only a real extension goes: the dot in
+        "[Mr. No Face] Work" is part of an author's name, and cutting there
+        left every work of that author the one key "mr"."""
+        stem, dot, ext = name.rpartition(".")
+        if dot and stem.strip() and re.fullmatch(r"[A-Za-z0-9]{1,9}", ext) and re.search(r"[A-Za-z]", ext):
+            return stem
+        return name
 
     _SITE_TITLE_RE = re.compile(
         r"\brule\s?34\b|#\d{5,}|\b(?:hanime1|xvideos|pornhub|spankbang|eporner|xhamster)\b", re.IGNORECASE)
@@ -2388,7 +2396,7 @@ class QueueManager:
         if not labels and len(videos) >= 2 and len(h_videos) == len(videos):
             mkeys = {self._mirror_key(_identity(v)) for v in videos}
             mkeys.discard("")
-            idents = {Path(_identity(v)).stem.lower() for v in videos}
+            idents = {self._drop_ext(_identity(v)).lower() for v in videos}
             name_holders = sum(
                 1 for v, _, _ in video_info
                 if any(basis.get(id(sc)) == "name" for sc in matched[id(v)])

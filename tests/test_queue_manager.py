@@ -1108,6 +1108,26 @@ class TestVariantVideosStayOneWork:
         assert qm.plan_bundle_split(items, None, "[Auth] Work Title") is None
         assert qm._auto_split_bundle_pair(Pair(name="[Auth] Work Title", items=items)) is None
 
+    def test_a_dot_in_the_authors_name_keeps_the_nude_variant_with_its_work(self):
+        # "[Mr. No Face] …": cutting at that dot keyed every video "mr", so
+        # the two cuts no longer differed by a tag and the bare one was split
+        # off without a script.
+        items = [
+            PairItem(url="https://pixeldrain.com/u/aaaa1111", filename="[Mr. No Face] Work Title! (Nude).mp4",
+                     file_type=FileType.VIDEO),
+            PairItem(url="https://pixeldrain.com/u/bbbb2222", filename="[Mr. No Face] Work Title!.mp4",
+                     file_type=FileType.VIDEO),
+            PairItem(url="https://pixeldrain.com/u/cccc3333", filename="[Mr. No Face] Work Title.funscript",
+                     file_type=FileType.FUNSCRIPT),
+            PairItem(url="https://pixeldrain.com/u/dddd4444", filename="[Mr. No Face] Work Title.pitch.funscript",
+                     file_type=FileType.FUNSCRIPT),
+        ]
+        assert QueueManager().plan_bundle_split(items, None, "[Mr. No Face] Work Title") is None
+
+    def test_two_works_of_an_author_with_a_dot_are_not_mirrors(self):
+        assert QueueManager._mirror_key("[Mr. No Face] Alpha") != QueueManager._mirror_key("[Mr. No Face] Beta")
+        assert QueueManager._mirror_key("[Auth] Work.mp4") == QueueManager._mirror_key("[Auth] Work")
+
     def test_parts_with_their_own_scripts_still_split(self):
         items = [
             self._v("aaaa1111", "Scene (part 1).mp4"),
