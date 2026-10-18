@@ -2959,11 +2959,16 @@ class QueueManager:
             canonical, _ = self._parse_axis(item.filename)
             axis_seen.setdefault(canonical, []).append(item)
         # The work's own set is the one named plainest: "Work" over "Work
-        # (Less Vibrations)" and "Work EASY", whatever order they came in.
+        # (Less Vibrations)" and "Work EASY", whatever order they came in —
+        # unless one set already carries the work's name: a reply's "123"
+        # is shorter than the OP's "25.09 Work", not plainer.
         l0_group = axis_seen.get("L0") or []
         keep_base = ""
         if len(l0_group) > 1:
-            keep = min(enumerate(l0_group), key=lambda x: (len(self._script_base(x[1].filename)), x[0]))[1]
+            work = (pair.name or "").strip().casefold()
+            named = [x for x in l0_group if self._script_base(x.filename).strip().casefold() == work]
+            keep = named[0] if len(named) == 1 else min(
+                enumerate(l0_group), key=lambda x: (len(self._script_base(x[1].filename)), x[0]))[1]
             keep_base = self._script_base(keep.filename)
             axis_seen["L0"] = [keep] + [x for x in l0_group if x is not keep]
         extras: list[PairItem] = []
@@ -3266,7 +3271,11 @@ class QueueManager:
     _OTHER_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".txt", ".nfo", ".md",
                    ".pdf", ".zip", ".rar", ".7z", ".url", ".html",
                    # subtitles: typed as videos, each became a work of its own
-                   ".srt", ".ass", ".ssa", ".vtt", ".sub", ".idx", ".sup", ".lrc"}
+                   ".srt", ".ass", ".ssa", ".vtt", ".sub", ".idx", ".sup", ".lrc",
+                   # a cover in a newer image format, and the script editor's
+                   # project file (OpenFunscripter .ofsp) — same story
+                   ".avif", ".heic", ".heif", ".tif", ".tiff", ".svg", ".ico", ".psd",
+                   ".ofsp", ".ofs", ".csv", ".json", ".xml"}
     # An audio track beside the videos (an English dub) is an attachment; a
     # post whose only media is audio keeps it as its "video".
     _AUDIO_EXTS = {".aac", ".mp3", ".wav", ".flac", ".m4a", ".ogg", ".opus", ".wma"}

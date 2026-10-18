@@ -816,6 +816,26 @@ class TestScriptSetVariants:
         assert set(v) == {"Main", "Less Vibrations", "Overclocked"}
         assert (tmp_path / "Work.funscript").stat().st_size == 100 + len("Work.funscript")
 
+    def test_the_set_named_as_the_work_is_main_over_a_shorter_reply_set(self, tmp_path):
+        # The OP's "25.09 Work" set already carries the work's name; a reply's
+        # "123" set is shorter. Taking the shortest made the reply Main, its
+        # rename hit the OP's files and the OP's set became a variant of itself.
+        _touch(tmp_path / "v.mp4")
+        names = ["25.09 Work.funscript", "25.09 Work.pitch.funscript",
+                 "123.funscript", "123.pitch.funscript"]
+        for n in names:
+            _touch(tmp_path / n, size=100 + len(n))
+        pair = _make_pair(str(tmp_path), "25.09 Work", [
+            PairItem(url="http://x/v.mp4", filename="v.mp4", file_type=FileType.VIDEO),
+            *(PairItem(url=f"http://x/{i}", filename=n, file_type=FileType.FUNSCRIPT) for i, n in enumerate(names)),
+        ])
+        _organize(pair)
+        v = _variants(tmp_path)
+        assert v["Main"]["files"] == {"L0": "25.09 Work.funscript", "pitch": "25.09 Work.pitch.funscript"}
+        assert (tmp_path / "25.09 Work.funscript").stat().st_size == 100 + len("25.09 Work.funscript")
+        assert set(v) == {"Main", "Alt"}
+        assert not (tmp_path / "123.funscript").exists()
+
 
 def _mp4(seconds: float, width: int, height: int, pad: int = 0) -> bytes:
     import struct

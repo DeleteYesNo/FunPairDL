@@ -1380,6 +1380,18 @@ def test_subtitles_and_a_dub_track_beside_videos_are_no_videos(tmp_path):
                      "Show_ENDUB.aac": FileType.OTHER}
 
 
+def test_an_avif_cover_and_an_editor_project_beside_the_video_are_one_work(tmp_path):
+    qm = QueueManager(download_dir=tmp_path)
+    urls = ["https://pd/u/v", "https://pd/u/i", "https://pd/u/p"]
+    pair = qm.add_pair(name="Work", video_urls=urls, script_urls=["https://pd/u/s"],
+                       filenames={**dict(zip(urls, ["work 123.mp4", "work 123.avif", "work 123.ofsp"])),
+                                  "https://pd/u/s": "work 123.funscript"})
+    kinds = {i.filename: i.file_type for i in pair.items}
+    assert kinds == {"work 123.mp4": FileType.VIDEO, "work 123.avif": FileType.OTHER,
+                     "work 123.ofsp": FileType.OTHER, "work 123.funscript": FileType.FUNSCRIPT}
+    assert qm._auto_split_bundle_pair(pair) is None
+
+
 def test_an_audio_only_post_keeps_its_audio(tmp_path):
     qm = QueueManager(download_dir=tmp_path)
     pair = qm.add_pair(name="Voice", video_urls=["https://pd/u/a"], script_urls=[],
