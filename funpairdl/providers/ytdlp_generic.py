@@ -25,6 +25,7 @@ _SKIP_DOMAINS = [
     "e621.net",
     "e926.net",
     "r-34.xyz",
+    "airscripts.fun",
     "the-joi-database.com",
     "watchhentai.net",
     "fanbox.cc",

@@ -515,6 +515,19 @@ function extractLinksFromElement(containerEl, isOP) {
     if (!href || href.startsWith("blob:") || href.startsWith("#")) return;
     if (href.includes("discuss.eroscripts.com") && !href.includes(".funscript")) return;
     if (href.endsWith(".funscript")) return;
+    const airId = _airscriptsShareId(href);
+    if (airId) {
+      if (!scripts.some((s) => s.url === href)) {
+        const fn = _airscriptsFilename(link, airId);
+        const axis = detectAxis(fn);
+        scripts.push({
+          url: href, source: isOP ? "OP" : "comment",
+          filename: fn, axis, isMultiAxis: axis !== "main",
+          author: detectScriptAuthor(link),
+        });
+      }
+      return;
+    }
     try {
       const u = new URL(href);
       const host = u.hostname.toLowerCase().replace("www.", "");
@@ -786,6 +799,19 @@ function parseOPSections(cookedEl) {
     const href = link.getAttribute("href");
     if (!href || href.startsWith("blob:") || href.startsWith("#")) return;
     if (href.includes("discuss.eroscripts.com") && !href.includes(".funscript")) return;
+    const airId = _airscriptsShareId(href);
+    if (airId) {
+      const sec = findSection(link);
+      if (sec && !sec.scripts.some((s) => s.url === href)) {
+        const fn = _airscriptsFilename(link, airId);
+        const axis = detectAxis(fn);
+        sec.scripts.push({
+          url: href, source: "OP", filename: fn, axis,
+          isMultiAxis: axis !== "main", author: detectScriptAuthor(link),
+        });
+      }
+      return;
+    }
     try {
       const host = new URL(href).hostname.toLowerCase().replace("www.", "");
       if (VIDEO_DOMAINS.some((d) => host.includes(d)) && !isNonVideoPath(href)) {
@@ -971,6 +997,23 @@ function _linkMetaFilename(url) {
 
 function _isScriptFilename(fn) {
   return /\.funscript$/i.test((fn || "").trim());
+}
+
+// AIRscripts share page (airscripts.fun/s/<id>): a free single funscript
+// behind a download button. The link reads "1234567.funscript: free, quick
+// download on AIRscripts"; the backend resolves the button's file.
+function _airscriptsShareId(url) {
+  try {
+    const u = new URL(url);
+    if (u.hostname.toLowerCase().replace("www.", "") !== "airscripts.fun") return "";
+    const m = u.pathname.match(/^\/s\/([A-Za-z0-9_-]+)\/?$/);
+    return m ? m[1] : "";
+  } catch (e) { return ""; }
+}
+
+function _airscriptsFilename(link, id) {
+  const m = (link.textContent || "").match(/([^\s:]+\.funscript)/i);
+  return m ? m[1] : `airscripts ${id}.funscript`;
 }
 
 // True when a section heading is a generic container label ("Downloads",

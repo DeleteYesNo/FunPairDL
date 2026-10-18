@@ -15,6 +15,7 @@ from funpairdl.providers.gdrive import GoogleDriveProvider
 from funpairdl.providers.socigames import SociGamesProvider
 from funpairdl.providers.e621 import E621Provider
 from funpairdl.providers.r34xyz import R34XyzProvider
+from funpairdl.providers.airscripts import AirscriptsProvider
 from funpairdl.providers.fanbox import FanboxProvider
 from funpairdl.providers.faptap import FaptapProvider
 from funpairdl.providers.filester import FilesterProvider
@@ -51,6 +52,7 @@ class ProviderRegistry:
             SociGamesProvider(),
             E621Provider(),
             R34XyzProvider(),
+            AirscriptsProvider(),
             JoiDbProvider(),
             FanboxProvider(),
             PmvHavenProvider(),

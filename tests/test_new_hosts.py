@@ -271,3 +271,26 @@ class TestR34Xyz:
         assert video_url(1234567) == "https://r34xyz.b-cdn.net/posts/1234/1234567/1234567.mp4"
         assert video_url(90564) == "https://r34xyz.b-cdn.net/posts/90/90564/90564.mp4"
         assert build_filename(1234567) == "r-34.xyz 1234567.mp4"
+
+
+class TestAirscripts:
+    SHARE = "https://airscripts.fun/s/AbC123xyz"
+
+    def test_routing(self):
+        from funpairdl.providers.airscripts import AirscriptsProvider, share_id
+        from funpairdl.providers.registry import ProviderRegistry
+        assert share_id(self.SHARE) == "AbC123xyz"
+        assert not AirscriptsProvider.can_handle("https://airscripts.fun/b/robot-girls")
+        assert not AirscriptsProvider.can_handle("https://airscripts.fun/library?stroke=full")
+        assert not YtdlpGenericProvider.can_handle(self.SHARE)
+        assert detect_provider(self.SHARE) == "airscripts"
+        assert ProviderRegistry().get_provider(self.SHARE).name == "airscripts"
+
+    def test_download_button(self):
+        from funpairdl.providers.airscripts import parse_download
+        page = ('<div class="pub-get"><a class="btn big pub-dl" href="/s/AbC123xyz/get/42">'
+                'Download 1234567.funscript</a></div>')
+        assert parse_download(page, "AbC123xyz") == (
+            "https://airscripts.fun/s/AbC123xyz/get/42", "1234567.funscript")
+        # members-only: no button
+        assert parse_download('<a href="/login?next=/s/AbC123xyz">sign in</a>', "AbC123xyz") == ("", "")

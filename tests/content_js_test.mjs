@@ -89,6 +89,23 @@ check("stray pack: a folder with a video of the post keeps its files",
   check("links: the host's video page still is", got.includes("https://www.pornhub.com/view_video.php?viewkey=abc123"), true);
 }
 
+// ── extractLinksFromElement: an AIRscripts share page is the post's script ──
+{
+  const anchors = (hrefs) => ({
+    querySelectorAll: (sel) => sel === "a[href]"
+      ? hrefs.map(([href, text]) => ({ getAttribute: () => href, textContent: text, closest: () => null }))
+      : [],
+  });
+  const got = ctx.extractLinksFromElement(anchors([
+    ["https://airscripts.fun/s/AbC123xyz", "1234567.funscript: free, quick download on AIRscripts (no sign-up)"],
+    ["https://airscripts.fun/b/robot-girls", "Robot Girls"],
+    ["https://r-34.xyz/post/1234567", ""],
+  ]), true);
+  check("airscripts: the share link is a script", got.scripts.map((s) => s.url).join(), "https://airscripts.fun/s/AbC123xyz");
+  check("airscripts: named by the link text", got.scripts[0] && got.scripts[0].filename, "1234567.funscript");
+  check("airscripts: no video row for it", got.videos.some((v) => v.url.includes("airscripts")), false);
+}
+
 // ── detectAxis: only known axes are axes; other dot-words belong to the name ──
 check("axis: raw suffix is the main script", ctx.detectAxis("Title ver.!!.raw.funscript"), "main");
 check("axis: raw + pitch → pitch", ctx.detectAxis("Title ver.!!.raw.pitch.funscript"), "pitch");

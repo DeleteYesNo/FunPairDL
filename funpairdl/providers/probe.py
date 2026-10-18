@@ -279,6 +279,9 @@ async def _probe_uncached(
     if provider == "r34xyz":
         return await _probe_r34xyz(url, session)
 
+    if provider == "airscripts":
+        return await _probe_airscripts(url, session)
+
     if provider == "joidb":
         return await _probe_joidb(url, session)
 
@@ -870,6 +873,28 @@ async def _probe_e621(url: str, session: aiohttp.ClientSession) -> dict:
         }
     except Exception as e:
         logger.error("e621 probe failed for %s: %s", url[:80], e)
+        return {"success": False, "error": str(e)}
+
+
+async def _probe_airscripts(url: str, session: aiohttp.ClientSession) -> dict:
+    """AIRscripts share page: the free funscript's name (so the panel files
+    the link as a script) and, from a HEAD on the file, its size."""
+    try:
+        from funpairdl.providers.airscripts import _HEADERS, fetch_download, ssl_context
+
+        file_url, filename = await fetch_download(url, session)
+        size = 0
+        try:
+            async with session.head(file_url, headers=_HEADERS, allow_redirects=True, ssl=ssl_context(),
+                                    timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    size = int(resp.headers.get("Content-Length") or 0)
+        except Exception:
+            pass
+        return {"success": True, "provider": "airscripts", "title": filename.rsplit(".", 1)[0],
+                "filename": filename, "size": size}
+    except Exception as e:
+        logger.error("AIRscripts probe failed for %s: %s", url[:80], e)
         return {"success": False, "error": str(e)}
 
 
