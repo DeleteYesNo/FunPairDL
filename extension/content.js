@@ -49,6 +49,7 @@ const VIDEO_PRIORITY = {
   // Booru animation posts (webm + mp4 transcodes via JSON API)
   "e621.net": 7,
   "e926.net": 7,
+  "r-34.xyz": 7,
   // Own providers: JOI HLS streams, hentai episodes, free creator posts
   "the-joi-database.com": 7,
   "watchhentai.net": 7,
@@ -294,6 +295,7 @@ function getVideoLabel(url) {
     if (host.includes("hmvmania")) return "HMV Mania";
     if (host.includes("socigames")) return "SociGames";
     if (host.includes("e621") || host.includes("e926")) return "e621";
+    if (host === "r-34.xyz") return "R-34.XYZ";
     if (host.includes("the-joi-database")) return "The JOI Database";
     if (host.includes("watchhentai")) return "WatchHentai";
     if (host.includes("fanbox.cc")) return "pixivFANBOX";

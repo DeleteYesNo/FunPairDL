@@ -276,6 +276,9 @@ async def _probe_uncached(
     if provider == "e621":
         return await _probe_e621(url, session)
 
+    if provider == "r34xyz":
+        return await _probe_r34xyz(url, session)
+
     if provider == "joidb":
         return await _probe_joidb(url, session)
 
@@ -867,6 +870,39 @@ async def _probe_e621(url: str, session: aiohttp.ClientSession) -> dict:
         }
     except Exception as e:
         logger.error("e621 probe failed for %s: %s", url[:80], e)
+        return {"success": False, "error": str(e)}
+
+
+async def _probe_r34xyz(url: str, session: aiohttp.ClientSession) -> dict:
+    """r-34.xyz: the API gives length, size of frame and tags; a HEAD on the
+    CDN file gives its size."""
+    try:
+        from funpairdl.providers.r34xyz import (
+            build_filename, extract_post_id, fetch_post, fetch_size, tag_names, thumbnail_url,
+        )
+
+        post_id = extract_post_id(url)
+        if post_id is None:
+            return {"success": False, "error": "Not a video"}
+        post = await fetch_post(post_id, session)
+        size = await fetch_size(post_id, session)
+        filename = build_filename(post_id)
+        height = int(post.get("height") or 0)
+        return {
+            "success": True,
+            "provider": "r34xyz",
+            "title": filename.rsplit(".", 1)[0],
+            "filename": filename,
+            "size": size,
+            "formats": [{"height": height, "size": size, "format_id": "original"}],
+            "width": int(post.get("width") or 0) or None,
+            "height": height or None,
+            "tags": tag_names(post)[:120],
+            "thumbnail": thumbnail_url(post_id),
+            "duration": post.get("duration") or None,
+        }
+    except Exception as e:
+        logger.error("r-34.xyz probe failed for %s: %s", url[:80], e)
         return {"success": False, "error": str(e)}
 
 

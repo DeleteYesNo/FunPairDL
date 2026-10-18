@@ -24,6 +24,7 @@ _SKIP_DOMAINS = [
     "socigames.com",
     "e621.net",
     "e926.net",
+    "r-34.xyz",
     "the-joi-database.com",
     "watchhentai.net",
     "fanbox.cc",

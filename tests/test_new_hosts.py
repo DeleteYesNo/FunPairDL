@@ -249,3 +249,25 @@ def test_filester_urls():
     assert not FilesterProvider.can_handle("https://filester.gg/faq")
     assert media_url({"server": "https://cdn.example", "file": "f.mp4", "token": "t1"}) == \
         "https://cdn.example/v2/f.mp4?token=t1&download=true"
+
+
+class TestR34Xyz:
+    POST = "https://r-34.xyz/post/1234567?&pr=5&d=7654321"
+
+    def test_routing(self):
+        from funpairdl.providers.r34xyz import R34XyzProvider, extract_post_id
+        from funpairdl.providers.registry import ProviderRegistry
+        assert R34XyzProvider.can_handle(self.POST)
+        assert extract_post_id(self.POST) == 1234567
+        assert not R34XyzProvider.can_handle("https://r-34.xyz/tags/sound")
+        # rule34.xyz is another site with another numbering
+        assert not R34XyzProvider.can_handle("https://rule34.xyz/post/1234567")
+        assert not YtdlpGenericProvider.can_handle(self.POST)
+        assert detect_provider(self.POST) == "r34xyz"
+        assert ProviderRegistry().get_provider(self.POST).name == "r34xyz"
+
+    def test_cdn_path_is_built_from_the_id(self):
+        from funpairdl.providers.r34xyz import build_filename, video_url
+        assert video_url(1234567) == "https://r34xyz.b-cdn.net/posts/1234/1234567/1234567.mp4"
+        assert video_url(90564) == "https://r34xyz.b-cdn.net/posts/90/90564/90564.mp4"
+        assert build_filename(1234567) == "r-34.xyz 1234567.mp4"
