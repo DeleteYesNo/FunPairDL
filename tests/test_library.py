@@ -305,3 +305,26 @@ def test_library_video_index_does_not_list_cloud_works(tmp_path):
     index = qm._library_video_index()
     assert list(index) == [11]
     assert lib.is_link(root / "Cloud Work") and not lib.is_link(root / "Local Work")
+
+
+def test_sidecar_writers_of_one_folder_do_not_lose_each_others_fields(tmp_path, monkeypatch):
+    # A reconcile and the forum enrich finishing together: each read → merge
+    # → write must see the other's result, and no temp name is shared.
+    import threading as _t
+    from funpairdl.core import library as lib
+    seen_tmp = []
+    real_replace = lib.os.replace
+
+    def slow_replace(src, dst):
+        seen_tmp.append(lib.Path(src).name)
+        _t.Event().wait(0.05)
+        real_replace(src, dst)
+    monkeypatch.setattr(lib.os, "replace", slow_replace)
+    threads = [_t.Thread(target=lib.update_sidecar, args=(tmp_path, {f"k{i}": i})) for i in range(6)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    data = lib.read_sidecar(tmp_path)
+    assert all(data[f"k{i}"] == i for i in range(6))
+    assert len(set(seen_tmp)) == len(seen_tmp) == 6

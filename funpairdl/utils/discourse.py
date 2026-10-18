@@ -163,13 +163,13 @@ async def enrich_sidecar(work_dir: Path, topic_id: int,
                          session: aiohttp.ClientSession | None = None) -> bool:
     """Fill the forum fields (tags, category, posted_at, posted_by, title)
     of a work's sidecar from its topic. Fields already present are kept."""
-    from funpairdl.core.library import merge_sidecar, read_sidecar, write_sidecar
+    from funpairdl.core.library import update_sidecar
     meta = await fetch_topic_meta(topic_id, session)
     if not meta:
         return False
-    existing = read_sidecar(work_dir) or {}
-    merged = merge_sidecar(existing, meta, overwrite=False)
-    write_sidecar(work_dir, merged)
+    # Read and write under the folder's lock: a reconcile writing between
+    # a separate read and write here was overwritten with the older copy.
+    update_sidecar(work_dir, meta, overwrite=False)
     logger.info("Sidecar enriched from topic %s: %s", topic_id, Path(work_dir).name)
     return True
 

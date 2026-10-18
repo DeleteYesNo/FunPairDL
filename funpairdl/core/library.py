@@ -374,14 +374,29 @@ def read_sidecar(work_dir: Path) -> dict | None:
         return None
 
 
+_sidecar_locks: dict[str, threading.RLock] = {}
+_sidecar_locks_guard = threading.Lock()
+_tmp_seq = iter(range(1, 1 << 62))
+
+
+def _sidecar_lock(work_dir: Path) -> threading.RLock:
+    """One lock per work folder: a reconcile and the forum enrich finishing
+    together wrote through one temp name, and on the cloud mount the second
+    open truncated the first's file — the sidecar ended up empty."""
+    key = os.path.normcase(os.path.abspath(work_dir))
+    with _sidecar_locks_guard:
+        return _sidecar_locks.setdefault(key, threading.RLock())
+
+
 def write_sidecar(work_dir: Path, data: dict) -> Path:
     """Atomic UTF-8 (no BOM) write of ``funlib.json``."""
     p = Path(work_dir) / SIDECAR_NAME
     data = dict(data)
     data.setdefault("version", SIDECAR_VERSION)
-    tmp = p.with_name(f"{p.name}.tmp-{os.getpid()}")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, p)
+    with _sidecar_lock(work_dir):
+        tmp = p.with_name(f"{p.name}.tmp-{os.getpid()}-{next(_tmp_seq)}")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, p)
     return p
 
 
@@ -469,9 +484,10 @@ def sidecar_from_pair(pair, variants: list[dict] | None = None, title: str | Non
 
 
 def update_sidecar(work_dir: Path, incoming: dict, overwrite: bool = False) -> dict:
-    """read → merge → write; returns what was written."""
-    merged = merge_sidecar(read_sidecar(work_dir), incoming, overwrite=overwrite)
-    write_sidecar(work_dir, merged)
+    """read → merge → write as one step per folder; returns what was written."""
+    with _sidecar_lock(work_dir):
+        merged = merge_sidecar(read_sidecar(work_dir), incoming, overwrite=overwrite)
+        write_sidecar(work_dir, merged)
     return merged
 
 
