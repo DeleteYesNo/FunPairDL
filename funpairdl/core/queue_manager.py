@@ -1572,6 +1572,24 @@ class QueueManager:
         except Exception as e:  # never let the check block a download
             logger.warning("Library check failed for '%s': %s", pair.name, e)
 
+        # A work on the cloud drive comes back to a local folder before
+        # anything is written into it: FunLib does not scan inside cloud
+        # works, and the cloud index would no longer match.
+        try:
+            await asyncio.to_thread(lib.pull_cloud_work, Path(pair.output_dir))
+        except RuntimeError as e:
+            logger.error("Pair '%s': %s", pair.name, e)
+            pair.state = PairState.FAILED
+            for item in pair.items:
+                if item.state != ItemState.COMPLETED:
+                    item.state = ItemState.FAILED
+                    item.error_message = str(e)
+            if self.on_pair_updated:
+                self.on_pair_updated(pair)
+            if self.on_save_needed:
+                self.on_save_needed()
+            return
+
         output_dir = Path(pair.output_dir)
 
         # Track this pair's tasks locally; also register in shared lists for pause/cancel
@@ -2718,7 +2736,12 @@ class QueueManager:
                     # A work moved to a cloud drive is a junction into the
                     # mount: listing ~4,500 of them is one cloud round trip
                     # each, which held every starting pair for many minutes.
+                    # The root's cloud index lists their files instead.
                     if lib.is_link(d):
+                        for f in lib.cloud_files(d) or []:
+                            rel = str(f["rel"])
+                            if "/" not in rel and Path(rel).suffix.lower() in self._VIDEO_EXTS:
+                                index.setdefault(int(f.get("size") or 0), []).append(d / rel)
                         continue
                     try:
                         with os.scandir(d) as it:
@@ -2830,10 +2853,7 @@ class QueueManager:
             getattr(settings, "vr_versions", "flat"))
         found: list[Path] = []
         for d in cands:
-            for f in d.iterdir():
-                if f.suffix.lower() not in self._VIDEO_EXTS or not f.is_file():
-                    continue
-                meta = await asyncio.to_thread(local_media_meta, f)
+            for f, meta in await asyncio.to_thread(self._work_videos, d, local_media_meta):
                 if not meta.get("duration") or abs(meta["duration"] - length) > 0.5:
                     continue
                 have = video_format(meta.get("width") or 0, meta.get("height") or 0, f.name) or "flat"
@@ -2842,6 +2862,21 @@ class QueueManager:
                 found.append(d)
                 break
         return found[0] if len(found) == 1 else None
+
+    @classmethod
+    def _work_videos(cls, d: Path, meta_of) -> list[tuple[Path, dict]]:
+        """(video, {"duration", "width", "height"}) for each video directly
+        in work folder `d`: a cloud work's from the root's cloud index (never
+        read through the cloud drive), a local work's from `meta_of(path)`.
+        Raises OSError when a local folder can't be listed."""
+        cloud = lib.cloud_files(d)
+        if cloud is not None:
+            return [(d / f["rel"], {"duration": float(f.get("duration") or 0),
+                                    "width": int(f.get("w") or 0), "height": int(f.get("h") or 0)})
+                    for f in cloud
+                    if "/" not in f["rel"] and Path(f["rel"]).suffix.lower() in cls._VIDEO_EXTS]
+        return [(f, meta_of(f)) for f in d.iterdir()
+                if f.suffix.lower() in cls._VIDEO_EXTS and f.is_file()]
 
     def _work_dir_for(self, target_dir: Path, new_lens: list[float]) -> Path:
         """The folder a download of this title goes to. A folder of the
@@ -2856,10 +2891,10 @@ class QueueManager:
         n, cand = 1, target_dir
         while cand.is_dir():
             try:
-                vids = [f for f in cand.iterdir() if f.is_file() and f.suffix.lower() in self._VIDEO_EXTS]
+                vids = self._work_videos(cand, lambda f: {"duration": local_media_duration(f)})
             except OSError:
                 return cand
-            lens = [d for d in (local_media_duration(f) for f in vids) if d]
+            lens = [m["duration"] for _, m in vids if m.get("duration")]
             if not lens or any(abs(d - nl) <= max(3.0, 0.02 * nl) for d in lens for nl in new_lens):
                 return cand  # no video yet, or the same cut: the work's own folder
             n += 1

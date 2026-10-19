@@ -328,3 +328,107 @@ def test_sidecar_writers_of_one_folder_do_not_lose_each_others_fields(tmp_path, 
     data = lib.read_sidecar(tmp_path)
     assert all(data[f"k{i}"] == i for i in range(6))
     assert len(set(seen_tmp)) == len(seen_tmp) == 6
+
+
+# ── cloud tier ──
+
+def _cloud_work(tmp_path, works, pull=None):
+    """A library root holding "Cloud Work" as a junction to a folder whose
+    video is 22 bytes, and a cloud index describing `works`."""
+    import _winapi
+    root, elsewhere = tmp_path / "lib", tmp_path / "elsewhere"
+    (root / "Local Work").mkdir(parents=True)
+    (root / "Local Work" / "Local Work.mp4").write_bytes(b"x" * 11)
+    (elsewhere / "Cloud Work").mkdir(parents=True)
+    (elsewhere / "Cloud Work" / "Cloud Work.mp4").write_bytes(b"x" * 22)
+    _winapi.CreateJunction(str(elsewhere / "Cloud Work"), str(root / "Cloud Work"))
+    idx = {"version": 1, "works": works}
+    if pull is not None:
+        idx["pull"] = pull
+    (root / lib.CLOUD_INDEX).write_text(json.dumps(idx), encoding="utf-8")
+    return root
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="directory junctions are Windows-only")
+def test_the_library_video_index_knows_cloud_videos_from_the_cloud_index(tmp_path):
+    # a video already on the cloud drive was downloaded again: the size index
+    # skipped cloud works. It reads their sizes from the root's cloud index
+    # (33 here, not the 22 on "disk": the cloud drive itself is not listed).
+    root = _cloud_work(tmp_path, {"Cloud Work": {"files": [
+        {"rel": "Cloud Work.mp4", "size": 33, "duration": 61.5, "w": 1920, "h": 1080},
+        {"rel": "Cloud Work.funscript", "size": 5},
+        {"rel": ".alt1/Cloud Work.mp4", "size": 44}]}})
+    qm = QueueManager(download_dir=root)
+    qm._library_dirs = lambda: [root]
+
+    index = qm._library_video_index()
+    assert sorted(index) == [11, 33]
+    assert index[33] == [root / "Cloud Work" / "Cloud Work.mp4"]
+    assert QueueManager._work_videos(root / "Cloud Work", None) == [
+        (root / "Cloud Work" / "Cloud Work.mp4", {"duration": 61.5, "width": 1920, "height": 1080})]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="directory junctions are Windows-only")
+def test_a_cloud_work_holding_another_cut_is_judged_by_its_index(tmp_path):
+    root = _cloud_work(tmp_path, {"Cloud Work": {"files": [
+        {"rel": "Cloud Work.mp4", "size": 22, "duration": 155.3}]}})
+    qm = QueueManager(download_dir=root)
+    assert qm._work_dir_for(root / "Cloud Work", [180.35]) == root / "Cloud Work (2)"
+    assert qm._work_dir_for(root / "Cloud Work", [155.0]) == root / "Cloud Work"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="directory junctions are Windows-only")
+def test_a_cloud_work_is_pulled_back_before_anything_writes_into_it(tmp_path):
+    # downloads wrote into cloud works, where FunLib never saw the new files:
+    # the index's pull command brings the work back to a local folder first
+    swap = ("import os, shutil, sys; w = sys.argv[1]; t = os.readlink(w); os.rmdir(w); "
+            "shutil.copytree(t, w)")
+    root = _cloud_work(tmp_path, {"Cloud Work": {"files": []}}, pull=[sys.executable, "-c", swap])
+    work = root / "Cloud Work"
+
+    assert lib.pull_cloud_work(work) is True
+    assert not lib.is_link(work) and (work / "Cloud Work.mp4").stat().st_size == 22
+    assert lib.pull_cloud_work(work) is False  # already local
+    assert lib.pull_cloud_work(root / "Local Work") is False
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="directory junctions are Windows-only")
+def test_a_cloud_work_that_cannot_be_pulled_back_is_not_written_into(tmp_path):
+    root = _cloud_work(tmp_path, {"Cloud Work": {"files": []}},
+                       pull=[sys.executable, "-c", "print('FAILED Cloud Work - mount gone')"])
+    with pytest.raises(RuntimeError, match="mount gone"):
+        lib.pull_cloud_work(root / "Cloud Work")
+    (root / lib.CLOUD_INDEX).write_text(json.dumps({"works": {}}), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="no pull command"):
+        lib.pull_cloud_work(root / "Cloud Work")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="directory junctions are Windows-only")
+@pytest.mark.parametrize("pulls", [True, False])
+def test_a_download_into_a_cloud_work_waits_for_it_to_be_local(tmp_path, pulls):
+    import asyncio
+    from funpairdl.core.pair import FileType, ItemState, Pair, PairItem, PairState
+    swap = ("import os, shutil, sys; w = sys.argv[1]; t = os.readlink(w); os.rmdir(w); "
+            "shutil.copytree(t, w)")
+    root = _cloud_work(tmp_path, {"Cloud Work": {"files": []}},
+                       pull=[sys.executable, "-c", swap if pulls else "print('FAILED')"])
+    qm = QueueManager(download_dir=root)
+    qm._library_dirs = lambda: [root]
+    pair = Pair(name="Cloud Work", output_dir=str(root / "Cloud Work"),
+                items=[PairItem(url="https://example.com/a.funscript", filename="Cloud Work.funscript",
+                                file_type=FileType.FUNSCRIPT)])
+    seen = []
+
+    async def resolve(item, res):
+        seen.append(lib.is_link(root / "Cloud Work"))
+        raise RuntimeError("stop here")
+    qm._resolve_item = resolve
+    try:
+        asyncio.run(qm._download_pair(pair))
+    except Exception:
+        pass
+    if pulls:
+        assert seen == [False]
+    else:
+        assert seen == [] and pair.state == PairState.FAILED
+        assert pair.items[0].state == ItemState.FAILED and lib.is_link(root / "Cloud Work")

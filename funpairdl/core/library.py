@@ -145,6 +145,86 @@ def iter_work_dirs(root: Path, include_no_video: bool = True):
         yield d
 
 
+# ── cloud tier ───────────────────────────────────────────────────────────
+# FunLib's tools/cloud-tier.js moves whole work folders to a cloud drive and
+# leaves a junction in their place. It writes <root>/.funlib-cloud.json:
+# each cloud work's files (sizes, video lengths) and the command that brings
+# one back (docs/library-layout.md). Listing a cloud work is a cloud round
+# trip, and FunLib does not scan inside them: read the index instead, and
+# pull a work back before writing into it.
+
+CLOUD_INDEX = ".funlib-cloud.json"
+_cloud_cache: dict[str, tuple[tuple, dict]] = {}
+_pull_locks: dict[str, threading.Lock] = {}
+_pull_locks_guard = threading.Lock()
+
+
+def cloud_index(root: Path | str) -> dict:
+    """The root's cloud index ({"works": {name: {"files": [...]}}, "pull":
+    [...]}), {} without one; re-read only when the file changes."""
+    p = Path(root) / CLOUD_INDEX
+    try:
+        st = p.stat()
+    except OSError:
+        return {}
+    stamp = (st.st_size, st.st_mtime_ns)
+    hit = _cloud_cache.get(str(p))
+    if hit and hit[0] == stamp:
+        return hit[1]
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        logger.warning("Unreadable cloud index %s: %s", p, e)
+        return {}
+    if not isinstance(data, dict) or not isinstance(data.get("works"), dict):
+        return {}
+    _cloud_cache[str(p)] = (stamp, data)
+    return data
+
+
+def cloud_files(work_dir: Path) -> list[dict] | None:
+    """The files of a cloud work as its index lists them ({"rel", "size",
+    and "duration", "w", "h" for a video}); None for a local work or one the
+    index does not know."""
+    work_dir = Path(work_dir)
+    if not is_link(work_dir):
+        return None
+    entry = (cloud_index(work_dir.parent).get("works") or {}).get(work_dir.name)
+    files = entry.get("files") if isinstance(entry, dict) else None
+    return [f for f in files if isinstance(f, dict) and f.get("rel")] if isinstance(files, list) else None
+
+
+def pull_cloud_work(work_dir: Path, timeout: float = 3600) -> bool:
+    """Bring a cloud work back to a local folder with the index's pull
+    command; True when the folder was in the cloud. Raises when it stays
+    there — a download must not write into the cloud drive (FunLib would
+    never see the new files)."""
+    import subprocess
+    work_dir = Path(work_dir)
+    with _pull_locks_guard:
+        lock = _pull_locks.setdefault(str(work_dir).lower(), threading.Lock())
+    with lock:
+        if not is_link(work_dir):
+            return False
+        cmd = cloud_index(work_dir.parent).get("pull")
+        if not (isinstance(cmd, list) and cmd and all(isinstance(c, str) for c in cmd)):
+            raise RuntimeError(f"cloud work has no pull command in {CLOUD_INDEX}: {work_dir.name}")
+        logger.info("Pulling cloud work back before writing into it: %s", work_dir)
+        t0 = time.monotonic()
+        try:
+            res = subprocess.run(cmd + [str(work_dir)], capture_output=True, text=True,
+                                 encoding="utf-8", errors="replace", timeout=timeout,
+                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            out = (res.stdout or "") + (res.stderr or "")
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise RuntimeError(f"pulling {work_dir.name} back failed: {e}") from e
+        if is_link(work_dir) or not work_dir.is_dir():
+            last = next((ln for ln in reversed(out.strip().splitlines()) if ln.strip()), "no output")
+            raise RuntimeError(f"pulling {work_dir.name} back failed: {last}")
+        logger.info("Cloud work is local again (%.0f s): %s", time.monotonic() - t0, work_dir)
+        return True
+
+
 # ── naming ───────────────────────────────────────────────────────────────
 
 _LABEL_STRIP_RE = re.compile(r'[()\[\]{}（）【】<>:"/\\|?*\x00-\x1f]')

@@ -23,6 +23,7 @@ FunPairDL（下載、整理）與 FunLib（索引、播放）之間唯一的介�
     funlib.json                             本約定的 sidecar
   No Video/
     <作品>/                                 只有腳本、沒有影片的作品，版面同上
+  .funlib-cloud.json                        雲端作品的檔案清單（見「雲端分層」）
   _trash/                                   FunLib 刪除的東西（見「刪除與垃圾桶」）
     deleted.jsonl
     <stamp>/<原本的相對路徑>
@@ -127,6 +128,27 @@ FunPairDL 的責任：
 - 去重、「已在磁碟」判斷、媒體庫整理一律**忽略 `_trash/`**（視為不存在）。
 - 讀 `deleted.jsonl`：以每個 `trash` 事件的 `id` 為鍵，後面的 `restore`／`purge` 以 `ref` 指回它，取最後狀態。`trash` 狀態下：帖子清單顯示「已刪除」而非 ✓；使用者重送同一帖子時照常下載（不視為已存在）。`restore` 後回到 ✓。
 - `pair_id`／`source_url` 可能為空（沒有 sidecar 的舊資料夾），此時用 `paths` 對回作品資料夾名稱。
+
+## 雲端分層（FunLib 的 cloud-tier 寫、FunPairDL 讀）
+
+`tools/cloud-tier.js`（FunLib repo）把整個作品資料夾搬到雲端硬碟（rclone 掛載），原位置換成指向掛載的 directory junction。路徑不變，但**列出雲端作品的內容要經過雲端**（冷快取時一部一次往返），FunLib 掃描也不進 junction。所以：
+
+- cloud-tier 在每個媒體庫根目錄寫 `<媒體庫根目錄>/.funlib-cloud.json`（push 加入、pull 移除、commit 保留；`node tools/cloud-tier.js index` 補齊）。內容由本地副本算出，commit 刪掉本地副本後仍然有效：
+
+```json
+{"version":1,
+ "pull":["C:\\Program Files\\nodejs\\node.exe","<FunLib>\\tools\\cloud-tier.js","--data-dir","<FunLib>\\data","pull"],
+ "works":{"<作品>":{"files":[{"rel":"<作品>.mp4","size":123456789,"duration":612.4,"w":1920,"h":1080},
+                            {"rel":"<作品>.funscript","size":2048}]}}}
+```
+
+  - `rel` 以 `/` 分隔、相對於作品資料夾；影片另有 `duration`（秒）與 `w`/`h`（探測失敗時省略）。
+  - `pull` 是把作品拉回本地的指令，呼叫時在最後加上作品資料夾的路徑；成功後該路徑變回一般資料夾（不再是 junction），索引裡的這一筆也會移除。
+
+FunPairDL 的責任：
+- 「庫裡已有」的判斷（位元組數、影片長度）對雲端作品**讀索引，不列出 junction 的內容**。
+- **不往雲端作品裡寫任何檔案**：下載要落在雲端作品時，先執行 `pull` 把它拉回本地；拉不回來就讓該下載失敗，不退回寫進雲端（寫進去的檔案 FunLib 看不到，索引也會對不上）。
+- 不跟進 junction 走訪媒體庫（`Path.resolve()` 對它會丟 WinError 1005）。
 
 ## 回填舊資料（FunPairDL 側）
 
