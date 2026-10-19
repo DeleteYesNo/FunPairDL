@@ -3810,8 +3810,8 @@ function _untickOtherWorksScripts(panel, roles) {
 // Cowgirl(Hardcore)" goes with "Jubilee4K60FPS.mp4": a name contains the
 // other, or both start with the same word. An archive — most of its videos
 // left out, at least three — keeps only the files of the post's own video:
-// its scripts often share no name with their videos ("d-va caught focus"
-// beside "Tracer-d-va nude").
+// its scripts often share no name with their videos ("mira caught focus"
+// beside "Hana-mira nude").
 function _otherWorksFiles(names, videoOut) {
   const stems = Object.keys(videoOut).map((n) => {
     const name = n.replace(/\.[a-z0-9]{2,4}$/i, "");

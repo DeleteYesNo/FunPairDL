@@ -522,8 +522,8 @@ class TestArchivesAndCharacters:
         # from one work's post: the folder's scripts name the folder's works,
         # not the post's — as they counted, 21 other works were "the post's"
         pack = "https://mega.nz/folder/all"
-        files = [("naruto-girls_1080p.mp4", 185), ("kiriko casting couch.mp4", 288),
-                 ("widow-no-morals.mp4", 210), ("ganyu-met-monsters_720p.mp4", 180)]
+        files = [("garden-girls_1080p.mp4", 185), ("hana casting couch.mp4", 288),
+                 ("mira-no-rules.mp4", 210), ("lumi-meets-monsters_720p.mp4", 180)]
 
         def folder(n):
             out = []
@@ -532,14 +532,14 @@ class TestArchivesAndCharacters:
                 v.duration = d
                 out.append(v)
             return out
-        vids = folder(4) + [_v("https://r34v/video/1/ganyu-met-monsters/", "Ganyu met monsters | Studio",
+        vids = folder(4) + [_v("https://r34v/video/1/lumi-meets-monsters/", "Lumi meets monsters | Studio",
                                duration=181.0)]
-        own = {"name": "Ganyu Met Monsters_720p.funscript", "duration": 181.0}
+        own = {"name": "Lumi Meets Monsters_720p.funscript", "duration": 181.0}
         in_pack = [{"name": n, "duration": 0, "pack": True} for n in
-                   ("naruto-girls_1080p.funscript", "kiriko casting couch.funscript", "Widow No Morals.funscript")]
-        r = plan_videos(vids, Prefs(), title="~Drykon~ Ganyu met monsters", scripts=[own] + in_pack)["roles"]
+                   ("garden-girls_1080p.funscript", "hana casting couch.funscript", "Mira No Rules.funscript")]
+        r = plan_videos(vids, Prefs(), title="~Scripter~ Lumi meets monsters", scripts=[own] + in_pack)["roles"]
         assert [r[f"{pack}/file/{i}"] for i in range(3)] == ["unrelated"] * 3
-        assert r["https://r34v/video/1/ganyu-met-monsters/"] == "chosen"
+        assert r["https://r34v/video/1/lumi-meets-monsters/"] == "chosen"
         assert r[f"{pack}/file/3"] == "alternate"
         # a folder post the title doesn't name a file of: its scripts still
         # say which files are works (a folder of renders, scripts inside)

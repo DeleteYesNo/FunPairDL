@@ -76,22 +76,22 @@ check("stray pack: a folder with a video of the post keeps its files",
 {
   // a creator's archive linked from one work's post: the other works'
   // scripts and covers stay home, the post's own work keeps its files
-  const out = { "sky-cowgirl_1080p.mp4": true, "Ryuuge Kisaki Orange_1080p.mp4": true, "ganyu-met-monsters_720p.mp4": false };
-  const names = ["sky-cowgirl_1080p.funscript", "Ryuuge Kisaki Orange_1080p_Heatmap.jpg", "ryuuge kisaki.jpg",
-                 "sky-cowgirl_1080p.ofsp", "Ganyu Met Monsters_720p.funscript", "ganyu-met-monsters_720p.mp4", "readme.txt"];
+  const out = { "demo-cowgirl_1080p.mp4": true, "Rina Sample Orange_1080p.mp4": true, "lumi-meets-monsters_720p.mp4": false };
+  const names = ["demo-cowgirl_1080p.funscript", "Rina Sample Orange_1080p_Heatmap.jpg", "rina sample.jpg",
+                 "demo-cowgirl_1080p.ofsp", "Lumi Meets Monsters_720p.funscript", "lumi-meets-monsters_720p.mp4", "readme.txt"];
   check("archive: the other works' scripts and covers are left out",
     ctx._otherWorksFiles(names, out).join(","),
-    "sky-cowgirl_1080p.funscript,Ryuuge Kisaki Orange_1080p_Heatmap.jpg,ryuuge kisaki.jpg,sky-cowgirl_1080p.ofsp");
+    "demo-cowgirl_1080p.funscript,Rina Sample Orange_1080p_Heatmap.jpg,rina sample.jpg,demo-cowgirl_1080p.ofsp");
 }
 {
   // an archive (most videos another work's): a script naming none of its
   // videos is another work's too; the post's own work keeps its files
-  const out = { "a.mp4": true, "Tracer-d-va nude thecount.mp4": true, "widow.mp4": true,
-                "ganyu-met-monsters_720p.mp4": false };
+  const out = { "a.mp4": true, "Hana-mira nude studio.mp4": true, "nova.mp4": true,
+                "lumi-meets-monsters_720p.mp4": false };
   check("archive: scripts naming no video of it are left out",
-    ctx._otherWorksFiles(["d-va caught focus.funscript", "Ganyu Met Monsters_720p.funscript",
-                          "Ganyu soft.funscript", "notes.txt"], out).join(","),
-    "d-va caught focus.funscript,notes.txt");
+    ctx._otherWorksFiles(["mira caught focus.funscript", "Lumi Meets Monsters_720p.funscript",
+                          "Lumi soft.funscript", "notes.txt"], out).join(","),
+    "mira caught focus.funscript,notes.txt");
   // two videos, one a preview: a script with another name is still the post's
   check("not an archive: an unmatched script stays",
     ctx._otherWorksFiles(["My Script v2.funscript"], { "Work_4k.mp4": false, "preview.mp4": true }).length, 0);
