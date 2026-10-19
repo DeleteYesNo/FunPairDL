@@ -3412,6 +3412,10 @@ function _onProbesSettled(panel, parsed) {
 // dropdown. `section` is the collection section a row was parsed into.
 function _videoRowsForPlan(panel, parsed) {
   const out = [];
+  // A post linking a folder and a sub-folder of it lists the same files
+  // twice: one file is one candidate (as two, each was the other's
+  // fallback, and the second listing's "fallback" unticked the first's).
+  const seenFiles = new Set();
   const push = (v, key, section) => {
     if (!v) return;
     const row = panel.querySelector(`.funpairdl-item[data-key="${key}"]`);
@@ -3425,6 +3429,8 @@ function _videoRowsForPlan(panel, parsed) {
       const vids = bundleCbs.filter((cb) => _isVideoFileName(cb.dataset.fileName || ""));
       for (const cb of vids) {
         const fileUrl = cb.dataset.fileUrl || "";
+        if (fileUrl && seenFiles.has(fileUrl)) continue;
+        seenFiles.add(fileUrl);
         out.push({
           v: { url: fileUrl, probedFilename: cb.dataset.fileName || "", label: cb.dataset.fileName || "",
                probedSize: _probeSizeEntry(fileUrl), source: v.source, priority: v.priority, pack: v.url,
@@ -3578,7 +3584,9 @@ async function _refreshVideoPlan(panel, parsed) {
   // were taken for one video on two hosts.
   panel.querySelectorAll(".funpairdl-bundle-cb").forEach((cb) => {
     const name = cb.dataset.fileName || "";
-    if (/\.funscript$/i.test(name)) planScripts.push({ name, duration: Number(cb.dataset.duration) || 0 });
+    // "pack": a folder's scripts name its own works — an uploader's whole
+    // archive holds one for each — so they don't say a file is the post's.
+    if (/\.funscript$/i.test(name)) planScripts.push({ name, duration: Number(cb.dataset.duration) || 0, pack: true });
   });
   const decisions = panel._encodeDecisions || {};
   const specs = scopes.map((sc) => sc.map(({ v, src }) => spec(v, src)));
@@ -3770,25 +3778,17 @@ function _untickOtherWorksScripts(panel, roles) {
   for (const cbs of byPack.values()) {
     const vids = cbs.filter((cb) => _isVideoFileName(cb.dataset.fileName || ""));
     if (vids.length < 2) continue;
-    const stems = vids.map((cb) => {
-      const name = (cb.dataset.fileName || "").replace(/\.[a-z0-9]{2,4}$/i, "");
-      return { key: _packWorkKey(name), first: _firstWord(name), out: roles[cb.dataset.fileUrl] === "unrelated" };
-    });
+    const out = {};
+    for (const cb of vids) out[cb.dataset.fileName || ""] = roles[cb.dataset.fileUrl] === "unrelated";
+    const others = new Set(_otherWorksFiles(cbs.map((cb) => cb.dataset.fileName || ""), out));
     for (const cb of cbs) {
-      if (!/\.funscript$/i.test(cb.dataset.fileName || "")) continue;
-      const k = _packWorkKey(cb.dataset.fileName);
-      if (k.length < 4) continue;
-      // "Jubilee Reverse Cowgirl(Hardcore)" goes with "Jubilee4K60FPS.mp4":
-      // a name contains the other, or both start with the same word.
-      const fw = _firstWord(cb.dataset.fileName || "");
-      const hits = stems.filter((v) => v.key && (v.key.includes(k) || k.includes(v.key)
-        || (fw.length >= 4 && v.first === fw)));
-      if (!hits.length || !hits.every((v) => v.out)) continue;
+      const name = cb.dataset.fileName || "";
+      if (!others.has(name)) continue;
       const fileRow = cb.closest(".funpairdl-bundle-file");
       if (fileRow && fileRow.dataset.touched) continue;
       _setChecked(panel, cb, false);
-      if (fileRow) fileRow.title = `${cb.dataset.fileName || ""}
-合集裡另一部作品的腳本，不屬於這帖`;
+      if (fileRow) fileRow.title = `${name}
+合集裡另一部作品的${/\.funscript$/i.test(name) ? "腳本" : "檔案"}，不屬於這帖`;
     }
     // A folder none of whose videos is this post's (an uploader's whole
     // share): its loose files — audio, pictures — are not this post's either.
@@ -3802,6 +3802,27 @@ function _untickOtherWorksScripts(panel, roles) {
 合集裡沒有這帖的影片，這個檔也不屬於這帖`;
     }
   }
+}
+
+// Pure: the scripts and loose files (cover, project, heatmap) of a pack that
+// go with its OTHER works — every video their name matches is one the plan
+// left out (`videoOut`: {video file name: left out}). "Jubilee Reverse
+// Cowgirl(Hardcore)" goes with "Jubilee4K60FPS.mp4": a name contains the
+// other, or both start with the same word.
+function _otherWorksFiles(names, videoOut) {
+  const stems = Object.keys(videoOut).map((n) => {
+    const name = n.replace(/\.[a-z0-9]{2,4}$/i, "");
+    return { key: _packWorkKey(name), first: _firstWord(name), out: !!videoOut[n] };
+  });
+  return names.filter((n) => {
+    if (!n || _isVideoFileName(n)) return false;
+    const k = _packWorkKey(/\.funscript$/i.test(n) ? n : n.replace(/\.[a-z0-9]{2,4}$/i, ""));
+    if (k.length < 4) return false;
+    const fw = _firstWord(n);
+    const hits = stems.filter((v) => v.key && (v.key.includes(k) || k.includes(v.key)
+      || (fw.length >= 4 && v.first === fw)));
+    return hits.length > 0 && hits.every((v) => v.out);
+  });
 }
 
 // Pure: the files of a pack that are neither videos nor scripts, when every

@@ -1017,13 +1017,22 @@ def _mark_crowded_and_strays(videos: list[VideoSpec], scripts: list[dict], title
     in_big = [v for v in videos if v.pack and per_pack[v.pack] >= 2 and not v.stray]
     if not in_big or not (s_items or title):
         return
-    post_words = (_core_tokens(title or "") | frozenset().union(*[c for c, _ in s_items] or [frozenset()])) - _STOP_WORDS
-    s_lens = [d for _c, d in s_items if d]
+
+    def _belongs(items):
+        words = (_core_tokens(title or "") | frozenset().union(*[c for c, _ in items] or [frozenset()])) - _STOP_WORDS
+        lens = [d for _c, d in items if d]
+        return [v for v in in_big
+                if ((_core_tokens(v.stem) - _STOP_WORDS) & words)
+                or (v.duration and any(not _duration_differs(v.duration, sl) for sl in lens))]
+    # The folder's own scripts name its works, not the post's: an archive
+    # holds a script for each of its videos. When the title or the post's
+    # own scripts already name a file of the folder, only they decide.
+    own = [(_core_tokens(_script_stem(str(s.get("name") or ""))), float(s.get("duration") or 0))
+           for s in scripts if not s.get("pack")]
+    own = [(c, d) for c, d in own if c]
+    anchored = _belongs(own)
     related = [v for v in videos if not v.pack or per_pack[v.pack] < 2]
-    for v in in_big:
-        words = _core_tokens(v.stem) - _STOP_WORDS
-        if (words & post_words) or (v.duration and any(not _duration_differs(v.duration, sl) for sl in s_lens)):
-            related.append(v)
+    related += anchored if anchored else _belongs(s_items)
     rel_lens = [v.duration for v in related if v.duration and not v.failed]
     for v in in_big:
         if v in related:

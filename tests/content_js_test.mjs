@@ -73,6 +73,16 @@ check("stray pack: audio of an all-other-works folder is dropped",
   ctx._strayPackExtras(["A.mp4", "B.mp4", "A.funscript", "song.wav"], [true, true]).join(","), "song.wav");
 check("stray pack: a folder with a video of the post keeps its files",
   ctx._strayPackExtras(["A.mp4", "B.mp4", "cover.jpg"], [true, false]).length, 0);
+{
+  // a creator's archive linked from one work's post: the other works'
+  // scripts and covers stay home, the post's own work keeps its files
+  const out = { "sky-cowgirl_1080p.mp4": true, "Ryuuge Kisaki Orange_1080p.mp4": true, "ganyu-met-monsters_720p.mp4": false };
+  const names = ["sky-cowgirl_1080p.funscript", "Ryuuge Kisaki Orange_1080p_Heatmap.jpg", "ryuuge kisaki.jpg",
+                 "sky-cowgirl_1080p.ofsp", "Ganyu Met Monsters_720p.funscript", "ganyu-met-monsters_720p.mp4", "readme.txt"];
+  check("archive: the other works' scripts and covers are left out",
+    ctx._otherWorksFiles(names, out).join(","),
+    "sky-cowgirl_1080p.funscript,Ryuuge Kisaki Orange_1080p_Heatmap.jpg,ryuuge kisaki.jpg,sky-cowgirl_1080p.ofsp");
+}
 
 // ── extractLinksFromElement: a known host's profile is no unknown video page ──
 {

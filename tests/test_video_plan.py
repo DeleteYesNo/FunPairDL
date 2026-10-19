@@ -517,6 +517,35 @@ class TestArchivesAndCharacters:
         assert r["https://tube/v/1"] == "chosen"                          # the portrait one, its small copy
         assert r["https://mega.nz/folder/arc/file/4"] == "alternate"
 
+    def test_an_archive_whose_scripts_name_its_own_works_keeps_only_the_posts_work(self):
+        # a scripter's whole share (each video beside its own script) linked
+        # from one work's post: the folder's scripts name the folder's works,
+        # not the post's — as they counted, 21 other works were "the post's"
+        pack = "https://mega.nz/folder/all"
+        files = [("naruto-girls_1080p.mp4", 185), ("kiriko casting couch.mp4", 288),
+                 ("widow-no-morals.mp4", 210), ("ganyu-met-monsters_720p.mp4", 180)]
+
+        def folder(n):
+            out = []
+            for i, (name, d) in enumerate(files[:n]):
+                v = _p(f"{pack}/file/{i}", name, pack=pack, size=100 + i)
+                v.duration = d
+                out.append(v)
+            return out
+        vids = folder(4) + [_v("https://r34v/video/1/ganyu-met-monsters/", "Ganyu met monsters | Studio",
+                               duration=181.0)]
+        own = {"name": "Ganyu Met Monsters_720p.funscript", "duration": 181.0}
+        in_pack = [{"name": n, "duration": 0, "pack": True} for n in
+                   ("naruto-girls_1080p.funscript", "kiriko casting couch.funscript", "Widow No Morals.funscript")]
+        r = plan_videos(vids, Prefs(), title="~Drykon~ Ganyu met monsters", scripts=[own] + in_pack)["roles"]
+        assert [r[f"{pack}/file/{i}"] for i in range(3)] == ["unrelated"] * 3
+        assert r["https://r34v/video/1/ganyu-met-monsters/"] == "chosen"
+        assert r[f"{pack}/file/3"] == "alternate"
+        # a folder post the title doesn't name a file of: its scripts still
+        # say which files are works (a folder of renders, scripts inside)
+        r = plan_videos(folder(3), Prefs(), title="My scripts so far", scripts=in_pack)["roles"]
+        assert "unrelated" not in [r[f"{pack}/file/{i}"] for i in range(3)]
+
     def test_characters_of_one_length_keep_their_own_videos(self):
         vids = [_v(f"https://tube/v/{n}", n, duration=d) for n, d in [
             ("Hana Full", 63.211), ("Mira Full", 63.211), ("Hana Loop", 31.04), ("Mira Loop", 31.04),
