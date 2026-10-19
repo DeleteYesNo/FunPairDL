@@ -3808,19 +3808,24 @@ function _untickOtherWorksScripts(panel, roles) {
 // go with its OTHER works — every video their name matches is one the plan
 // left out (`videoOut`: {video file name: left out}). "Jubilee Reverse
 // Cowgirl(Hardcore)" goes with "Jubilee4K60FPS.mp4": a name contains the
-// other, or both start with the same word.
+// other, or both start with the same word. An archive — most of its videos
+// left out, at least three — keeps only the files of the post's own video:
+// its scripts often share no name with their videos ("d-va caught focus"
+// beside "Tracer-d-va nude").
 function _otherWorksFiles(names, videoOut) {
   const stems = Object.keys(videoOut).map((n) => {
     const name = n.replace(/\.[a-z0-9]{2,4}$/i, "");
     return { key: _packWorkKey(name), first: _firstWord(name), out: !!videoOut[n] };
   });
+  const kept = stems.filter((v) => !v.out).length, out = stems.length - kept;
+  const archive = kept > 0 && out >= 3 && out >= 2 * kept;
   return names.filter((n) => {
     if (!n || _isVideoFileName(n)) return false;
     const k = _packWorkKey(/\.funscript$/i.test(n) ? n : n.replace(/\.[a-z0-9]{2,4}$/i, ""));
-    if (k.length < 4) return false;
     const fw = _firstWord(n);
-    const hits = stems.filter((v) => v.key && (v.key.includes(k) || k.includes(v.key)
+    const hits = k.length < 4 ? [] : stems.filter((v) => v.key && (v.key.includes(k) || k.includes(v.key)
       || (fw.length >= 4 && v.first === fw)));
+    if (archive) return !hits.some((v) => !v.out);
     return hits.length > 0 && hits.every((v) => v.out);
   });
 }
