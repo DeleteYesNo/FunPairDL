@@ -3555,7 +3555,7 @@ class QueueManager:
             ax, suffix = self._parse_axis(s.filename)
             ex = existing_axis.get(ax)
             if ex is None:
-                new_axis.append((sp, suffix))
+                new_axis.append((sp, suffix, s))
             else:
                 try:
                     digest = self._file_sha256(sp)
@@ -3568,6 +3568,15 @@ class QueueManager:
                     sp.unlink(missing_ok=True)
                 else:
                     changed.append((sp, suffix, s))
+
+        # A set whose L0 differs from the work's is another script set: its
+        # extra axes belong with its own L0 in the variant. Filed as new axes
+        # of Main, they played under the old stroke script (a multi-axis set
+        # merged into a single-axis work, 2026-10).
+        varied = {s.group or "Main" for _sp, suffix, s in changed if not suffix}
+        if varied:
+            changed += [e for e in new_axis if (e[2].group or "Main") in varied]
+            new_axis = [e for e in new_axis if (e[2].group or "Main") not in varied]
 
         def _move(sp: Path, target: Path) -> None:
             import shutil
@@ -3582,7 +3591,7 @@ class QueueManager:
                 shutil.move(str(sp), str(target))
 
         # 1) new axes -> into the existing folder
-        for sp, suffix in new_axis:
+        for sp, suffix, _s in new_axis:
             name = dest_base + (f".{suffix}" if suffix else "") + ".funscript"
             _move(sp, dest / name)
 

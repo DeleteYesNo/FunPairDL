@@ -333,3 +333,24 @@ def test_a_cloud_folder_is_a_valid_merge_target(tmp_path, monkeypatch):
     _cloud_folders_unresolvable(monkeypatch)
 
     assert qm._merge_target(str(work)) == work
+
+
+def test_a_new_multi_axis_set_keeps_its_axes_with_its_own_stroke(tmp_path, monkeypatch):
+    # a multi-axis set from another scripter merged into a single-axis work:
+    # its L0 became the variant but its surge/twist went under Main's L0
+    _stub_settings(monkeypatch, reconcile_on_redownload=True)
+    qm = QueueManager(download_dir=tmp_path)
+    work = _existing_work(tmp_path, "Work", b"VIDEO", {"Work.funscript": "OLD"})
+    pair, _ = _redownload_pair(tmp_path, "Work", b"VIDEO",
+                               {"Work.funscript": "NEW", "Work.surge.funscript": "SURGE",
+                                "Work.twist.funscript": "TWIST"})
+
+    assert qm._reconcile_with_library(pair) is True
+    assert sorted(f.name for f in work.iterdir()) == [
+        "Work (Alt).funscript", "Work (Alt).surge.funscript", "Work (Alt).twist.funscript",
+        "Work.funscript", "Work.mp4", "funlib.json"]
+    sc = json.loads((work / "funlib.json").read_text(encoding="utf-8"))
+    labels = {v["label"]: v for v in sc["variants"]}
+    assert labels["Main"]["files"] == {"L0": "Work.funscript"}
+    assert labels["Alt"]["files"] == {"L0": "Work (Alt).funscript", "surge": "Work (Alt).surge.funscript",
+                                      "twist": "Work (Alt).twist.funscript"}
