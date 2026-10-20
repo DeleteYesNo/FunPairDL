@@ -45,8 +45,10 @@ Second pass for the leftovers (run after the first):
     ``<name>.funscript`` attachment is a certain hit; two topics both
     showing it (one video, several scripters using the video's name) are
     AMBIGUOUS and left for a person. Without a certain hit, a topic whose
-    title has the work's title key is taken. Listed as FILE / FILE-TITLE /
-    AMBIGUOUS in the report.
+    title has the work's title key is taken. When several topics show it
+    and only one title is plainly the work's (its own post vs. a later
+    collection), that one is taken (FILE-OWN). Listed as FILE / FILE-OWN /
+    FILE-TITLE / AMBIGUOUS in the report.
   * ``--local-tags``: tags derived offline, added only when absent —
     ``source-<site>`` (e621, iwara, …), ``pack-<bundle>`` for split
     children, ``len-…`` buckets (forum names) from the L0 script's length.
@@ -555,6 +557,23 @@ def file_hits(res: dict | None, name: str) -> set[int]:
     return out
 
 
+OWN_TOPIC_MIN = 0.6        # share of the work's words a topic title must hold
+OWN_TOPIC_MARGIN = 0.3     # ... and by how much it must beat the next topic
+
+
+def pick_own_topic(work_title: str, candidates: list[dict]) -> dict | None:
+    """Of several topics that all show the script, the one whose title is
+    plainly the work's (a scripter's own post vs. a later collection that
+    re-posted the file); None when no title stands out."""
+    scored = sorted(((fuzzy_overlap(work_title, str(t.get("title") or "")), t) for t in candidates),
+                    key=lambda x: x[0], reverse=True)
+    if not scored or scored[0][0] < OWN_TOPIC_MIN:
+        return None
+    if len(scored) > 1 and scored[0][0] - scored[1][0] < OWN_TOPIC_MARGIN:
+        return None
+    return scored[0][1]
+
+
 async def file_search(fetcher, work: Path, title: str, pair: dict | None, args, report, counts):
     """(hit topic dict | None, ambiguous) for a work, by its script's file
     name; ambiguous is None when a request failed (nothing was learned)."""
@@ -575,6 +594,12 @@ async def file_search(fetcher, work: Path, title: str, pair: dict | None, args, 
             report.append(f"- FILE `{work.name}` → topic {tid} \"{t.get('title') or ''}\" ({name})")
             return t, False
         if len(certain) >= 2:
+            own = pick_own_topic(title, [topics.get(i) or {"id": i} for i in sorted(certain)])
+            if own is not None:
+                counts["file_own_found"] = counts.get("file_own_found", 0) + 1
+                report.append(f"- FILE-OWN `{work.name}` → topic {own['id']} \"{own.get('title') or ''}\" "
+                              f"(of {len(certain)} showing {name})")
+                return own, False
             counts["file_ambiguous"] = counts.get("file_ambiguous", 0) + 1
             listed = ", ".join(f"{i} \"{(topics.get(i) or {}).get('title') or ''}\"" for i in sorted(certain))
             report.append(f"- AMBIGUOUS `{work.name}` ({name}): {listed}")

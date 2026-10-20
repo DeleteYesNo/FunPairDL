@@ -162,3 +162,14 @@ def test_file_hits_need_the_exact_attachment_name():
     ]}
     assert bf.file_hits(res, "sample-work_v2.funscript") == {1, 4}
     assert bf.file_hits({"posts": []}, "x.funscript") == set()
+
+
+def test_own_topic_beats_a_collection_that_reposted_the_file():
+    own = {"id": 1, "title": "Sampledude - Hot Girl Summer PMV [Intense & Easy Options]"}
+    coll = {"id": 2, "title": "Sampledude Ultimate Collection - All Scripts & Upscaled Videos"}
+    assert bf.pick_own_topic("Sampledude - Hot Girl Summer PMV - EASY", [coll, own]) is own
+    # several posts of one character: nothing stands out
+    a = {"id": 3, "title": "ScripterA - Chisa"}
+    b = {"id": 4, "title": "ScripterB - Chisa"}
+    assert bf.pick_own_topic("Chisa", [a, b]) is None
+    assert bf.pick_own_topic("Sampledude - Compressed Mix", [coll, {"id": 5, "title": "Sampledude - Other Song"}]) is None
