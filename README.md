@@ -16,6 +16,9 @@ The core unit is a **Pair**: one post / work = one video + one or more `.funscri
 - Expands "bundles" (a Pixeldrain list or a MEGA folder) into individual files.
 - Pairs videos with funscripts automatically (with a preview before downloading), handling multi-axis scripts (`.roll`, `.pitch`, …).
 - Downloads with multi-segment / HLS support and a persistent queue.
+- Reads a forum topic to its last reply, so a replacement link posted later in the thread is offered too.
+- Checks every downloaded `.funscript`: a page saved under the script's name is downloaded again, a few broken points are repaired (can be turned off).
+- Is gentle on the forum: its forum API requests (topics, replies, searches) go one at a time, at least a second apart (searches two), and a `429` waits out the server's `Retry-After`.
 - Organizes output into the flat library layout shared with FunLib (`docs/library-layout.md`): unified file names, multi-axis suffixes preserved, alternate scripts as `<work> (<Label>).funscript` next to the main set, and a `funlib.json` sidecar (title, author, forum topic, tags, variants).
 
 It is a Windows desktop **GUI** (PySide6) with a local **FastAPI** backend and an embedded tabbed browser.
@@ -85,6 +88,9 @@ Released under the **PolyForm Noncommercial License 1.0.0** — free for any non
 - 把「bundle」(Pixeldrain list、MEGA 資料夾)展開成個別檔案。
 - 自動配對影片與 funscript(下載前會顯示預覽),並處理多軸腳本(`.roll`、`.pitch`…)。
 - 支援多分段 / HLS 下載,並用佇列持久化保存進度。
+- 讀帖子會讀到最後一篇回覆,後面才補上的鏡像連結也會列出。
+- 每個下載完的 `.funscript` 都會檢查:存成腳本名稱的網頁會重新下載,少數壞掉的點會修正(可在設定關閉)。
+- 對論壇節制:讀論壇 API(帖子、回覆、搜尋)一次一個、至少間隔 1 秒(搜尋 2 秒),遇到 `429` 會等伺服器指定的 `Retry-After`。
 - 整理輸出:與 FunLib 共用的平放版面(`docs/library-layout.md`):統一檔名、保留多軸 suffix,變體腳本存成 `<作品> (<Label>).funscript`,並寫入 `funlib.json`(標題、作者、帖子、標籤、變體)。
 
 它是一個 Windows 桌面 **GUI**(PySide6),搭配本機 **FastAPI** 後端與內建分頁瀏覽器。

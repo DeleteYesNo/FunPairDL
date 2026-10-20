@@ -5,12 +5,20 @@ Fetched with the embedded browser's saved cookies (the same session the
 EroScripts provider downloads with); a rotated ``_t`` token in the reply is
 written back through the provider's sync so the browser stays logged in.
 Category names come from ``/site.json`` (cached per process).
+
+Every request waits its turn behind one process-wide gate: at least
+``MIN_INTERVAL_S`` after the previous one (``SEARCH_INTERVAL_S`` plus jitter
+between searches, which Discourse never serves from cache), and a 429 waits
+out the server's ``Retry-After`` and tries again instead of failing.
 """
 from __future__ import annotations
 
 import asyncio
+import email.utils
 import logging
+import random
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -22,6 +30,64 @@ logger = logging.getLogger("funpairdl.discourse")
 
 FORUM_BASE = "https://discuss.eroscripts.com"
 _TIMEOUT = aiohttp.ClientTimeout(total=30)
+
+MIN_INTERVAL_S = 1.0
+SEARCH_INTERVAL_S = 2.0
+SEARCH_JITTER_S = 0.6
+RETRY_429 = 3
+RETRY_AFTER_DEFAULT_S = 30.0
+RETRY_AFTER_MAX_S = 180.0
+
+# Slot bookkeeping under a threading lock, sleeping outside it: callers run
+# on different event loops (the queue's worker, tools' asyncio.run), so no
+# asyncio primitive can be shared between them.
+_gate_lock = threading.Lock()
+_next_at = 0.0
+_next_search_at = 0.0
+_paused_until = 0.0
+
+
+class RateLimited(RuntimeError):
+    """The forum kept answering 429 after RETRY_429 waits."""
+
+
+def retry_after_seconds(value, now: float | None = None) -> float:
+    """Seconds a ``Retry-After`` header asks for (delta-seconds or an HTTP
+    date), clamped to [1, RETRY_AFTER_MAX_S]; the default when absent."""
+    raw = str(value or "").strip()
+    secs = None
+    if raw:
+        try:
+            secs = float(raw)
+        except ValueError:
+            try:
+                when = email.utils.parsedate_to_datetime(raw)
+                secs = when.timestamp() - (time.time() if now is None else now)
+            except (TypeError, ValueError, IndexError, OverflowError):
+                secs = None
+    if secs is None:
+        secs = RETRY_AFTER_DEFAULT_S if not raw else 1.0
+    return max(1.0, min(float(secs), RETRY_AFTER_MAX_S))
+
+
+def _reserve_slot(search: bool) -> float:
+    """Seconds to wait before this request may go; books the next slot."""
+    global _next_at, _next_search_at
+    with _gate_lock:
+        now = time.monotonic()
+        start = max(now, _next_at, _paused_until)
+        if search:
+            start = max(start, _next_search_at)
+            _next_search_at = start + SEARCH_INTERVAL_S + random.uniform(0, SEARCH_JITTER_S)
+        _next_at = start + MIN_INTERVAL_S
+        return start - now
+
+
+def _pause(seconds: float) -> None:
+    global _paused_until
+    with _gate_lock:
+        _paused_until = max(_paused_until, time.monotonic() + seconds)
+
 
 _categories: dict[int, str] = {}
 _categories_at = 0.0
@@ -48,21 +114,32 @@ def _headers() -> tuple[dict, str, object]:
 
 
 async def _get_json(session: aiohttp.ClientSession, url: str) -> dict | None:
-    headers, cookie, settings = _headers()
-    async with session.get(url, headers=headers, timeout=_TIMEOUT, allow_redirects=True) as resp:
-        if cookie:
-            try:
-                from funpairdl.providers.eroscripts import EroScriptsProvider
-                EroScriptsProvider._sync_rotated_cookies(resp, cookie, settings)
-            except Exception as e:  # never let cookie bookkeeping fail a fetch
-                logger.debug("cookie sync skipped: %s", e)
-        if resp.status == 429:
-            raise RuntimeError("rate limited (429)")
-        if resp.status in (403, 404, 410):
-            logger.info("Discourse %s -> %d", url, resp.status)
-            return None
-        resp.raise_for_status()
-        return await resp.json(content_type=None)
+    search = "/search.json" in url
+    for attempt in range(RETRY_429 + 1):
+        wait = _reserve_slot(search)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        headers, cookie, settings = _headers()
+        async with session.get(url, headers=headers, timeout=_TIMEOUT, allow_redirects=True) as resp:
+            if cookie:
+                try:
+                    from funpairdl.providers.eroscripts import EroScriptsProvider
+                    EroScriptsProvider._sync_rotated_cookies(resp, cookie, settings)
+                except Exception as e:  # never let cookie bookkeeping fail a fetch
+                    logger.debug("cookie sync skipped: %s", e)
+            if resp.status == 429:
+                secs = retry_after_seconds(resp.headers.get("Retry-After"))
+                if attempt >= RETRY_429:
+                    raise RateLimited(f"rate limited (429) after {RETRY_429} waits")
+                logger.warning("Discourse rate limit (429) on %s — waiting %.0fs", url, secs)
+                _pause(secs)
+                continue
+            if resp.status in (403, 404, 410):
+                logger.info("Discourse %s -> %d", url, resp.status)
+                return None
+            resp.raise_for_status()
+            return await resp.json(content_type=None)
+    return None
 
 
 async def categories(session: aiohttp.ClientSession, force: bool = False) -> dict[int, str]:

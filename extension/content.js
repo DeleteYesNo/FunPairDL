@@ -478,6 +478,142 @@ function cleanScriptName(raw, fullUrl) {
   return t || (fullUrl.split("/").pop() || "");
 }
 
+// ─── What the poster wrote around a link ───
+//
+// "DMM link (to buy): <link>", "<link> (syncs much better imo)", or a line
+// "Soft version:" right above the link — the words a poster puts next to a
+// link are often the only thing telling two versions apart. Shown under the
+// row; a bare host or container word ("Video:", "Mega") says nothing and is
+// dropped.
+const _NOTE_MAX = 120;
+
+// Pure: a note candidate cleaned up, or "" when it says nothing (an
+// attachment's "(27.2 KB)", a bare "Thanks").
+const _NOTE_SIZE_RE = /\(?\s*\d+(?:[.,]\d+)?\s*[KMGT]i?B\b\s*\)?/gi;
+const _NOTE_CHATTER_RE = /^(thanks?( you)?|thx|ty|enjoy|here( you go)?|links?|download|dl|source)[!. ]*$/i;
+function _cleanLinkNote(text) {
+  let t = String(text || "").replace(/https?:\/\/\S+/g, " ").replace(_NOTE_SIZE_RE, " ")
+    .replace(/\s+/g, " ").trim();
+  t = t.replace(/^[\s:：\-–—|,;/•·→>]+/, "").replace(/[\s:：\-–—|,;/•·→<]+$/, "").trim();
+  if (/^\(.*\)$/.test(t)) t = t.slice(1, -1).trim();
+  if (t.length < 3 || !/[\p{L}\p{N}]/u.test(t)) return "";
+  if (_isGenericSectionName(t) || _NOTE_CHATTER_RE.test(t)) return "";
+  if (t.length > _NOTE_MAX) t = t.slice(0, _NOTE_MAX - 1).trimEnd() + "…";
+  return t;
+}
+
+function _isLineBreakNode(n) {
+  if (!n || n.nodeType !== 1) return false;
+  if (n.tagName === "BR" || n.tagName === "A") return true;
+  return !!(n.querySelector && n.querySelector("a[href], br"));
+}
+
+// Text of the same line as `top` (a child of its block) on one side, up to
+// the next <br> or link.
+function _lineText(top, dir) {
+  let out = "";
+  let n = dir < 0 ? top.previousSibling : top.nextSibling;
+  while (n && !_isLineBreakNode(n)) {
+    const t = n.textContent || "";
+    out = dir < 0 ? t + out : out + t;
+    n = dir < 0 ? n.previousSibling : n.nextSibling;
+  }
+  return { text: out, stop: n };
+}
+
+function _linkNote(linkEl) {
+  try {
+    const block = linkEl.closest("p, li, td, th");
+    if (!block) return "";
+    let top = linkEl;
+    while (top.parentNode && top.parentNode !== block) top = top.parentNode;
+    const before = _lineText(top, -1);
+    const after = _lineText(top, 1);
+    let note = _cleanLinkNote(`${before.text} ${after.text}`);
+    if (note) return note;
+    // The link has its line to itself: a short "…:" line right above it,
+    // in the same paragraph (after a <br>) or as the paragraph before.
+    let above = "";
+    if (before.stop && before.stop.nodeType === 1 && before.stop.tagName === "BR") {
+      above = _lineText(before.stop, -1).text;
+    } else if (!before.stop) {
+      const prev = block.previousElementSibling;
+      if (prev && /^(P|LI)$/.test(prev.tagName) && !prev.querySelector("a[href]")) {
+        above = prev.textContent || "";
+      }
+    }
+    above = above.trim();
+    if (above.length <= _NOTE_MAX && /[:：]$/.test(above)) note = _cleanLinkNote(above);
+    return note;
+  } catch (e) { return ""; }
+}
+
+function _excerptHTML(text) {
+  return text ? `<div class="funpairdl-group-excerpt" title="${escapeAttr(text)}">“${escapeAttr(text)}”</div>` : "";
+}
+
+function _noteHTML(note) {
+  return note ? `<span class="funpairdl-note" title="${escapeAttr(note)}">${escapeAttr(note)}</span>` : "";
+}
+
+// Opening words of a reply (quotes, code and link texts left out) — shown
+// next to a comment group so "#14 @someone" says what the reply is.
+const _EXCERPT_MAX = 140;
+function _postExcerpt(el) {
+  try {
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    let out = "";
+    let tn;
+    while ((tn = walker.nextNode()) && out.length < _EXCERPT_MAX * 2) {
+      const pe = tn.parentElement;
+      if (pe && pe.closest("a, aside, blockquote, code, pre, .lightbox-wrapper, .meta, .onebox")) continue;
+      out += " " + (tn.nodeValue || "");
+    }
+    out = out.replace(/https?:\/\/\S+/g, " ").replace(/\s+/g, " ").trim();
+    return out.length > _EXCERPT_MAX ? out.slice(0, _EXCERPT_MAX - 1).trimEnd() + "…" : out;
+  } catch (e) { return ""; }
+}
+
+// ─── Links the downloader can't fetch, kept for the record ───
+//
+// A paid / store / membership page next to the free files ("full version on
+// Patreon", "DMM link (to buy)") is often the only pointer to the better
+// release, and the post may not outlive the library. These are listed in
+// the panel and written to the work's funlib.json (`other_links`); nothing
+// downloads them.
+const OTHER_LINK_HOSTS = [
+  "patreon.com", "fanbox.cc", "fantia.jp", "gumroad.com", "ko-fi.com", "subscribestar.com",
+  "subscribestar.adult", "boosty.to", "buymeacoffee.com", "itch.io", "dlsite.com", "dmm.co.jp",
+  "dmm.com", "store.steampowered.com", "onlyfans.com", "fansly.com", "skeb.jp", "payhip.com",
+  "sellfy.com", "ci-en.net",
+];
+
+// Pure: the matching OTHER_LINK_HOSTS entry for a URL, or "". A pixivFANBOX
+// post (/posts/<id>) is downloadable and not one of these.
+function _otherLinkHost(url) {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase().replace(/^www\./, "");
+    const hit = OTHER_LINK_HOSTS.find((d) => host === d || host.endsWith("." + d));
+    if (!hit) return "";
+    if (hit === "fanbox.cc" && u.pathname.includes("/posts/")) return "";
+    return hit;
+  } catch (e) { return ""; }
+}
+
+function extractOtherLinks(containerEl) {
+  const out = [];
+  containerEl.querySelectorAll("a[href]").forEach((link) => {
+    const href = link.getAttribute("href") || "";
+    if (!/^https?:\/\//i.test(href) || out.some((o) => o.url === href)) return;
+    const host = _otherLinkHost(href);
+    if (!host) return;
+    const label = (link.textContent || "").replace(/\s+/g, " ").trim();
+    out.push({ url: href, host, label: label === href ? "" : label.slice(0, _NOTE_MAX), note: _linkNote(link) });
+  });
+  return out;
+}
+
 // ─── Link extraction (works on any container element) ───
 
 function extractLinksFromElement(containerEl, isOP) {
@@ -523,7 +659,7 @@ function extractLinksFromElement(containerEl, isOP) {
         scripts.push({
           url: href, source: isOP ? "OP" : "comment",
           filename: fn, axis, isMultiAxis: axis !== "main",
-          author: detectScriptAuthor(link),
+          author: detectScriptAuthor(link), note: _linkNote(link),
         });
       }
       return;
@@ -543,14 +679,14 @@ function extractLinksFromElement(containerEl, isOP) {
             scripts.push({
               url: href, source: isOP ? "OP" : "comment",
               filename: metaFn, axis, isMultiAxis: axis !== "main",
-              author: detectScriptAuthor(link),
+              author: detectScriptAuthor(link), note: _linkNote(link),
             });
           }
         } else if (!videos.some((v) => v.url === href)) {
           videos.push({
             url: href, priority: getVideoPriority(href, !isOP),
             source: isOP ? "OP" : "comment", label: getVideoLabel(href),
-            isBundle: isBundleUrl(href),
+            isBundle: isBundleUrl(href), note: _linkNote(link),
           });
         }
       } else if (!isKnown && !isNonVideoPath(href)
@@ -569,7 +705,7 @@ function extractLinksFromElement(containerEl, isOP) {
             videos.push({
               url: href, priority: isOP ? 15 : 20,
               source: isOP ? "OP" : "comment", label: getVideoLabel(href),
-              isBundle: false,
+              isBundle: false, note: _linkNote(link),
             });
           }
         }
@@ -631,7 +767,7 @@ function extractLinksFromElement(containerEl, isOP) {
       scripts.push({
         url: fullUrl, source: isOP ? "OP" : "comment",
         filename: fname, axis, isMultiAxis: axis !== "main",
-        author: author,
+        author: author, note: _linkNote(link),
       });
     }
   });
@@ -649,7 +785,7 @@ function extractLinksFromElement(containerEl, isOP) {
           scripts.push({
             url: fullUrl, source: isOP ? "OP" : "comment",
             filename: fname, axis, isMultiAxis: axis !== "main",
-            author: author,
+            author: author, note: _linkNote(link),
           });
         }
       }
@@ -673,7 +809,7 @@ function extractLinksFromElement(containerEl, isOP) {
           scripts.push({
             url: href, source: isOP ? "OP" : "comment",
             filename: `[External] ${link.textContent.trim()}`,
-            isMultiAxis: true, isExternal: true,
+            isMultiAxis: true, isExternal: true, note: _linkNote(link),
           });
         }
       } catch (e) {}
@@ -898,6 +1034,129 @@ function _isCollectionLayout(sections) {
   return works >= 2;
 }
 
+// ─── Forum request gate ───
+//
+// Every request this script makes to the forum itself (topic JSON, the rest
+// of a thread, upload short-urls) waits its turn here: one at a time, at
+// least _FORUM_MIN_GAP_MS after the previous one, and a 429 pauses the whole
+// gate for the server's Retry-After instead of failing the caller. The slot
+// and the pause are shared with the other EroScripts tabs through
+// localStorage (best effort: a tab that loses the race only goes early by a
+// gap), so ten tabs opened at once still read the forum one by one.
+const _FORUM_MIN_GAP_MS = 1000;
+const _FORUM_429_RETRIES = 3;
+const _SHORT_URL_GAP_MS = 300;
+const _FORUM_RETRY_AFTER_DEFAULT_S = 30;
+const _FORUM_RETRY_AFTER_MAX_S = 180;
+const _FORUM_SLOT_KEY = "funpairdl_forum_next_slot";
+const _FORUM_PAUSE_KEY = "funpairdl_forum_pause_until";
+let _forumGate = Promise.resolve();
+let _forumNextAt = 0;
+let _forumPauseUntil = 0;
+
+function _sharedNumber(key) {
+  try { return Number(localStorage.getItem(key)) || 0; } catch (e) { return 0; }
+}
+
+function _setSharedNumber(key, value) {
+  try { localStorage.setItem(key, String(value)); } catch (e) {}
+}
+
+// Pure: milliseconds a Retry-After header asks for (seconds or an HTTP
+// date), clamped to [1 s, _FORUM_RETRY_AFTER_MAX_S]; the default when absent
+// or unreadable.
+function _retryAfterMs(header, now) {
+  const t = now || Date.now();
+  let secs = NaN;
+  const raw = String(header == null ? "" : header).trim();
+  if (/^\d+(\.\d+)?$/.test(raw)) secs = parseFloat(raw);
+  else if (raw) {
+    const at = Date.parse(raw);
+    if (!isNaN(at)) secs = (at - t) / 1000;
+  }
+  if (!isFinite(secs) || secs <= 0) secs = raw ? 1 : _FORUM_RETRY_AFTER_DEFAULT_S;
+  return Math.round(Math.min(Math.max(secs, 1), _FORUM_RETRY_AFTER_MAX_S) * 1000);
+}
+
+// fetch() for a forum URL behind the gate. opts.minGap overrides the spacing
+// (short-url HEADs are light); opts.onWait(ms, reason) is told when the
+// caller is about to wait long enough to be worth showing.
+function forumFetch(url, opts = {}) {
+  const { minGap = _FORUM_MIN_GAP_MS, onWait, ...init } = opts;
+  const run = _forumGate.then(async () => {
+    for (let attempt = 0; ; attempt++) {
+      const now = Date.now();
+      const pause = Math.max(_forumPauseUntil, _sharedNumber(_FORUM_PAUSE_KEY));
+      const slot = Math.max(_forumNextAt, _sharedNumber(_FORUM_SLOT_KEY), now, pause);
+      _forumNextAt = slot + minGap;
+      _setSharedNumber(_FORUM_SLOT_KEY, _forumNextAt);
+      const wait = slot - now;
+      if (wait > 0) {
+        if (onWait && wait >= 1500) {
+          try { onWait(wait, pause > now ? "rate_limited" : "queued"); } catch (e) {}
+        }
+        await new Promise((r) => setTimeout(r, wait));
+      }
+      const resp = await fetch(url, { credentials: "include", ...init });
+      if (resp.status !== 429 || attempt >= _FORUM_429_RETRIES) return resp;
+      const ms = _retryAfterMs(resp.headers && resp.headers.get("retry-after"));
+      _forumPauseUntil = Date.now() + ms;
+      _setSharedNumber(_FORUM_PAUSE_KEY, _forumPauseUntil);
+      console.warn(`FunPairDL: forum rate limit (429) — pausing ${Math.round(ms / 1000)}s`, url);
+    }
+  });
+  _forumGate = run.catch(() => undefined);
+  return run;
+}
+
+// ─── Whole threads ───
+//
+// /t/<id>.json carries about twenty posts plus the ids of all of them
+// (post_stream.stream); the rest come from /t/<id>/posts.json twenty ids at a
+// time. Replacement links live wherever a thread's later replies put them,
+// so a topic is read to the end (capped — a pathological thread stops at
+// _TOPIC_MAX_POSTS and says so in the console).
+const _TOPIC_POSTS_PER_PAGE = 20;
+const _TOPIC_MAX_POSTS = 1000;
+
+// Pure: the post ids still to read, in thread order, in pages of `per`.
+function _remainingPostPages(stream, havePosts, per = _TOPIC_POSTS_PER_PAGE, cap = _TOPIC_MAX_POSTS) {
+  const have = new Set((havePosts || []).map((p) => p && p.id).filter((id) => typeof id === "number"));
+  const room = Math.max(0, cap - have.size);
+  const missing = (stream || []).filter((id) => typeof id === "number" && !have.has(id)).slice(0, room);
+  const pages = [];
+  for (let i = 0; i < missing.length; i += per) pages.push(missing.slice(i, i + per));
+  return pages;
+}
+
+// Append the unread posts of `data` (a /t/<id>.json document) in place.
+// A failed page stops the read: what was read so far is still worth using.
+async function _readRemainingPosts(tid, data, opts = {}) {
+  const ps = data && data.post_stream;
+  if (!ps || !Array.isArray(ps.posts)) return data;
+  const stream = ps.stream || [];
+  const pages = _remainingPostPages(stream, ps.posts);
+  const total = Math.min(stream.length, _TOPIC_MAX_POSTS);
+  if (stream.length > _TOPIC_MAX_POSTS) {
+    console.warn(`FunPairDL: topic ${tid} has ${stream.length} posts; reading the first ${_TOPIC_MAX_POSTS}`);
+  }
+  for (const page of pages) {
+    if (opts.onProgress) { try { opts.onProgress(ps.posts.length, total); } catch (e) {} }
+    const q = page.map((id) => `post_ids[]=${id}`).join("&");
+    let more = null;
+    try {
+      const resp = await forumFetch(`/t/${tid}/posts.json?${q}`, { onWait: opts.onWait });
+      if (resp.ok) more = ((await resp.json()).post_stream || {}).posts;
+      else console.warn(`FunPairDL: topic ${tid} posts page failed (${resp.status}); stopping`);
+    } catch (e) { console.warn(`FunPairDL: topic ${tid} posts page failed:`, e); }
+    if (!Array.isArray(more) || more.length === 0) break;
+    ps.posts.push(...more);
+  }
+  ps.posts.sort((a, b) => (a.post_number || 0) - (b.post_number || 0));
+  data._readAll = true;
+  return data;
+}
+
 // ─── Cloaked post recovery ───
 
 function _getPreloadedPosts() {
@@ -932,6 +1191,7 @@ function _getPreloadedPosts() {
 // misclassified downstream.
 let LINK_FILENAME_MAP = null;
 let _METADATA_TOPIC_ID = null;  // topic id the current map was fetched for
+let _LINK_MAP_GEN = 0;          // bumped whenever the map is replaced
 
 function _mapFromPosts(posts, map) {
   for (const p of (posts || [])) {
@@ -973,25 +1233,63 @@ function _currentTopicId() {
   return m ? m[1] : null;
 }
 
+// The current topic's JSON as last fetched (posts appended by
+// _readRemainingPosts when the whole thread was asked for).
+let _TOPIC_DATA = null;
+let _TOPIC_DATA_TID = null;
+let _topicFetchInflight = null;  // { tid, full, promise }
+
 // Fetch the topic JSON to get every link's resolved title (filename). Reliable
 // regardless of how the topic was reached (full load vs SPA). Cached per topic.
-async function ensureLinkMetadata() {
+// `full` also reads the rest of the thread (the panel asks for it; page load
+// only warms the first page).
+async function ensureLinkMetadata(full = false) {
   const tid = _currentTopicId();
   if (!tid) return;
-  if (_METADATA_TOPIC_ID === tid && LINK_FILENAME_MAP) return;
-  try {
-    const resp = await fetch(`/t/${tid}.json`, { credentials: "include" });
-    if (!resp.ok) return;
-    const data = await resp.json();
-    LINK_FILENAME_MAP = _mapFromPosts(data.post_stream?.posts, {});
-    _METADATA_TOPIC_ID = tid;
-  } catch (e) {
-    console.warn("FunPairDL: topic metadata fetch failed:", e);
+  const have = _TOPIC_DATA_TID === tid && _TOPIC_DATA;
+  if (_METADATA_TOPIC_ID === tid && LINK_FILENAME_MAP && have && (!full || _TOPIC_DATA._readAll)) return;
+  const inflight = _topicFetchInflight;
+  if (inflight && inflight.tid === tid && (inflight.full || !full)) return inflight.promise;
+  const promise = (async () => {
+    if (inflight && inflight.tid === tid) await inflight.promise.catch(() => {});
+    try {
+      let data = (_TOPIC_DATA_TID === tid) ? _TOPIC_DATA : null;
+      if (!data) {
+        const resp = await forumFetch(`/t/${tid}.json`);
+        if (!resp.ok) return;
+        data = await resp.json();
+      }
+      if (full && !data._readAll) await _readRemainingPosts(tid, data);
+      _TOPIC_DATA = data;
+      _TOPIC_DATA_TID = tid;
+      LINK_FILENAME_MAP = _mapFromPosts(data.post_stream?.posts, {});
+      _LINK_MAP_GEN += 1;
+      _METADATA_TOPIC_ID = tid;
+    } catch (e) {
+      console.warn("FunPairDL: topic metadata fetch failed:", e);
+    }
+  })();
+  _topicFetchInflight = { tid, full, promise };
+  try { await promise; } finally {
+    if (_topicFetchInflight && _topicFetchInflight.promise === promise) _topicFetchInflight = null;
   }
 }
 
+// Posts of the current topic that the live page may not have rendered:
+// the fetched thread when there is one, else (only while Discourse cloaks
+// posts) the preloaded blob.
+function _supplementPosts(root) {
+  const tid = _currentTopicId();
+  if (_TOPIC_DATA && _TOPIC_DATA_TID === tid) {
+    return ((_TOPIC_DATA.post_stream && _TOPIC_DATA.post_stream.posts) || []).map((p) => ({
+      postNumber: p.post_number, cooked: p.cooked || "", username: p.username || "",
+    }));
+  }
+  return root.querySelectorAll(".post-stream--cloaked").length > 0 ? _getPreloadedPosts() : [];
+}
+
 function _linkMetaFilename(url) {
-  if (LINK_FILENAME_MAP === null) LINK_FILENAME_MAP = _buildLinkFilenameMap();
+  if (LINK_FILENAME_MAP === null) { LINK_FILENAME_MAP = _buildLinkFilenameMap(); _LINK_MAP_GEN += 1; }
   return LINK_FILENAME_MAP[url] || "";
 }
 
@@ -1285,6 +1583,7 @@ function _buildCommentGroups(perPost, commentVideos, commentScripts) {
         id: `c${groups.length}`,
         name: sg.name || "",
         label: `#${p.postNumber}${p.username ? ` @${p.username}` : ""}`,
+        excerpt: p.excerpt || "",
         videos, scripts,
       });
     }
@@ -1307,16 +1606,15 @@ function _buildCommentGroups(perPost, commentVideos, commentScripts) {
 // changes or when the link-filename map upgrades from the SSR fallback to the
 // fetched topic JSON (the map changes script-vs-video classification).
 let _cloakedCacheTopicId = null;
-let _cloakedCacheMapSource = null; // "fetched" | "ssr"
+let _cloakedCacheMapGen = -1;
 const _cloakedParseCache = new Map(); // postNumber → { videos, scripts, subGroups }
 
 function _parseCloakedPost(pp) {
   const tid = _currentTopicId();
-  const mapSource = (_METADATA_TOPIC_ID === tid && LINK_FILENAME_MAP) ? "fetched" : "ssr";
-  if (tid !== _cloakedCacheTopicId || mapSource !== _cloakedCacheMapSource) {
+  if (tid !== _cloakedCacheTopicId || _LINK_MAP_GEN !== _cloakedCacheMapGen) {
     _cloakedParseCache.clear();
     _cloakedCacheTopicId = tid;
-    _cloakedCacheMapSource = mapSource;
+    _cloakedCacheMapGen = _LINK_MAP_GEN;
   }
   const hit = _cloakedParseCache.get(pp.postNumber);
   if (hit) return hit;
@@ -1327,6 +1625,8 @@ function _parseCloakedPost(pp) {
     videos, scripts,
     subGroups: (videos.length > 0 || scripts.length > 0)
       ? _pairWithinPost(tempEl, videos, scripts) : [],
+    excerpt: _postExcerpt(tempEl),
+    otherLinks: extractOtherLinks(tempEl),
   };
   _cloakedParseCache.set(pp.postNumber, entry);
   return entry;
@@ -1344,77 +1644,110 @@ function parseAllPosts(rootOverride, titleOverride, metaMapOverride) {
     // Foreign topic: use the map built from ITS json, and drop the cached
     // topic id so the live page's next parse rebuilds its own map.
     LINK_FILENAME_MAP = metaMapOverride;
+    _LINK_MAP_GEN += 1;
     _METADATA_TOPIC_ID = null;
   } else if (_METADATA_TOPIC_ID !== _currentTopicId()) {
     // Prefer the metadata ensureLinkMetadata() fetched for THIS topic. Only
     // fall back to the SSR blob when we don't have a fetched map for the
     // current topic (e.g. parsed before the fetch resolved).
     LINK_FILENAME_MAP = _buildLinkFilenameMap();
+    _LINK_MAP_GEN += 1;
   }
 
   const title = titleOverride || getTopicTitle();
-  const opCooked = posts[0]?.querySelector(".cooked");
-
-  // Try section-based parsing on OP. Scripts parked under a generic
-  // "Script" heading are handed to the work sections they name first.
-  const sections = opCooked ? _distributeOrphanScripts(parseOPSections(opCooked)) : [];
-
-  // Walk every post (including OP) building both:
-  //   - flat comment* arrays for the existing collection mode UI
-  //   - per-post sub-groups for the new single-mode auto-grouping
-  const commentVideos = [];
-  const commentScripts = [];
-  const scannedPostNumbers = new Set();
-  // perPost: [{ postNumber, isOP, username, cookedEl, subGroups: [...] }]
-  const perPost = [];
 
   function _username(postEl) {
     const a = postEl?.querySelector(".names .username a, .first.username a");
     return (a?.textContent || "").trim();
   }
+  function _postNumberOf(postEl, i) {
+    const pn = postEl.dataset?.postNumber || postEl.querySelector("[data-post-number]")?.dataset?.postNumber;
+    return { known: !!pn, n: pn ? parseInt(pn) : (i + 1) };
+  }
+
+  // Posts the live page hasn't rendered (cloaked, or past what Discourse
+  // loaded) come from the fetched thread. A page opened deep in a long
+  // thread may not hold the OP at all: it comes from there too.
+  const domNums = [...posts].map((p, i) => _postNumberOf(p, i));
+  const supplement = rootOverride ? [] : _supplementPosts(root);
+  const domOPIdx = domNums.findIndex((x) => x.n === 1);
+  const suppOP = domOPIdx < 0 ? supplement.find((pp) => pp.postNumber === 1) : null;
+  let opCooked = null;
+  if (domOPIdx >= 0) opCooked = posts[domOPIdx].querySelector(".cooked");
+  else if (suppOP) { opCooked = document.createElement("div"); opCooked.innerHTML = suppOP.cooked; }
+  else opCooked = posts[0]?.querySelector(".cooked");  // no numbers at all: first is OP
+  const opIdx = domOPIdx >= 0 ? domOPIdx : (suppOP ? -1 : 0);
+
+  // Try section-based parsing on OP. Scripts parked under a generic
+  // "Script" heading are handed to the work sections they name first.
+  const sections = opCooked ? _distributeOrphanScripts(parseOPSections(opCooked)) : [];
+
+  // Every post (including OP) as one row, in thread order:
+  //   { postNumber, isOP, username, videos, scripts, subGroups, excerpt, otherLinks }
+  const rows = [];
+  const scannedPostNumbers = new Set();
 
   for (let i = 0; i < posts.length; i++) {
-    const pn = posts[i].dataset?.postNumber || posts[i].querySelector("[data-post-number]")?.dataset?.postNumber;
-    const postNumber = pn ? parseInt(pn) : (i + 1);
-    if (pn) scannedPostNumbers.add(postNumber);
-
+    const { known, n: postNumber } = domNums[i];
+    if (known) scannedPostNumbers.add(postNumber);
     const el = posts[i].querySelector(".cooked");
     if (!el) continue;
-    const isOP = i === 0;
+    const isOP = i === opIdx;
     const { videos, scripts } = extractLinksFromElement(el, isOP);
+    rows.push({
+      postNumber, isOP, username: _username(posts[i]), videos, scripts,
+      subGroups: (videos.length || scripts.length) ? _pairWithinPost(el, videos, scripts) : [],
+      excerpt: isOP ? "" : _postExcerpt(el),
+      otherLinks: extractOtherLinks(el),
+    });
+  }
+  if (suppOP && opCooked) {
+    const { videos, scripts } = extractLinksFromElement(opCooked, true);
+    scannedPostNumbers.add(1);
+    rows.push({
+      postNumber: 1, isOP: true, username: suppOP.username || "", videos, scripts,
+      subGroups: (videos.length || scripts.length) ? _pairWithinPost(opCooked, videos, scripts) : [],
+      excerpt: "", otherLinks: extractOtherLinks(opCooked),
+    });
+  }
+  for (const pp of supplement) {
+    if (pp.postNumber <= 1 || scannedPostNumbers.has(pp.postNumber)) continue;
+    const entry = _parseCloakedPost(pp);
+    rows.push({
+      postNumber: pp.postNumber, isOP: false, username: pp.username || "",
+      videos: entry.videos, scripts: entry.scripts, subGroups: entry.subGroups,
+      excerpt: entry.excerpt, otherLinks: entry.otherLinks,
+    });
+  }
+  rows.sort((a, b) => (b.isOP - a.isOP) || (a.postNumber - b.postNumber));
 
-    if (!isOP) {
-      commentVideos.push(...videos);
-      commentScripts.push(...scripts);
+  // Flat comment* arrays (collection mode) and per-post sub-groups
+  // (single-mode auto-grouping).
+  const commentVideos = [];
+  const commentScripts = [];
+  const perPost = [];
+  for (const r of rows) {
+    if (!r.isOP) {
+      commentVideos.push(...r.videos);
+      commentScripts.push(...r.scripts);
     }
-
-    if (videos.length === 0 && scripts.length === 0) continue;
+    if (r.videos.length === 0 && r.scripts.length === 0) continue;
     perPost.push({
-      postNumber,
-      isOP,
-      username: _username(posts[i]),
-      subGroups: _pairWithinPost(el, videos, scripts),
+      postNumber: r.postNumber, isOP: r.isOP, username: r.username,
+      excerpt: r.excerpt, subGroups: r.subGroups,
     });
   }
 
-  // Scan cloaked (lazy-loaded) comments that Discourse hasn't rendered yet.
-  // Their content is available in the preloaded JSON data embedded in the page.
-  const cloakedPosts = root.querySelectorAll(".post-stream--cloaked");
-  if (cloakedPosts.length > 0) {
-    const preloadedPosts = _getPreloadedPosts();
-    for (const pp of preloadedPosts) {
-      if (pp.postNumber <= 1) continue; // Skip OP
-      if (scannedPostNumbers.has(pp.postNumber)) continue;
-      const { videos, scripts, subGroups } = _parseCloakedPost(pp);
-      commentVideos.push(...videos);
-      commentScripts.push(...scripts);
-      if (videos.length === 0 && scripts.length === 0) continue;
-      perPost.push({
-        postNumber: pp.postNumber,
-        isOP: false,
-        username: pp.username || "",
-        subGroups,
-      });
+  // Who posted the topic: scripts from anyone else are "other authors'".
+  const _opRow = rows.find((r) => r.isOP);
+  const _opUsername = (_opRow && _opRow.username) || _username(posts[0]) || "";
+
+  // Paid / store links from the OP and the OP's own later posts.
+  const otherLinks = [];
+  for (const r of rows) {
+    if (!r.isOP && !(_opUsername && r.username === _opUsername)) continue;
+    for (const o of r.otherLinks || []) {
+      if (!otherLinks.some((x) => x.url === o.url)) otherLinks.push({ ...o, post: r.postNumber });
     }
   }
 
@@ -1423,9 +1756,6 @@ function parseAllPosts(rootOverride, titleOverride, metaMapOverride) {
     const seen = new Set();
     return arr.filter(item => { if (seen.has(item[key])) return false; seen.add(item[key]); return true; });
   }
-
-  // Who posted the topic: scripts from anyone else are "other authors'".
-  const _opUsername = ((perPost.find((p) => p.isOP) || {}).username) || _username(posts[0]) || "";
 
   // Collection mode: only when 2+ sections are works of their own (see
   // _isCollectionLayout). Multiple video URLs within the SAME section are
@@ -1444,6 +1774,7 @@ function parseAllPosts(rootOverride, titleOverride, metaMapOverride) {
         commentVideos: cVideos,
         commentScripts: cScripts,
         commentGroups: _buildCommentGroups(perPost, cVideos, cScripts),
+        otherLinks,
       };
     }
     // Single video (or no video) across sections → flatten to single mode
@@ -1477,7 +1808,8 @@ function parseAllPosts(rootOverride, titleOverride, metaMapOverride) {
       } else {
         altCounter += 1;
         groupName = `Alt ${altCounter}`;
-        autoGroups.push({ name: groupName, sourceLabel: _label(p), username: p.username || "" });
+        autoGroups.push({ name: groupName, sourceLabel: _label(p), username: p.username || "",
+                          excerpt: p.excerpt || "" });
       }
       for (const v of sg.videos) allVideos.push({ ...v, autoGroup: groupName });
       for (const s of sg.scripts) allScripts.push({ ...s, autoGroup: groupName });
@@ -1522,6 +1854,7 @@ function parseAllPosts(rootOverride, titleOverride, metaMapOverride) {
     videos: dedupedVideos,
     scripts: dedupedScripts,
     autoGroups: liveAutoGroups,
+    otherLinks,
   };
 }
 
@@ -1569,11 +1902,13 @@ async function resolveShortUrl(url) {
   // and returns the new one in Set-Cookie — but aiohttp discards it, leaving
   // the browser with a stale token that eventually gets invalidated (logout).
   // Using the browser's fetch() keeps cookie rotation in sync.
+  // Light requests (a redirect to the CDN): a shorter spacing in the gate.
   try {
-    const resp = await fetch(url, {
+    const resp = await forumFetch(url, {
       method: "HEAD",
       credentials: "same-origin",
       redirect: "follow",
+      minGap: _SHORT_URL_GAP_MS,
     });
     if (resp.ok && resp.url !== url) {
       console.log("FunPairDL: Resolved (in-browser)", url, "->", resp.url);
@@ -1720,6 +2055,12 @@ async function sendPairToServer(data) {
   // Where this was sent from — the backend's topic index turns it into the
   // "已下載" badge on the forum's topic lists.
   if (data.sourceUrl) payload.source_url = data.sourceUrl;
+  // The post's paid / store links, for the work's funlib.json.
+  if (data.otherLinks && data.otherLinks.length > 0) {
+    payload.other_links = data.otherLinks.map((o) => ({
+      url: o.url, label: o.label || "", note: o.note || "", host: o.host || "",
+    }));
+  }
   if (data.groups && data.groups.length > 0) {
     // New grouped payload — backend uses this to lay out Main/Alt folders
     payload.groups = data.groups.map((g) => ({
@@ -1799,6 +2140,7 @@ function renderVideoItem(v, idx, namePrefix, checked, withHandle = false) {
       <input type="checkbox" name="${namePrefix}" value="${idx}" ${checked ? "checked" : ""}>
       <span class="funpairdl-badge ${badgeClass}">${badge}</span>
       <span class="funpairdl-label">${escapeAttr(v.label)}</span>
+      ${_noteHTML(v.note)}
       ${bundleTag}
       <span class="funpairdl-size" data-probe="${namePrefix}-${idx}"></span>
       ${_sourceTagHTML(v.url, v.label)}
@@ -1820,6 +2162,7 @@ function renderScriptItem(s, idx, namePrefix, checked, withHandle = false) {
       <input type="checkbox" name="${namePrefix}" value="${idx}" ${checked ? "checked" : ""}>
       <span class="funpairdl-badge ${badgeClass}">${badge}</span>
       <span class="funpairdl-label">${safe}</span>
+      ${_noteHTML(s.note)}
       ${axisTag}${externalTag}
       <span class="funpairdl-size" data-probe="${namePrefix}-${idx}"></span>
       ${s.isExternal ? _sourceTagHTML(s.url, getVideoLabel(s.url)) : ""}
@@ -2035,6 +2378,7 @@ function _buildGroupsRootHTML(parsed) {
     const isMain = g === "Main";
     const folder = _altFolderPreview(parsed, gi, g);
     const src = sourceLabels[g] ? `<span class="funpairdl-group-source">${_escAttr(sourceLabels[g])}</span>` : "";
+    const excerpt = isMain ? "" : (((parsed.autoGroups || []).find((x) => x.name === g) || {}).excerpt || "");
     const nameInput = isMain ? "" : `
       <input type="text" class="funpairdl-alt-name-input" data-group="${g}"
              placeholder="Alt 名稱" value="${_escAttr(altNames[g] || "")}">`;
@@ -2053,6 +2397,7 @@ function _buildGroupsRootHTML(parsed) {
         ${inheritToggle}
         ${removeBtn}
       </div>
+      ${_excerptHTML(excerpt)}
       <div class="funpairdl-group-body" data-group="${g}"></div>
       <div class="funpairdl-inherit-preview" data-group="${g}"></div>
     </div>`;
@@ -2082,31 +2427,37 @@ function _nextAltName(parsed) {
   return `Alt ${n}`;
 }
 
-function _attachGroupBlockEvents(panel, parsed) {
-  // Per-item group dropdown
-  panel.querySelectorAll(".funpairdl-item-group-select").forEach((sel) => {
-    sel.addEventListener("change", (e) => {
-      e.stopPropagation();
-      const item = sel.closest(".funpairdl-item");
-      if (!item) return;
-      let target = sel.value;
-      if (target === "__new__") {
-        target = _nextAltName(parsed);
-        parsed.groupState.groups.push(target);
-        parsed.groupState.inheritAxes[target] = true;
-        parsed.groupState.sourceLabels[target] = "manual";
-        parsed.groupState.altNames[target] = "";
-        parsed.groupState.itemGroup[item.dataset.key] = target;
-        _rerenderGroupBlocks(panel, parsed);
-        return;
-      }
-      _moveItemToGroup(panel, parsed, item, target);
-      _updateInheritancePreviews(panel, parsed);
-    });
-    // Prevent label click on the select from toggling the checkbox
-    sel.addEventListener("click", (e) => e.stopPropagation());
-    sel.addEventListener("mousedown", (e) => e.stopPropagation());
+// Per-item group dropdown. Item nodes survive a rebuild of the group
+// blocks, so each select is wired once.
+function _wireItemGroupSelect(panel, parsed, sel) {
+  if (sel._fpdlWired) return;
+  sel._fpdlWired = true;
+  sel.addEventListener("change", (e) => {
+    e.stopPropagation();
+    const item = sel.closest(".funpairdl-item");
+    if (!item) return;
+    let target = sel.value;
+    if (target === "__new__") {
+      target = _nextAltName(parsed);
+      parsed.groupState.groups.push(target);
+      parsed.groupState.inheritAxes[target] = true;
+      parsed.groupState.sourceLabels[target] = "manual";
+      parsed.groupState.altNames[target] = "";
+      parsed.groupState.itemGroup[item.dataset.key] = target;
+      _rerenderGroupBlocks(panel, parsed);
+      return;
+    }
+    _moveItemToGroup(panel, parsed, item, target);
+    _updateInheritancePreviews(panel, parsed);
   });
+  // Prevent label click on the select from toggling the checkbox
+  sel.addEventListener("click", (e) => e.stopPropagation());
+  sel.addEventListener("mousedown", (e) => e.stopPropagation());
+}
+
+function _attachGroupBlockEvents(panel, parsed) {
+  panel.querySelectorAll(".funpairdl-item-group-select")
+    .forEach((sel) => _wireItemGroupSelect(panel, parsed, sel));
 
   // Inherit toggle
   panel.querySelectorAll(".funpairdl-inherit-cb").forEach((cb) => {
@@ -2179,7 +2530,7 @@ function buildSinglePanelHTML(parsed) {
       <span class="funpairdl-label" style="font-weight:700">全選 / 全不選</span>
     </label>
   </div>`;
-  return toolbar + _buildGroupsRootHTML(parsed);
+  return toolbar + _buildGroupsRootHTML(parsed) + _panelExtrasHTML(parsed);
 }
 
 /**
@@ -2321,10 +2672,10 @@ function buildCollectionPanelHTML(parsed) {
     }
     html += _collectionGroupHTML(
       g.id, escapeAttr(g.name || g.label), g.name ? escapeAttr(g.label) : "",
-      `${g.videos.length}V + ${g.scripts.length}S`, body, false, {});
+      `${g.videos.length}V + ${g.scripts.length}S`, _excerptHTML(g.excerpt) + body, false, {});
   }
 
-  return html;
+  return html + _panelExtrasHTML(parsed);
 }
 
 // One collapsible section block. `opts.editable` renders the name as a text
@@ -2386,7 +2737,8 @@ function _addCollectionSection(panel, parsed, name, id, focus) {
   const last = groups[groups.length - 1];
   const parent = last ? last.parentNode : panel.querySelector(".funpairdl-panel-body");
   // Sit after the OP sections / earlier user groups, before comment groups.
-  const anchor = parent.querySelector('.funpairdl-section-group[data-section^="c"]');
+  const anchor = parent.querySelector('.funpairdl-section-group[data-section^="c"]')
+    || parent.querySelector(":scope > .funpairdl-extras");
   if (anchor) parent.insertBefore(group, anchor); else parent.appendChild(group);
   _wireCollectionGroup(panel, parsed, group);
   updateSendButton(panel, parsed);
@@ -2427,6 +2779,185 @@ function _removeCollectionSection(panel, parsed, id) {
   _refreshSectionCounts(panel);
   updateSendButton(panel, parsed);
   panel.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+// ─── Panel extras: a pasted link, the links nothing downloads ───
+
+// A mirror found elsewhere (Discord, another topic, a reply the parser
+// missed) is pasted into the post's panel and rides along with its files:
+// it is probed, planned and sent like a parsed row. The post's paid /
+// store links are listed below it.
+function _panelExtrasHTML(parsed) {
+  const others = parsed.otherLinks || [];
+  const list = others.map((o) => {
+    const text = o.label || o.url;
+    const note = o.note ? ` <span class="funpairdl-note">${escapeAttr(o.note)}</span>` : "";
+    return `<li><a href="${escapeAttr(o.url)}" target="_blank" rel="noopener noreferrer">${escapeAttr(text)}</a>
+      <span class="funpairdl-tag-source">${escapeAttr(o.host)}</span>${note}</li>`;
+  }).join("");
+  const othersBlock = others.length ? `
+    <details class="funpairdl-other-links">
+      <summary>其他連結（不會下載，記進 funlib.json）${others.length}</summary>
+      <ul>${list}</ul>
+    </details>` : "";
+  return `<div class="funpairdl-extras">
+    <div class="funpairdl-paste-row">
+      <input type="text" class="funpairdl-paste-url" placeholder="貼上在別處找到的連結（鏡像、補檔）">
+      <select class="funpairdl-paste-target" title="加到哪一組"></select>
+      <button type="button" class="funpairdl-add-alt-btn funpairdl-paste-add">加入</button>
+    </div>
+    <div class="funpairdl-paste-msg" hidden></div>
+    ${othersBlock}
+  </div>`;
+}
+
+// Targets for the paste box: the single panel's groups, or the collection
+// panel's sections (OP sections, comment groups, user groups).
+function _pasteTargets(panel, parsed) {
+  if (parsed.mode === "single") {
+    return (parsed.groupState ? parsed.groupState.groups : ["Main"]).map((g) => ({ id: g, name: g }));
+  }
+  return [...panel.querySelectorAll(".funpairdl-section-group[data-section]")].map((g) => {
+    const nameEl = g.querySelector(".funpairdl-section-name, .funpairdl-section-name-input");
+    const name = nameEl ? (nameEl.value || nameEl.textContent || "").trim() : "";
+    return { id: g.dataset.section, name: name || _collectionPairName(parsed, g.dataset.section) };
+  });
+}
+
+function _refreshPasteTargets(panel, parsed) {
+  const sel = panel.querySelector(".funpairdl-paste-target");
+  if (!sel) return;
+  const keep = sel.value;
+  sel.innerHTML = _pasteTargets(panel, parsed)
+    .map((t) => `<option value="${escapeAttr(t.id)}">${escapeAttr(t.name)}</option>`).join("");
+  if ([...sel.options].some((o) => o.value === keep)) sel.value = keep;
+}
+
+// Pure: the row a pasted URL becomes — a script for a .funscript or an
+// AIRscripts share, else a video (a file-locker link holding a funscript is
+// re-routed by its probed name at send time, as parsed rows are). null for
+// anything that is no http(s) URL.
+function _pastedRow(url) {
+  const u = String(url || "").trim();
+  if (!/^https?:\/\/\S+$/i.test(u)) return null;
+  try { new URL(u); } catch (e) { return null; }
+  const air = _airscriptsShareId(u);
+  if (air || /\.funscript(?:[?#]|$)/i.test(u)) {
+    const fn = air ? `airscripts ${air}.funscript`
+      : decodeURIComponent(u.split(/[?#]/)[0].split("/").pop() || "") || "pasted.funscript";
+    const axis = detectAxis(fn);
+    return { kind: "script", item: {
+      url: u, source: "comment", filename: fn, axis, isMultiAxis: axis !== "main",
+      author: "", note: "手動加入", pasted: true,
+    } };
+  }
+  return { kind: "video", item: {
+    url: u, priority: getVideoPriority(u, true), source: "comment", label: getVideoLabel(u),
+    isBundle: isBundleUrl(u), note: "手動加入", pasted: true,
+  } };
+}
+
+function _pasteMessage(panel, text) {
+  const msg = panel.querySelector(".funpairdl-paste-msg");
+  if (!msg) return;
+  msg.hidden = !text;
+  msg.textContent = text || "";
+}
+
+// Add a pasted URL to `target` (a group name / section id). Returns the
+// row's key, or "" when nothing was added.
+function _addPastedLink(panel, parsed, url, target) {
+  const row = _pastedRow(url);
+  if (!row) { _pasteMessage(panel, "這不是一個網址"); return ""; }
+  const { kind, item } = row;
+  const known = parsed.mode === "single"
+    ? [...parsed.videos, ...parsed.scripts]
+    : [...parsed.sections.flatMap((s) => [...s.videos, ...s.scripts]),
+       ...(parsed.commentVideos || []), ...(parsed.commentScripts || [])];
+  if (known.some((x) => x.url === item.url)) { _pasteMessage(panel, "這個連結已經在清單裡"); return ""; }
+
+  let key = "";
+  let node = null;
+  if (parsed.mode === "single") {
+    const group = parsed.groupState.groups.includes(target) ? target : "Main";
+    const list = kind === "script" ? parsed.scripts : parsed.videos;
+    const idx = list.length;
+    item.autoGroup = group;
+    list.push(item);
+    const prefix = kind === "script" ? "script" : "video";
+    key = `${prefix}-${idx}`;
+    parsed.groupState.itemGroup[key] = group;
+    const tmp = document.createElement("div");
+    tmp.innerHTML = (kind === "script"
+      ? renderScriptItem(item, idx, prefix, true, true)
+      : renderVideoItem(item, idx, prefix, true, true)).trim();
+    node = tmp.firstElementChild;
+    const select = document.createElement("select");
+    select.className = "funpairdl-item-group-select";
+    select.innerHTML = _groupOptionsHTML(group, parsed.groupState.groups);
+    node.appendChild(select);
+    const body = panel.querySelector(`.funpairdl-group-body[data-group="${group}"]`);
+    if (!body) return "";
+    body.appendChild(node);
+    _wireItemGroupSelect(panel, parsed, select);
+    _updateInheritancePreviews(panel, parsed);
+  } else {
+    const groupEl = panel.querySelector(`.funpairdl-section-group[data-section="${target}"]`)
+      || panel.querySelector(".funpairdl-section-group[data-section]");
+    if (!groupEl) return "";
+    const list = kind === "script" ? (parsed.commentScripts = parsed.commentScripts || [])
+      : (parsed.commentVideos = parsed.commentVideos || []);
+    const idx = list.length;
+    list.push(item);
+    const prefix = kind === "script" ? "cs" : "cv";
+    key = `${prefix}-${idx}`;
+    const tmp = document.createElement("div");
+    tmp.innerHTML = (kind === "script"
+      ? renderScriptItem(item, idx, prefix, true, true)
+      : renderVideoItem(item, idx, prefix, true, true)).trim();
+    node = tmp.firstElementChild;
+    node.dataset.home = groupEl.dataset.section;
+    const body = groupEl.querySelector(".funpairdl-section-body");
+    body.appendChild(node);
+    body.style.display = "block";
+    const toggle = groupEl.querySelector(".funpairdl-section-toggle");
+    if (toggle) toggle.textContent = "▾";
+    const scb = groupEl.querySelector(".funpairdl-section-cb");
+    if (scb && !scb.checked) scb.checked = true;
+    _refreshSectionCounts(panel);
+    updateSendButton(panel, parsed);
+  }
+  node.dataset.touched = "1";   // the user asked for it: no plan unticks it
+  if (kind === "script" && panel._probeScript) panel._probeScript(item, key);
+  if (kind === "video" && panel._probeVideo) panel._probeVideo(item, key);
+  panel._pasted = panel._pasted || [];
+  panel._pasted.push({ url: item.url, target });
+  _pasteMessage(panel, "");
+  panel.dispatchEvent(new Event("change", { bubbles: true }));
+  if (parsed.mode === "single") _scheduleWorkPlan(panel, parsed);
+  _scheduleVideoPlan(panel, parsed);
+  return key;
+}
+
+function _wirePanelExtras(panel, parsed) {
+  const box = panel.querySelector(".funpairdl-extras");
+  if (!box) return;
+  const input = box.querySelector(".funpairdl-paste-url");
+  const sel = box.querySelector(".funpairdl-paste-target");
+  const add = box.querySelector(".funpairdl-paste-add");
+  _refreshPasteTargets(panel, parsed);
+  // Groups come and go (new Alt, user sections): list them when opened.
+  sel.addEventListener("focus", () => _refreshPasteTargets(panel, parsed));
+  sel.addEventListener("mousedown", () => _refreshPasteTargets(panel, parsed));
+  const go = () => {
+    if (_addPastedLink(panel, parsed, input.value, sel.value)) input.value = "";
+  };
+  add.addEventListener("click", go);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); go(); }
+  });
+  // Typing in the box is no change to the post's selection.
+  for (const el of [input, sel]) el.addEventListener("change", (e) => e.stopPropagation());
 }
 
 // ─── Create panel element ───
@@ -2680,6 +3211,10 @@ function setupProbing(panel, parsed) {
       probeUrl(s.url).then(handleResult);
     }
   }
+
+  // A row added later (a pasted link) is probed the same way.
+  panel._probeVideo = probeVideo;
+  panel._probeScript = probeScript;
 
   // Probe based on mode
   if (parsed.mode === "collection") {
@@ -3029,6 +3564,7 @@ async function handleSingleSend(panel, parsed, sendBtn, preferredResolution, aut
     title: parsed.title, groups: liveGroups, mergeInto,
     preferredResolution, autoRename,
     sourceUrl: parsed.sourceUrl || location.href,
+    otherLinks: parsed.otherLinks || [],
   });
 
   if (result.success) {
@@ -3247,6 +3783,7 @@ async function handleCollectionSend(panel, parsed, sendBtn, preferredResolution,
       alternates: resolvedAlternates,
       mergeInto: p.mergeInto || "",
       sourceUrl: parsed.sourceUrl || location.href,
+      otherLinks: parsed.otherLinks || [],
     });
 
     if (result.success) {
@@ -4429,19 +4966,29 @@ function _buildTopicRootFromJson(data) {
   return root;
 }
 
-// Fetch a topic's JSON and run the standard parser over a detached rebuild
-// of its posts. Returns { parsed } or { error }.
-async function _parseTopicRemote(url) {
+// Fetch a whole topic (behind the forum gate) and run the standard parser
+// over a detached rebuild of its posts. Returns { parsed } or { error }.
+// opts.onStatus(text) hears about waits and the read's progress.
+async function _parseTopicRemote(url, opts = {}) {
   if (!_funpairdlHostAllowed()) return { error: "not_eroscripts" };
   const tid = _topicIdFromUrl(url);
   if (!tid) return { error: "not_topic" };
+  const say = (t) => { if (opts.onStatus) { try { opts.onStatus(t); } catch (e) {} } };
+  const onWait = (ms, why) => say(why === "rate_limited"
+    ? `論壇要求放慢，等 ${Math.ceil(ms / 1000)} 秒…` : `排隊讀取論壇…`);
   let data = null;
   try {
-    const resp = await fetch(`/t/${tid}.json`, { credentials: "include" });
+    const resp = await forumFetch(`/t/${tid}.json`, { onWait });
     if (resp.ok) data = await resp.json();
     else if (resp.status === 403 || resp.status === 404) return { error: "no_access" };
+    else if (resp.status === 429) return { error: "rate_limited" };
   } catch (e) { data = null; }
   if (!data || !data.post_stream) return { error: "fetch_failed" };
+  await _readRemainingPosts(tid, data, {
+    onWait,
+    onProgress: (have, total) => say(`讀取回覆 ${have}/${total}…`),
+  });
+  say("解析中…");
   const root = _buildTopicRootFromJson(data);
   const map = _mapFromPosts(data.post_stream.posts, {});
   const parsed = parseAllPosts(root, (data.title || "").trim(), map);
@@ -4590,6 +5137,8 @@ function _batchSaveCardState(card) {
       workGroupsExtra: [...((card._panel && card._panel._workGroupsExtra) || [])],
       // Re-encode-or-variant answers (url → choice).
       encodeDecisions: { ...((card._panel && card._panel._encodeDecisions) || {}) },
+      // Links the user pasted into the card (replayed before the ticks).
+      pasted: [...((card._panel && card._panel._pasted) || [])],
     };
     if (card._panel) {
       // Only rows the user (un)ticked are saved: what the plan decided is
@@ -4727,6 +5276,7 @@ function _batchBuildCardPanel(parsed) {
 const _BATCH_ERROR_TEXT = {
   no_links: "無可下載項目",
   fetch_failed: "讀取失敗",
+  rate_limited: "論壇限流，稍後重開再試",
   no_access: "無權限或已刪除",
   not_topic: "非帖子",
   not_eroscripts: "非 EroScripts",
@@ -4735,7 +5285,7 @@ const _BATCH_ERROR_TEXT = {
 async function _batchBuildCard(card, url) {
   const statusEl = card.querySelector(".funpairdl-batch-card-status");
   const bodyWrap = card.querySelector(".funpairdl-batch-card-body");
-  const ready = await _parseTopicRemote(url);
+  const ready = await _parseTopicRemote(url, { onStatus: (t) => { statusEl.textContent = t; } });
   if (ready.error) {
     statusEl.textContent = _BATCH_ERROR_TEXT[ready.error] || ready.error;
     card.classList.add("funpairdl-batch-card-dead");
@@ -4765,6 +5315,7 @@ async function _batchBuildCard(card, url) {
   }
   _enableDragSelect(panel);
   setupProbing(panel, parsed);
+  _wirePanelExtras(panel, parsed);
   panel.querySelector("#funpairdl-send")
     .addEventListener("click", () => _batchSendCard(card));
   // Tiering: re-assess whenever the plan, the lookup or the user changes
@@ -4785,6 +5336,9 @@ async function _batchBuildCard(card, url) {
     if (includeCb && typeof saved.include === "boolean") includeCb.checked = saved.include;
     if (closeCb && typeof saved.closeAfter === "boolean") closeCb.checked = saved.closeAfter;
     _batchApplyCardState(card, saved);
+    for (const pl of saved.pasted || []) {
+      if (pl && pl.url) _addPastedLink(panel, parsed, pl.url, pl.target);
+    }
     const restoreTimer = setInterval(() => {
       if (card._dirty || !card._panel || !card._panel.parentNode) {
         clearInterval(restoreTimer);
@@ -6162,9 +6716,27 @@ function injectButton() {
 
     // Make sure link metadata is loaded before we parse — it decides whether a
     // file-locker link is a video or a hosted funscript, which drives
-    // collection-vs-single mode and folder naming.
-    await ensureLinkMetadata();
-    const freshParsed = parseAllPosts();
+    // collection-vs-single mode and folder naming. The whole thread is read
+    // so a replacement link in a late reply is in the panel too.
+    if (btn._busy) return;
+    btn._busy = true;
+    const countEl = btn.querySelector(".funpairdl-count");
+    if (countEl) countEl.textContent = "讀取全帖…";
+    let freshParsed;
+    try {
+      await ensureLinkMetadata(true);
+      freshParsed = parseAllPosts();
+    } finally {
+      btn._busy = false;
+    }
+    if (!freshParsed) { if (countEl) countEl.textContent = countText; return; }
+    {
+      const t = _parsedTotals(freshParsed);
+      let txt = `${t.totalV}V + ${t.totalS}S`;
+      if (freshParsed.mode === "collection") txt += ` (${freshParsed.sections.length} sections)`;
+      if (countEl) countEl.textContent = txt;
+    }
+    if (document.getElementById("funpairdl-panel")) return;
     panel = createPanel(freshParsed);
     document.body.appendChild(panel);
 
@@ -6194,6 +6766,7 @@ function injectButton() {
 
     // Drag across checkboxes to (un)check a range at once (both modes).
     _enableDragSelect(panel);
+    _wirePanelExtras(panel, freshParsed);
 
     // Close button — slide out
     panel.querySelector("#funpairdl-close").addEventListener("click", () => {

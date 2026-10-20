@@ -29,7 +29,7 @@ from pathlib import Path
 logger = logging.getLogger("funpairdl.library")
 
 SIDECAR_NAME = "funlib.json"
-SIDECAR_VERSION = 2
+SIDECAR_VERSION = 3   # v3: other_links[]
 TRASH_DIR = "_trash"
 DELETED_LOG = "deleted.jsonl"
 NO_VIDEO_DIR = "No Video"
@@ -484,6 +484,49 @@ def _empty(v) -> bool:
     return v is None or v == "" or v == [] or v == {}
 
 
+OTHER_LINK_FIELDS = ("url", "label", "note", "host")
+OTHER_LINKS_MAX = 50
+
+
+def clean_other_links(links) -> list[dict]:
+    """``other_links`` entries as stored: http(s) url required, the known
+    string fields only, no duplicate urls, at most OTHER_LINKS_MAX."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for o in links or []:
+        if not isinstance(o, dict):
+            continue
+        url = str(o.get("url") or "").strip()
+        if not re.match(r"^https?://", url, re.IGNORECASE) or url in seen:
+            continue
+        seen.add(url)
+        entry = {"url": url}
+        for k in OTHER_LINK_FIELDS[1:]:
+            v = str(o.get(k) or "").strip()
+            if v:
+                entry[k] = v[:300]
+        out.append(entry)
+        if len(out) >= OTHER_LINKS_MAX:
+            break
+    return out
+
+
+def merge_other_links(existing, incoming) -> list[dict]:
+    """Union by url: existing entries keep their place, a field they lack
+    is filled from the incoming one, new urls are appended."""
+    out = clean_other_links(existing)
+    by_url = {o["url"]: o for o in out}
+    for o in clean_other_links(incoming):
+        have = by_url.get(o["url"])
+        if have is None:
+            out.append(o)
+            by_url[o["url"]] = o
+        else:
+            for k, v in o.items():
+                have.setdefault(k, v)
+    return out[:OTHER_LINKS_MAX]
+
+
 def merge_sidecar(existing: dict | None, incoming: dict, overwrite: bool = False) -> dict:
     """Fill ``existing`` with ``incoming``: scalar fields only where the
     existing value is empty (unless ``overwrite``); ``tags`` unioned;
@@ -492,6 +535,11 @@ def merge_sidecar(existing: dict | None, incoming: dict, overwrite: bool = False
     out = dict(existing or {})
     for k, v in incoming.items():
         if k == "variants":
+            continue
+        if k == "other_links" and isinstance(v, list):
+            merged_links = merge_other_links(out.get("other_links"), v)
+            if merged_links:
+                out["other_links"] = merged_links
             continue
         if k == "tags" and isinstance(v, list):
             # tags are a set: union, keeping order and the existing spelling
@@ -556,6 +604,9 @@ def sidecar_from_pair(pair, variants: list[dict] | None = None, title: str | Non
         if tid:
             src["topic_id"] = tid
         data["source"] = src
+    links = clean_other_links(getattr(pair, "other_links", None))
+    if links:
+        data["other_links"] = links
     data["downloaded_at"] = utc_now_iso()
     data["pair_id"] = pair.id
     if variants is not None:

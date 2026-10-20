@@ -38,13 +38,24 @@ Second pass for the leftovers (run after the first):
     the core words overlap. Listed as FUZZY in the report for review.
     (Searching the forum for the bundle id itself finds nothing: the
     forum's search does not index URLs.)
+  * ``--search-files``: for works without a topic, search the forum for
+    the script's own file name — the name it had in the post (the pair's
+    original file names), else the L0 file on disk — raw, as the search
+    box would take it. A topic whose search excerpt shows that exact
+    ``<name>.funscript`` attachment is a certain hit; two topics both
+    showing it (one video, several scripters using the video's name) are
+    AMBIGUOUS and left for a person. Without a certain hit, a topic whose
+    title has the work's title key is taken. Listed as FILE / FILE-TITLE /
+    AMBIGUOUS in the report.
   * ``--local-tags``: tags derived offline, added only when absent —
     ``source-<site>`` (e621, iwara, …), ``pack-<bundle>`` for split
     children, ``len-…`` buckets (forum names) from the L0 script's length.
 
 Forum requests go through the running app's embedded browser (CDP, port
 9223) so the login cookies never leave it; without the app they use the
-saved cookies directly (only safe while the app is NOT running).
+saved cookies directly (only safe while the app is NOT running). Either way
+they share utils/discourse's gate: one at a time, ``--delay`` apart (at
+least 1 s), searches 2 s + jitter apart, and a 429 waits out Retry-After.
 
 DRY-RUN by default; ``--apply`` writes. Safe to re-run.
 
@@ -56,6 +67,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import html
 import json
 import re
 import socket
@@ -82,6 +94,8 @@ SOURCE_SITES = {"e621.net": "e621", "e926.net": "e621", "iwara.tv": "iwara", "so
                 "hmvmania.com": "hmvmania", "rule34video.com": "rule34video", "rule34.xxx": "rule34",
                 "hanime1.me": "hanime"}
 MISSES_FILE = ROOT / "_backfill_misses.json"
+FILE_MISSES_FILE = ROOT / "_backfill_file_misses.json"   # --search-files found nothing
+FILE_SEARCH_NAMES = 2                                    # file names tried per work
 _LOG_TOPIC_RE = re.compile(r"discuss\.eroscripts\.com/t/([^/\s\"'?#]+)/(\d+)")
 LOG_URL_TRUNCATED_AT = 100      # the browser logs url[:100]; a URL that long may have lost id digits
 
@@ -475,6 +489,102 @@ def offline_sidecar(work: Path, by_folder: dict, by_title: dict,
     return data
 
 
+# ── file-name search ─────────────────────────────────────────────────────
+
+_HASH_STEM_RE = re.compile(r"^[0-9a-f]{24,}$", re.IGNORECASE)
+_TAG_RE = re.compile(r"<[^>]+>")
+_AXIS_STEM_RE = re.compile(r"\.(surge|sway|twist|roll|pitch|vib|vibe|vibration|pump|suck|valve|lube|"
+                           r"L[1-3]|R[0-2]|V[0-2]|A[0-2])$", re.IGNORECASE)
+
+
+def _is_axis_name(stem: str) -> bool:
+    return bool(_AXIS_STEM_RE.search(stem))
+
+
+def script_file_names(work: Path, pair: dict | None) -> list[str]:
+    """Script file names worth searching for, best first: the names the
+    pair's scripts had in the post (Main's main axis first), then the main
+    axis files on disk. Hash-like and very short names are left out."""
+    names: list[str] = []
+    if pair:
+        orig = pair.get("original_filenames") or {}
+        items = sorted(pair.get("items") or [],
+                       key=lambda it: 0 if (it.get("group") or "Main") == "Main" else 1)
+        for it in items:
+            n = str(orig.get(it.get("id")) or "")
+            if n.lower().endswith(".funscript"):
+                names.append(n)
+    try:
+        names.extend(sorted(f.name for f in work.glob("*.funscript")))
+    except OSError:
+        pass
+    out: list[str] = []
+    seen: set[str] = set()
+    for n in sorted(names, key=lambda n: (_is_axis_name(n[:-10]), names.index(n))):
+        stem = n[:-len(".funscript")].strip()
+        if len(stem) < 4 or _HASH_STEM_RE.match(stem) or n.lower() in seen:
+            continue
+        seen.add(n.lower())
+        out.append(n)
+    return out
+
+
+def _squash(s: str) -> str:
+    return re.sub(r"\s+", " ", html.unescape(_TAG_RE.sub("", s or ""))).strip().lower()
+
+
+def file_hits(res: dict | None, name: str) -> set[int]:
+    """Topics whose search excerpts show the attachment ``name`` exactly."""
+    want = _squash(name)
+    out: set[int] = set()
+    for pp in (res or {}).get("posts") or []:
+        if not isinstance(pp, dict) or not isinstance(pp.get("topic_id"), int):
+            continue
+        blurb = _squash(str(pp.get("blurb") or ""))
+        i = blurb.find(want)
+        # the name must stand on its own: "x.funscript", not "prefix-x.funscript"
+        while i >= 0:
+            before = blurb[i - 1] if i > 0 else " "
+            if not (before.isalnum() or before in "-_."):
+                out.add(pp["topic_id"])
+                break
+            i = blurb.find(want, i + 1)
+    return out
+
+
+async def file_search(fetcher, work: Path, title: str, pair: dict | None, args, report, counts):
+    """(hit topic dict | None, ambiguous) for a work, by its script's file name."""
+    from urllib.parse import quote
+    key = QueueManager._title_key(title)
+    for name in script_file_names(work, pair)[:FILE_SEARCH_NAMES]:
+        stem = name[:-len(".funscript")]
+        res = await _guarded(fetcher, f"{FORUM}/search.json?q={quote(stem)}", args)
+        if res is None:
+            counts["errors"] += 1
+            return None, False
+        topics = {t.get("id"): t for t in res.get("topics") or [] if isinstance(t, dict)}
+        certain = file_hits(res, name)
+        if len(certain) == 1:
+            tid = next(iter(certain))
+            t = topics.get(tid) or {"id": tid}
+            counts["file_found"] = counts.get("file_found", 0) + 1
+            report.append(f"- FILE `{work.name}` → topic {tid} \"{t.get('title') or ''}\" ({name})")
+            return t, False
+        if len(certain) >= 2:
+            counts["file_ambiguous"] = counts.get("file_ambiguous", 0) + 1
+            listed = ", ".join(f"{i} \"{(topics.get(i) or {}).get('title') or ''}\"" for i in sorted(certain))
+            report.append(f"- AMBIGUOUS `{work.name}` ({name}): {listed}")
+            return None, True
+        if len(key) >= 4:
+            for t in topics.values():
+                if QueueManager._title_key(str(t.get("title") or "")) == key:
+                    counts["file_title_found"] = counts.get("file_title_found", 0) + 1
+                    report.append(f"- FILE-TITLE `{work.name}` → topic {t['id']} \"{t.get('title') or ''}\"")
+                    return t, False
+    counts["file_missed"] = counts.get("file_missed", 0) + 1
+    return None, False
+
+
 # ── forum access ─────────────────────────────────────────────────────────
 
 def _port_open(port: int) -> bool:
@@ -483,8 +593,16 @@ def _port_open(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
+class RateLimited(RuntimeError):
+    def __init__(self, seconds: float):
+        super().__init__(f"rate limited (429), retry after {seconds:.0f}s")
+        self.seconds = seconds
+
+
 class CdpFetcher:
     """GET JSON through the app's embedded browser (logged-in tab)."""
+
+    gated = False      # _guarded books the forum slot
 
     def __init__(self, port: int):
         self.port = port
@@ -511,7 +629,8 @@ class CdpFetcher:
     async def get_json(self, url: str):
         self._id += 1
         expr = (f"fetch({json.dumps(url)},{{credentials:'include'}})"
-                ".then(async r=>r.status+'\\n'+(r.status===200?await r.text():''))")
+                ".then(async r=>r.status+'\\n'+(r.headers.get('retry-after')||'')+'\\n'"
+                "+(r.status===200?await r.text():''))")
         await self._ws.send_json({"id": self._id, "method": "Runtime.evaluate",
                                   "params": {"expression": expr, "awaitPromise": True, "returnByValue": True}})
         while True:
@@ -519,9 +638,10 @@ class CdpFetcher:
             if m.get("id") == self._id:
                 break
         val = ((m.get("result") or {}).get("result") or {}).get("value") or ""
-        status, _, body = val.partition("\n")
+        status, _, rest = val.partition("\n")
+        retry_after, _, body = rest.partition("\n")
         if status == "429":
-            raise RuntimeError("rate limited (429)")
+            raise RateLimited(discourse.retry_after_seconds(retry_after))
         if status != "200":
             return None
         return json.loads(body) if body else None
@@ -529,6 +649,8 @@ class CdpFetcher:
 
 class CookieFetcher:
     """GET JSON with the saved cookies (app not running)."""
+
+    gated = True       # discourse._get_json books the slot and waits out 429s
 
     def __init__(self):
         self._session = None
@@ -549,6 +671,12 @@ async def forum_phase(works: list[tuple[Path, dict]], args, report: list[str]) -
     """Fill forum fields; returns counters."""
     counts = {"enriched": 0, "searched": 0, "found": 0, "missed": 0, "errors": 0, "skipped_miss": 0,
               "loose_found": 0, "loose_rejected": 0}
+    file_misses: set[str] = set()
+    try:
+        if FILE_MISSES_FILE.exists():
+            file_misses = set(json.loads(FILE_MISSES_FILE.read_text(encoding="utf-8")))
+    except (OSError, ValueError, TypeError):
+        file_misses = set()
     if _port_open(args.cdp_port):
         fetcher = CdpFetcher(args.cdp_port)
         how = f"CDP :{args.cdp_port}"
@@ -582,7 +710,7 @@ async def forum_phase(works: list[tuple[Path, dict]], args, report: list[str]) -
             if key and owner:
                 fuzzy_owner[key] = owner.lower()
         by_folder = by_title = None
-        if fuzzy_owner:
+        if fuzzy_owner or args.search_files:
             by_folder, by_title = index_pairs(load_pairs())
         for work, sc in works:
             if args.limit and done >= args.limit:
@@ -595,6 +723,27 @@ async def forum_phase(works: list[tuple[Path, dict]], args, report: list[str]) -
                 continue
             loose_author = ""
             fuzzy = None
+            counted = False
+            if not tid and args.search_files and (str(work) not in file_misses or args.retry_misses):
+                title = sc.get("title") or work.name
+                done += 1
+                counted = True
+                counts["searched"] += 1
+                hit, ambiguous = await file_search(fetcher, work, title, find_pair(work, by_folder, by_title),
+                                                   args, report, counts)
+                if hit is not None:
+                    tid = int(hit["id"])
+                    if args.apply:
+                        lib.update_sidecar(work, {"source": {
+                            "site": "eroscripts", "topic_id": tid,
+                            "url": f"{FORUM}/t/{hit.get('slug') or 'topic'}/{tid}"}})
+                    sc = lib.read_sidecar(work) or sc
+                    misses.pop(str(work), None)
+                    file_misses.discard(str(work))
+                else:
+                    file_misses.add(str(work))
+                    if ambiguous:
+                        continue
             if not tid:
                 title = sc.get("title") or work.name
                 is_miss = str(work) in misses
@@ -633,7 +782,8 @@ async def forum_phase(works: list[tuple[Path, dict]], args, report: list[str]) -
                 else:
                     continue
             if not tid:
-                done += 1
+                if not counted:
+                    done += 1
                 counts["searched"] += 1
                 from urllib.parse import quote
                 res = await _guarded(fetcher, f"{FORUM}/search.json?q={quote(q)}", args)
@@ -684,7 +834,7 @@ async def forum_phase(works: list[tuple[Path, dict]], args, report: list[str]) -
                 if args.apply:
                     lib.update_sidecar(work, {"source": src})
                 sc = lib.read_sidecar(work) or sc
-            else:
+            elif not counted:
                 done += 1
             topic = topic_cache.get(tid)
             if topic is None:
@@ -707,6 +857,8 @@ async def forum_phase(works: list[tuple[Path, dict]], args, report: list[str]) -
         await fetcher.close()
         if args.apply:
             MISSES_FILE.write_text(json.dumps(misses, ensure_ascii=False, indent=1), encoding="utf-8")
+            FILE_MISSES_FILE.write_text(json.dumps(sorted(file_misses), ensure_ascii=False, indent=1),
+                                        encoding="utf-8")
     return counts
 
 
@@ -788,15 +940,19 @@ async def fuzzy_search(fetcher, work: Path, title: str, owner: str, args, report
 
 
 async def _guarded(fetcher, url: str, args):
-    """One request with the polite delay; a 429 waits a minute and retries once."""
-    for attempt in range(2):
+    """One request behind the forum gate; a 429 pauses the gate for its
+    Retry-After and tries again (discourse.RETRY_429 times)."""
+    for attempt in range(discourse.RETRY_429 + 1):
         try:
-            await asyncio.sleep(args.delay)
+            if not getattr(fetcher, "gated", False):
+                wait = discourse._reserve_slot("/search.json" in url)
+                if wait > 0:
+                    await asyncio.sleep(wait)
             return await fetcher.get_json(url)
-        except RuntimeError as e:
-            if "429" in str(e) and attempt == 0:
-                print("  rate limited — sleeping 60s", flush=True)
-                await asyncio.sleep(60)
+        except RateLimited as e:
+            if attempt < discourse.RETRY_429:
+                print(f"  rate limited — waiting {e.seconds:.0f}s", flush=True)
+                discourse._pause(e.seconds)
                 continue
             print(f"  {url}: {e}", flush=True)
             return None
@@ -822,13 +978,16 @@ def main() -> None:
     ap.add_argument("--local-tags", action="store_true",
                     help="add source-<site> / pack-<bundle> / len-* tags derived offline")
     ap.add_argument("--limit", type=int, default=0, help="max forum lookups this run")
-    ap.add_argument("--delay", type=float, default=1.5, help="seconds between forum requests")
+    ap.add_argument("--search-files", action="store_true",
+                    help="search the forum for each topic-less work's script file name (see above)")
+    ap.add_argument("--delay", type=float, default=1.5, help="seconds between forum requests (at least 1)")
     ap.add_argument("--only", default="", help="only work folders whose name contains this")
     ap.add_argument("--cdp-port", type=int, default=9223)
     ap.add_argument("--api-port", type=int, default=9172)
     ap.add_argument("--report", default=str(ROOT / f"_backfill_sidecars_{STAMP}.md"))
     args = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
+    discourse.MIN_INTERVAL_S = max(discourse.MIN_INTERVAL_S, args.delay)
 
     roots = [Path(r) for r in args.roots] if args.roots else lib.library_roots()
     pairs = load_pairs()
@@ -879,7 +1038,7 @@ def main() -> None:
             works.append((work, merged))
     report.append(f"offline: {counts}")
     print(f"offline: {counts}", flush=True)
-    if args.forum or args.search or args.search_loose or args.search_fuzzy:
+    if args.forum or args.search or args.search_loose or args.search_fuzzy or args.search_files:
         fc = asyncio.run(forum_phase(works, args, report))
         report.append(f"forum: {fc}")
         print(f"forum: {fc}", flush=True)

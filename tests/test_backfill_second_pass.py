@@ -135,3 +135,30 @@ def test_local_tags_len_from_any_script_when_names_do_not_match(tmp_path):
     actions = [{"at": 0, "pos": 0}, {"at": 3 * 60 * 1000, "pos": 100}]
     (w / "Other Title 1080P.funscript").write_text(json.dumps({"actions": actions}), encoding="utf-8")
     assert bf.local_tags(w, {"tags": [], "variants": []}, None, "") == ["len-2-5"]
+
+
+# ── --search-files: the script's own file name ──
+
+def test_script_file_names_prefer_the_posts_names_and_the_main_axis(tmp_path):
+    (tmp_path / "Sample Work.funscript").write_text("{}")
+    (tmp_path / "Sample Work.surge.funscript").write_text("{}")
+    (tmp_path / "0f3e9a7c21b84d5e6f708192a3b4c5d6.funscript").write_text("{}")
+    pair = {"items": [{"id": "s2", "group": "Alt 1"}, {"id": "s1", "group": "Main"}, {"id": "v1"}],
+            "original_filenames": {"s1": "sample-work_v2.funscript", "s2": "sample-work_soft.funscript",
+                                   "v1": "sample-work_1080p.mp4"}}
+    names = bf.script_file_names(tmp_path, pair)
+    assert names[:2] == ["sample-work_v2.funscript", "sample-work_soft.funscript"]
+    assert "Sample Work.funscript" in names
+    assert names.index("Sample Work.funscript") < names.index("Sample Work.surge.funscript")
+    assert not any(n.startswith("0f3e9a7c") for n in names)
+
+
+def test_file_hits_need_the_exact_attachment_name():
+    res = {"posts": [
+        {"topic_id": 1, "blurb": 'Here: <span class="search-highlight">sample-work</span>_v2.funscript (28 KB)'},
+        {"topic_id": 2, "blurb": "my-sample-work_v2.funscript (28 KB)"},
+        {"topic_id": 3, "blurb": "nothing relevant"},
+        {"topic_id": 4, "blurb": "SAMPLE-WORK_V2.funscript &amp; more"},
+    ]}
+    assert bf.file_hits(res, "sample-work_v2.funscript") == {1, 4}
+    assert bf.file_hits({"posts": []}, "x.funscript") == set()

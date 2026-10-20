@@ -32,6 +32,7 @@ MOOV_CAP = 16 * 1024 * 1024        # never pull a moov bigger than this
 MAX_HOPS = 4                       # atom headers to chase past mdat/free
 
 VIDEO_EXTS = (".mp4", ".m4v", ".mov", ".webm", ".mkv")
+_MAX_AT_MS = 24 * 3600 * 1000      # a later "action" is a broken point, not the length
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +58,7 @@ def funscript_info(data: bytes) -> dict[str, Any]:
                 at = int(a.get("at", 0))
             except Exception:
                 continue
-            if at > last_ms:
+            if last_ms < at <= _MAX_AT_MS:
                 last_ms = at
     # Multi-axis "combined" files keep their actions under axes[].actions
     # (the top-level actions list is empty); the span is the latest of all.
@@ -69,7 +70,7 @@ def funscript_info(data: bytes) -> dict[str, Any]:
                 at = int(a.get("at", 0))
             except Exception:
                 continue
-            if at > last_ms:
+            if last_ms < at <= _MAX_AT_MS:
                 last_ms = at
     if last_ms > 0:
         out["duration"] = last_ms / 1000.0

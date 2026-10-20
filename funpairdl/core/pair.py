@@ -161,6 +161,9 @@ class Pair:
     # names — a download of the same name overwrote the library's script,
     # and a same-named larger file passed for this item already downloaded.
     foreign_files: list[str] = field(default_factory=list)
+    # Links in the post nothing downloads (paid / store pages):
+    # [{url, label, note, host}], written to funlib.json as other_links.
+    other_links: list[dict] = field(default_factory=list)
 
     @property
     def total_bytes(self) -> int:
@@ -226,6 +229,7 @@ class Pair:
             "bundle_plan": dict(self.bundle_plan),
             "source_url": self.source_url,
             "foreign_files": list(self.foreign_files),
+            "other_links": [dict(o) for o in self.other_links],
             "error_message": self.error_message,
             "items": [i.to_dict() for i in self.items],
         }
@@ -246,6 +250,7 @@ class Pair:
             bundle_plan=dict(d.get("bundle_plan") or {}),
             source_url=d.get("source_url", "") or "",
             foreign_files=[str(n) for n in (d.get("foreign_files") or [])],
+            other_links=[dict(o) for o in (d.get("other_links") or []) if isinstance(o, dict) and o.get("url")],
             error_message=d.get("error_message", ""),
         )
         pair.items = [PairItem.from_dict(i) for i in d.get("items", [])]

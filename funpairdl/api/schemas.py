@@ -110,6 +110,15 @@ class BundlePlanRequest(BaseModel):
     scripts: list[BundleFileSpec] = []
 
 
+class OtherLinkSpec(BaseModel):
+    """A link in the post nothing downloads (paid / store / membership
+    page), kept in the work's funlib.json as ``other_links``."""
+    url: str
+    label: str = ""
+    note: str = ""   # what the poster wrote next to it
+    host: str = ""
+
+
 class AddPairRequest(BaseModel):
     """Request to add a video+script pair to the download queue."""
     name: str
@@ -129,6 +138,7 @@ class AddPairRequest(BaseModel):
     auto_rename: bool = True  # Whether to rename files to pair name after download
     eroscripts_cookies: str = ""  # Sent by extension for authenticated downloads
     source_url: str = ""  # the forum topic this was sent from (topic index)
+    other_links: list[OtherLinkSpec] | None = None  # see OtherLinkSpec
     # An existing work folder to download INTO (the library already holds
     # the video): scripts are reconciled into it as new axes / variants.
     merge_into: str = ""

@@ -210,6 +210,16 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Skip files the library already has:", self.skip_identical_check)
 
+        self.repair_scripts_check = QCheckBox()
+        self.repair_scripts_check.setChecked(getattr(self.settings, "repair_funscripts", True))
+        self.repair_scripts_check.setToolTip(
+            "A downloaded script with a few broken points (a negative or absurd "
+            "time, a position outside 0-100, actions out of order) is fixed in "
+            "place: those points are dropped or clamped. Off: only logged. A file "
+            "that is no script at all (an HTML page) is always downloaded again."
+        )
+        form.addRow("Repair broken points in downloaded scripts:", self.repair_scripts_check)
+
         self.dead_video_combo = QComboBox()
         self.dead_video_combo.addItem("Delete the post (don't send, close its tab)", "delete")
         self.dead_video_combo.addItem("Keep it — download the scripts anyway", "keep")
@@ -330,6 +340,7 @@ class SettingsDialog(QDialog):
         s.collect_other_authors = self.other_authors_check.isChecked()
         s.merge_into_library = self.merge_library_check.isChecked()
         s.batch_skip_identical = self.skip_identical_check.isChecked()
+        s.repair_funscripts = self.repair_scripts_check.isChecked()
         s.dead_video_action = self.dead_video_combo.currentData() or "delete"
         s.vr_versions = self.vr_versions_combo.currentData() or "flat"
 

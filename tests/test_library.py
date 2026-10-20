@@ -157,7 +157,7 @@ def test_write_and_read_sidecar_utf8_no_bom(tmp_path):
     p = lib.write_sidecar(tmp_path, {"title": "样本"})
     raw = p.read_bytes()
     assert not raw.startswith(b"\xef\xbb\xbf")
-    assert lib.read_sidecar(tmp_path) == {"title": "样本", "version": 2}
+    assert lib.read_sidecar(tmp_path) == {"title": "样本", "version": 3}
     (tmp_path / "funlib.json").write_text("not json", encoding="utf-8")
     assert lib.read_sidecar(tmp_path) is None
 
@@ -432,3 +432,29 @@ def test_a_download_into_a_cloud_work_waits_for_it_to_be_local(tmp_path, pulls):
     else:
         assert seen == [] and pair.state == PairState.FAILED
         assert pair.items[0].state == ItemState.FAILED and lib.is_link(root / "Cloud Work")
+
+
+# ── other_links: what the post links to but nothing downloads ──
+
+def test_other_links_are_cleaned_and_merged_by_url():
+    links = [{"url": "https://www.patreon.com/posts/sample-1", "label": "Full", "note": "", "host": "patreon.com"},
+             {"url": "https://www.patreon.com/posts/sample-1", "label": "dup"},
+             {"url": "javascript:alert(1)"}, "junk", {"label": "no url"}]
+    assert lib.clean_other_links(links) == [
+        {"url": "https://www.patreon.com/posts/sample-1", "label": "Full", "host": "patreon.com"}]
+    merged = lib.merge_other_links(
+        [{"url": "https://a.example/1", "label": "Old"}],
+        [{"url": "https://a.example/1", "label": "New", "note": "4K"}, {"url": "https://b.example/2"}])
+    assert merged == [{"url": "https://a.example/1", "label": "Old", "note": "4K"}, {"url": "https://b.example/2"}]
+
+
+def test_sidecar_carries_other_links_and_merge_keeps_both():
+    from funpairdl.core.pair import Pair
+    pair = Pair(name="Sample Work", source_url="https://discuss.eroscripts.com/t/sample/123",
+                other_links=[{"url": "https://www.dlsite.com/maniax/work/=/product_id/RJ0.html", "label": "DLsite"}])
+    sc = lib.sidecar_from_pair(pair, [])
+    assert sc["other_links"] == [{"url": "https://www.dlsite.com/maniax/work/=/product_id/RJ0.html", "label": "DLsite"}]
+    again = lib.merge_sidecar(sc, {"other_links": [{"url": "https://www.patreon.com/posts/x-2"}]})
+    assert [o["url"] for o in again["other_links"]] == [
+        "https://www.dlsite.com/maniax/work/=/product_id/RJ0.html", "https://www.patreon.com/posts/x-2"]
+    assert Pair.from_dict(pair.to_dict()).other_links == pair.other_links

@@ -562,7 +562,7 @@ class TestSidecar:
         _organize(pair)
 
         sc = _sidecar(tmp_path)
-        assert sc["version"] == 2
+        assert sc["version"] == 3
         assert sc["title"] == "(Casey Sample) Demo Load"
         assert sc["author"] == "Casey Sample"
         assert sc["source"] == {"site": "eroscripts", "url": pair.source_url, "topic_id": 12345}

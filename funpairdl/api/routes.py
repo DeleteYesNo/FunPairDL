@@ -119,6 +119,7 @@ async def add_pair(req: AddPairRequest) -> dict:
         alternates=req.alternates,
         source_url=req.source_url,
         merge_into=req.merge_into,
+        other_links=[o.model_dump() for o in (req.other_links or [])],
     )
 
     logger.info("Pair added via API: %s (%d items)", pair.name, len(pair.items))

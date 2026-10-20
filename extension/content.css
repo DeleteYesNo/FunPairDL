@@ -898,3 +898,99 @@
   font-size: 11px; color: #9fd8e3; padding: 4px 6px 6px;
   border-bottom: 1px solid #2a3350; margin-bottom: 4px;
 }
+
+/* What the poster wrote next to a link ("syncs better", "to buy") */
+.funpairdl-note {
+  font-size: 10px;
+  color: #c9b27c;
+  font-style: italic;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Opening words of the reply a comment group came from */
+.funpairdl-group-excerpt {
+  font-size: 11px;
+  color: #8f9bb0;
+  margin: 0 8px 4px 22px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Paste-a-link row and the post's other (not downloaded) links */
+.funpairdl-extras {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed #2a2a3e;
+  font-size: 12px;
+}
+
+.funpairdl-paste-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.funpairdl-paste-url {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: #12192e;
+  color: #e0e0e0;
+  border: 1px solid #2a2a3e;
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
+.funpairdl-paste-target {
+  flex: 0 1 auto;
+  max-width: 160px;
+  background: #12192e;
+  color: #e0e0e0;
+  border: 1px solid #2a2a3e;
+  border-radius: 4px;
+  padding: 4px;
+  font-size: 12px;
+}
+
+.funpairdl-paste-row .funpairdl-paste-add {
+  flex: 0 0 auto;
+  width: auto;
+  margin: 0;
+  padding: 5px 12px;
+}
+
+.funpairdl-paste-msg {
+  margin-top: 4px;
+  color: #e0a800;
+  font-size: 11px;
+}
+
+.funpairdl-other-links {
+  margin-top: 8px;
+  color: #b8c4d6;
+}
+
+.funpairdl-other-links summary {
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.funpairdl-other-links ul {
+  margin: 6px 0 0 18px;
+  padding: 0;
+}
+
+.funpairdl-other-links li {
+  margin: 3px 0;
+  overflow-wrap: anywhere;
+}
+
+.funpairdl-other-links a {
+  color: #7fb3ea;
+}

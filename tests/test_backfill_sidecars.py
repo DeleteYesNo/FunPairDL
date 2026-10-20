@@ -80,7 +80,7 @@ def test_offline_sidecar_from_pair_topic_index_and_log(tmp_path):
     assert d2["source"]["topic_id"] == 777 and "author" not in d2
 
     d3 = bf.offline_sidecar(w3, by_folder, by_title, topic_by_pair, log_topics)
-    assert d3 == {"version": 2, "title": "Orphan",
+    assert d3 == {"version": 3, "title": "Orphan",
                   "variants": [{"label": "Main", "primary": True, "video": "Orphan.mp4",
                                 "files": {"L0": "Orphan.funscript"}}]}
 

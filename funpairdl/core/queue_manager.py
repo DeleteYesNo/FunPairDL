@@ -275,6 +275,7 @@ class QueueManager:
         source_url: str = "",
         merge_into: str = "",
         alternates: dict[str, list[str]] | None = None,
+        other_links: list[dict] | None = None,
     ) -> Pair:
         """Add a Pair to the queue.
 
@@ -313,7 +314,8 @@ class QueueManager:
             }]
 
         pair = Pair(name=name, preferred_resolution=preferred_resolution, auto_rename=auto_rename,
-                    source_url=(source_url or "").strip())
+                    source_url=(source_url or "").strip(),
+                    other_links=lib.clean_other_links(other_links))
 
         folder_name = sanitize_filename(self._clean_title(name))
         # Caller-supplied override (e.g. Pixeldrain picker) lets a single
@@ -486,6 +488,7 @@ class QueueManager:
         existing.alt_group_config = dict(fresh.alt_group_config)
         existing.bundle_plan = dict(fresh.bundle_plan)
         existing.source_url = fresh.source_url or existing.source_url
+        existing.other_links = lib.merge_other_links(existing.other_links, fresh.other_links)
         existing.preferred_resolution = fresh.preferred_resolution
         existing.auto_rename = fresh.auto_rename
         existing.error_message = ""
@@ -1775,6 +1778,9 @@ class QueueManager:
             # on disk) whose MP4 box chain does not fit the file is a broken
             # download: drop it and let the next round fetch it again.
             await self._fail_broken_videos(pair, output_dir)
+            # Same for a script that is no script (an HTML page saved under
+            # its name); one with a few broken points is repaired in place.
+            await self._check_scripts(pair, output_dir)
 
         # Force-sync bytes for completed items: ensure downloaded_bytes ==
         # total_bytes so progress never shows a stale mid-download percentage.
@@ -2934,7 +2940,8 @@ class QueueManager:
         new_pairs: list[Pair] = []
         for g in groups:
             new_pair = Pair(name=g["name"], preferred_resolution=pair.preferred_resolution,
-                            source_url=pair.source_url)
+                            source_url=pair.source_url,
+                            other_links=[dict(o) for o in pair.other_links])
             new_pair.output_dir = str(self._work_dir_for(
                 self.download_dir / g["name"],
                 [v.duration for v in g["videos"] if v.duration]))
@@ -4106,6 +4113,62 @@ class QueueManager:
             item.downloaded_bytes = 0
             if self.on_item_updated:
                 self.on_item_updated(item)
+
+    async def _check_scripts(self, pair: Pair, output_dir: Path) -> None:
+        """Check every finished .funscript of this pair once (see
+        utils/funscript_check): a file that is no script fails its item for
+        the next round; broken points are dropped when repair_funscripts is
+        on (the default), else only logged."""
+        from funpairdl.persistence.settings import Settings
+        from funpairdl.utils.funscript_check import check_funscript
+
+        foreign = {n.lower() for n in (pair.foreign_files or [])}
+        checked: set = pair.__dict__.setdefault("_scripts_checked", set())
+        video_secs = max((i.duration for i in pair.items
+                          if i.file_type == FileType.VIDEO and i.duration), default=0.0)
+        repair = None
+        for item in pair.items:
+            if item.state != ItemState.COMPLETED or not item.filename.lower().endswith(".funscript"):
+                continue
+            if item.filename.lower() in foreign:
+                continue
+            path = output_dir / item.filename
+            try:
+                data = await asyncio.to_thread(path.read_bytes)
+            except OSError:
+                continue
+            sig = (item.id, item.filename, len(data))
+            if sig in checked:
+                continue
+            checked.add(sig)
+            res = check_funscript(data, video_secs or None)
+            if res.fatal:
+                logger.error("Broken script, will retry: %s (%s)", item.filename, res.fatal)
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                item.state = ItemState.FAILED
+                item.error_message = f"Broken script ({res.fatal})"
+                item.downloaded_bytes = 0
+                if self.on_item_updated:
+                    self.on_item_updated(item)
+                continue
+            if res.fixed is not None:
+                if repair is None:
+                    repair = bool(getattr(Settings.load(), "repair_funscripts", True))
+                if repair:
+                    try:
+                        tmp = path.with_name(path.name + ".fixing")
+                        await asyncio.to_thread(tmp.write_bytes, res.fixed)
+                        await asyncio.to_thread(os.replace, tmp, path)
+                        checked.add((item.id, item.filename, len(res.fixed)))
+                        logger.warning("Script repaired: %s (%s)", item.filename, "; ".join(res.notes))
+                    except OSError as e:
+                        logger.error("Script repair failed for %s: %s", item.filename, e)
+                    continue
+            if res.notes:
+                logger.warning("Script check: %s (%s)", item.filename, "; ".join(res.notes))
 
     async def _recover_complete_items(self, pair: Pair, output_dir: Path) -> None:
         """Recover items whose data is already fully on disk.

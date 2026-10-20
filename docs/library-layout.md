@@ -1,4 +1,4 @@
-# 媒體庫版面與 `funlib.json` 約定（v2，2026-09-18 修訂）
+# 媒體庫版面與 `funlib.json` 約定（v3，2026-10-20 修訂：新增 `other_links`）
 
 FunPairDL（下載、整理）與 FunLib（索引、播放）之間唯一的介面就是磁碟上的資料夾版面與這份約定。兩個 repo 各放一份相同內容；改動時**兩邊一起改**並把 `version` 加一。
 
@@ -44,7 +44,7 @@ FunPairDL（下載、整理）與 FunLib（索引、播放）之間唯一的介�
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "title": "(Theobrobine) Mockgame - Lina X Demo",
   "author": "Theobrobine",
   "posted_by": "scripterName",
@@ -68,13 +68,17 @@ FunPairDL（下載、整理）與 FunLib（索引、播放）之間唯一的介�
     { "label": "Remake", "author": "otherScripter", "video": "Work (Remake).mp4",
       "files": { "L0": "Work (Remake).funscript" } }
   ],
+  "other_links": [
+    { "url": "https://www.patreon.com/posts/example-123", "label": "Full version",
+      "note": "4K + extra scenes", "host": "patreon.com" }
+  ],
   "notes": ""
 }
 ```
 
 | 欄位 | 型別 | 寫入者從哪來 | FunLib 對應 |
 |---|---|---|---|
-| `version` | 整數 | 目前 2 | 不認識的版本照最新已知版本解讀並記 log |
+| `version` | 整數 | 目前 3（v3 新增 `other_links`；v2 檔照讀） | 不認識的版本照最新已知版本解讀並記 log |
 | `title` | 字串 | 帖子標題 | 只作參考，列名仍用檔名 |
 | `author` | 字串 | 標題的 `(Author)` 前綴（作品／動畫作者），**論壇資料不會覆蓋** | `threadOPName` |
 | `author_url` | 字串 | 保留，目前不寫 | 目前不使用 |
@@ -94,6 +98,7 @@ FunPairDL（下載、整理）與 FunLib（索引、播放）之間唯一的介�
 | `variants[].inherit_axes` | 布林，預設 true | 只想單軸播的變體設 false | `inheritAxes`：播放時缺的軸從主版本補 |
 | `variants[].author` | 字串 | 該套腳本的作者（面板／帖子上的腳本作者；可省略） | 變體選單標示「哪個作者是哪個」 |
 | `variants[].video` | 字串 | 該變體自己的影片檔名（相對作品資料夾；省略＝用作品的影片） | 該變體的列用這支影片與它的縮圖；媒體庫與播放器切換變體時一併切換 |
+| `other_links[]` | 陣列 `{url, label?, note?, host?}` | 帖子（OP 與 OP 後續回覆）裡下載器不抓的連結：Patreon、FANBOX、Gumroad、DLsite、DMM 等付費／商店／會員頁。`label` 是連結文字，`note` 是發帖者寫在連結旁的說明。依 url 合併，不覆蓋既有項目 | `otherLinks`：媒體庫卡片的 🛒 按鈕展開連結清單 |
 
 ## FunLib 的資料模型與推導規則
 

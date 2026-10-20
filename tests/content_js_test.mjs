@@ -780,6 +780,65 @@ check("external script row shows its host", extRow.includes('<span class="funpai
   check("prefs: other authors from settings", p.collect_other_authors, false);
 }
 
+// ── forum gate: Retry-After ──
+{
+  const now = Date.parse("2026-10-20T00:00:00Z");
+  check("retry-after: seconds", ctx._retryAfterMs("12", now), 12000);
+  check("retry-after: absent → default", ctx._retryAfterMs(null, now), 30000);
+  check("retry-after: capped", ctx._retryAfterMs("99999", now), 180000);
+  check("retry-after: http date", ctx._retryAfterMs("Tue, 20 Oct 2026 00:00:45 GMT", now), 45000);
+  check("retry-after: junk → 1s floor", ctx._retryAfterMs("soon", now), 1000);
+}
+
+// ── whole threads: the post ids still to read ──
+{
+  const stream = Array.from({ length: 45 }, (_, i) => 100 + i);
+  const have = stream.slice(0, 20).map((id) => ({ id }));
+  const pages = ctx._remainingPostPages(stream, have);
+  check("thread pages: two more pages", pages.length, 2);
+  check("thread pages: first unread id", pages[0][0], 120);
+  check("thread pages: page size 20", pages[0].length, 20);
+  check("thread pages: the rest", pages[1].length, 5);
+  check("thread pages: cap honoured", ctx._remainingPostPages(stream, have, 20, 30).flat().length, 10);
+  check("thread pages: nothing left", ctx._remainingPostPages(stream.slice(0, 3), have).length, 0);
+}
+
+// ── link notes: what the poster wrote next to a link ──
+check("note: kept", ctx._cleanLinkNote(" DMM link (to buy): "), "DMM link (to buy)");
+check("note: parenthesised after the link", ctx._cleanLinkNote(" (syncs much better imo)"), "syncs much better imo");
+check("note: a bare container word says nothing", ctx._cleanLinkNote("Video:"), "");
+check("note: a host name says nothing", ctx._cleanLinkNote(" - Mega"), "");
+check("note: punctuation only", ctx._cleanLinkNote(" | "), "");
+check("note: urls dropped", ctx._cleanLinkNote("older cut https://x.example/abc"), "older cut");
+check("note: \"mirror\" alone says nothing", ctx._cleanLinkNote("Mirror:"), "");
+check("note: an attachment size says nothing", ctx._cleanLinkNote(" (152.3 KB)"), "");
+check("note: size dropped, words kept", ctx._cleanLinkNote(" (1.2 MB) soft version"), "soft version");
+check("note: thanks says nothing", ctx._cleanLinkNote("Thanks!"), "");
+check("note: long note cut", ctx._cleanLinkNote("a".repeat(300)).length, 120);
+
+// ── other links: paid / store pages kept for the record ──
+check("other link: patreon post", ctx._otherLinkHost("https://www.patreon.com/posts/sample-123"), "patreon.com");
+check("other link: dlsite subdomain", ctx._otherLinkHost("https://www.dlsite.com/maniax/work/=/product_id/RJ000.html"), "dlsite.com");
+check("other link: itch page", ctx._otherLinkHost("https://someone.itch.io/sample-game"), "itch.io");
+check("other link: a FANBOX post downloads", ctx._otherLinkHost("https://creator.fanbox.cc/posts/123"), "");
+check("other link: a FANBOX front page is kept", ctx._otherLinkHost("https://creator.fanbox.cc/"), "fanbox.cc");
+check("other link: pixeldrain is no other link", ctx._otherLinkHost("https://pixeldrain.com/u/abc"), "");
+
+// ── a pasted link becomes a row ──
+{
+  const v = ctx._pastedRow(" https://pixeldrain.com/u/abc123 ");
+  check("paste: file locker is a video row", v.kind, "video");
+  check("paste: trimmed", v.item.url, "https://pixeldrain.com/u/abc123");
+  check("paste: marked", v.item.pasted, true);
+  const s = ctx._pastedRow("https://example.com/files/Sample%20Work.surge.funscript?x=1");
+  check("paste: .funscript is a script row", s.kind, "script");
+  check("paste: script name decoded", s.item.filename, "Sample Work.surge.funscript");
+  check("paste: axis read", s.item.axis, "surge");
+  check("paste: airscripts share is a script", ctx._pastedRow("https://airscripts.fun/s/AbC123").kind, "script");
+  check("paste: no url", ctx._pastedRow("not a link"), null);
+  check("paste: no scheme", ctx._pastedRow("pixeldrain.com/u/abc"), null);
+}
+
 if (failures) {
   console.error(`\n${failures} assertion(s) failed`);
   process.exit(1);

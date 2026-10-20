@@ -144,6 +144,10 @@ class Settings:
     # Scripts identical to what the work already has are excluded from the
     # send and listed once in the batch overlay.
     batch_skip_identical: bool = True
+    # A downloaded script with a few broken points (negative / absurd time,
+    # position outside 0-100, out of order): drop / clamp / sort them in
+    # place. Off = only logged. A file that is no script always retries.
+    repair_funscripts: bool = True
     # A post whose every video link is gone (404, deleted) or paid-only:
     # "delete" = drop the post — it isn't sent and its tab is closed when the
     # batch is sent; "keep" = send it anyway, the scripts without a video.
