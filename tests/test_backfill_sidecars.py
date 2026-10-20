@@ -132,6 +132,22 @@ def test_cli_apply_writes_a_repair_even_when_nothing_else_changed(tmp_path, monk
     assert sc["author"] == "Anna" and sc["posted_by"] == "opname" and "author_url" not in sc
 
 
+def test_cli_skips_cloud_works(tmp_path, monkeypatch):
+    import sys
+    root = tmp_path / "lib"
+    local = _work(root, "Local", {"Local.mp4": b"V", "Local.funscript": b"S"})
+    cloud = _work(root, "Cloud", {"Cloud.mp4": b"V", "Cloud.funscript": b"S"})
+    monkeypatch.setattr(bf, "load_pairs", lambda: [])
+    monkeypatch.setattr(bf, "load_topic_index", lambda: {})
+    monkeypatch.setattr(bf, "load_log_topics", lambda: {})
+    monkeypatch.setattr(bf.lib, "is_link", lambda p: p.name == "Cloud")
+    monkeypatch.setattr(sys, "argv", ["x", "--roots", str(root), "--report", str(tmp_path / "r.md"), "--apply"])
+    bf.main()
+    assert (local / "funlib.json").exists()
+    assert not (cloud / "funlib.json").exists()
+    assert "cloud_skipped': 1" in (tmp_path / "r.md").read_text(encoding="utf-8")
+
+
 def test_cli_dry_run_writes_nothing_and_apply_writes(tmp_path, monkeypatch):
     import sys
     root = tmp_path / "lib"

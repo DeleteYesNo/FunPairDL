@@ -57,6 +57,9 @@ saved cookies directly (only safe while the app is NOT running). Either way
 they share utils/discourse's gate: one at a time, ``--delay`` apart (at
 least 1 s), searches 2 s + jitter apart, and a 429 waits out Retry-After.
 
+Cloud-tier works (folders that are junctions into the cloud mount) are
+skipped entirely: never listed, read or written.
+
 DRY-RUN by default; ``--apply`` writes. Safe to re-run.
 
     python tools/backfill_funlib_sidecars.py --roots F:\\Lib H:\\Lib --apply
@@ -553,7 +556,8 @@ def file_hits(res: dict | None, name: str) -> set[int]:
 
 
 async def file_search(fetcher, work: Path, title: str, pair: dict | None, args, report, counts):
-    """(hit topic dict | None, ambiguous) for a work, by its script's file name."""
+    """(hit topic dict | None, ambiguous) for a work, by its script's file
+    name; ambiguous is None when a request failed (nothing was learned)."""
     from urllib.parse import quote
     key = QueueManager._title_key(title)
     for name in script_file_names(work, pair)[:FILE_SEARCH_NAMES]:
@@ -561,7 +565,7 @@ async def file_search(fetcher, work: Path, title: str, pair: dict | None, args, 
         res = await _guarded(fetcher, f"{FORUM}/search.json?q={quote(stem)}", args)
         if res is None:
             counts["errors"] += 1
-            return None, False
+            return None, None
         topics = {t.get("id"): t for t in res.get("topics") or [] if isinstance(t, dict)}
         certain = file_hits(res, name)
         if len(certain) == 1:
@@ -740,6 +744,8 @@ async def forum_phase(works: list[tuple[Path, dict]], args, report: list[str]) -
                     sc = lib.read_sidecar(work) or sc
                     misses.pop(str(work), None)
                     file_misses.discard(str(work))
+                elif ambiguous is None:
+                    continue                      # request failed: try again next run
                 else:
                     file_misses.add(str(work))
                     if ambiguous:
@@ -1006,6 +1012,12 @@ def main() -> None:
     for root in roots:
         for work in lib.iter_work_dirs(root):
             if args.only and args.only.lower() not in work.name.lower():
+                continue
+            if lib.is_link(work):
+                # A cloud-tier work (junction into the cloud mount): reading it
+                # is a cloud round trip per folder, writing its sidecar is an
+                # upload, and FunLib keeps the metadata it had while local.
+                counts["cloud_skipped"] = counts.get("cloud_skipped", 0) + 1
                 continue
             if not lib.has_media(work):
                 counts["not_a_work"] = counts.get("not_a_work", 0) + 1
