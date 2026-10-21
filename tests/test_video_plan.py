@@ -690,3 +690,29 @@ class TestSameBytes:
             _v("https://h/b", "Two.mp4", size=500_000),
         ])
         assert res["roles"] == {"https://h/a": "chosen", "https://h/b": "chosen"}
+
+class TestCharacterRenders:
+    """A scripter's post links each character's render of one animation:
+    one length, names that differ by the character."""
+
+    def _post(self, title):
+        return plan_videos([
+            _v("https://h/video/1/demo-ivy-garden-run-no-wm-4k/", "[DemoStudio] Ivy - Garden Run: NO WM - 4K 60 FPS.mp4",
+               height=2160, size=33_000_000, duration=63.0),
+            _v("https://h/video/2/demo-rowan-garden-run-no-wm-4k/", "[DemoStudio] Rowan - Garden Run: NO WM - 4K 60 FPS.mp4",
+               height=2160, size=33_800_000, duration=63.0),
+            _v("https://h/video/3/marigold-demostudio-4k/", "Marigold [DemoStudio] 4K.mp4",
+               height=2160, size=32_800_000, duration=63.0),
+        ], Prefs(pick_mode="smallest", min_resolution="1080"), credits=["DemoStudio"], title=title,
+            scripts=[{"name": "Ivy Reverse Cowgirl Animation (4K).funscript", "duration": 63.0}])
+
+    def test_the_render_named_by_the_title_is_the_posts_video(self):
+        res = self._post('[DemoStudio] Ivy "Garden Run"')
+        assert res["roles"]["https://h/video/1/demo-ivy-garden-run-no-wm-4k/"] == "chosen"
+        # the smallest file, an unrelated name of that length, is no pick
+        assert res["roles"]["https://h/video/3/marigold-demostudio-4k/"] != "chosen"
+        assert res["roles"]["https://h/video/2/demo-rowan-garden-run-no-wm-4k/"] == "variant"
+
+    def test_a_title_no_link_carries_whole_leaves_the_size_rule(self):
+        res = self._post("[DemoStudio] Garden Collection")
+        assert res["roles"]["https://h/video/3/marigold-demostudio-4k/"] == "chosen"

@@ -414,12 +414,15 @@ def _qualifies(spec: VideoSpec, floor: str, top_height: int) -> bool:
 
 
 def _order(cands: list[VideoSpec], prefs: Prefs, pending: set[str] | None = None,
-           script_lens: tuple[float, ...] = ()) -> list[VideoSpec]:
+           script_lens: tuple[float, ...] = (),
+           title_core: frozenset[str] = frozenset()) -> list[VideoSpec]:
     """Best pick first. A dead link (failed probe) is never the pick while a
     live one exists; an unanswered ambiguity (`pending`) is never the pick —
     it rides last as a fallback until the user says what it is. A copy of
     the script's exact length goes before one a few seconds off (a trimmed
-    re-upload plays the script out of sync)."""
+    re-upload plays the script out of sync). A link named with every word
+    of the post's title goes before one that is not: one length under
+    other names may be another character's render, not a copy."""
     pending = pending or set()
 
     def fits(s: VideoSpec) -> bool:
@@ -440,15 +443,18 @@ def _order(cands: list[VideoSpec], prefs: Prefs, pending: set[str] | None = None
     def h_of(s: VideoSpec) -> int:
         return s.height or _height_from_name(s.stem)
 
+    def unnamed(s: VideoSpec) -> int:
+        return 0 if not title_core or title_core <= s.tokens else 1
+
     if prefs.pick_mode == "best_quality":
         def k(s: VideoSpec):
             return (1 if s.failed else 0, 1 if s.url in pending else 0, sync[id(s)],
-                    0 if _qualifies(s, prefs.min_resolution, top) else 1,
+                    0 if _qualifies(s, prefs.min_resolution, top) else 1, unnamed(s),
                     -h_of(s), -(s.size or 0), 0 if s.source == "OP" else 1, s.priority)
     else:
         def k(s: VideoSpec):
             return (1 if s.failed else 0, 1 if s.url in pending else 0, sync[id(s)],
-                    0 if _qualifies(s, prefs.min_resolution, top) else 1,
+                    0 if _qualifies(s, prefs.min_resolution, top) else 1, unnamed(s),
                     0 if s.size else 1, s.size or 0, 0 if s.source == "OP" else 1, s.priority)
     return sorted(cands, key=k)
 
@@ -717,12 +723,16 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
         in_pack = key.startswith("pack:")
         fmt_rank = _FORMAT_ORDER.get(prefs.vr_versions, _FORMAT_ORDER["flat"])
         # The render the setting prefers is the work's own; then the pack
-        # file (in a pack's group) or an OP link; then the plainest name.
+        # file (in a pack's group) or an OP link; then one that carries
+        # every word of the post's title (a scripter's post links each
+        # character render of one animation — Cissia, Sunna, Trigger — and
+        # the plainest name, "Trigger [Studio] 4K", was taken for the
+        # Cissia post's video); then the plainest name.
         ref = min(live, key=lambda v: (
             fmt_rank.index(v.fmt or "flat"),
             0 if ((v.pack if in_pack else v.source == "OP") or
                   not any((o.pack if in_pack else o.source == "OP") for o in live)) else 1,
-            len(v.tokens), v.priority))
+            0 if tc and tc <= v.tokens else 1, len(v.tokens), v.priority))
         # A reference of unknown length (a folder file, a host that gives
         # none) can't vouch that links of DIFFERENT lengths are all copies
         # of it: the one named most like it stands for its length, and a
@@ -779,7 +789,8 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
         for ckey, c in clusters.items():
             ordered = _order(c["members"], prefs,
                              {u for u, r in roles.items() if r == "ambiguous"},
-                             tuple(float(s.get("duration") or 0) for s in (scripts or []) if s.get("duration")))
+                             tuple(float(s.get("duration") or 0) for s in (scripts or []) if s.get("duration")),
+                             tc if any(tc <= m.tokens for m in c["members"]) else frozenset())
             chosen, rest = ordered[0], ordered[1:]
             is_primary = ckey == frozenset()
             if chosen.failed:
