@@ -1609,6 +1609,16 @@ let _cloakedCacheTopicId = null;
 let _cloakedCacheMapGen = -1;
 const _cloakedParseCache = new Map(); // postNumber → { videos, scripts, subGroups }
 
+// A reply quoting another post ("check this post" → the forum's quote card
+// of that topic, with its links) does not offer what it quotes: those links
+// belong to the quoted post. Parse a copy without the quote cards.
+function _unquoted(cookedEl) {
+  if (!cookedEl || !cookedEl.querySelector("aside.quote")) return cookedEl;
+  const copy = cookedEl.cloneNode(true);
+  copy.querySelectorAll("aside.quote").forEach((q) => q.remove());
+  return copy;
+}
+
 function _parseCloakedPost(pp) {
   const tid = _currentTopicId();
   if (tid !== _cloakedCacheTopicId || _LINK_MAP_GEN !== _cloakedCacheMapGen) {
@@ -1620,6 +1630,7 @@ function _parseCloakedPost(pp) {
   if (hit) return hit;
   const tempEl = document.createElement("div");
   tempEl.innerHTML = pp.cooked;
+  tempEl.querySelectorAll("aside.quote").forEach((q) => q.remove());
   const { videos, scripts } = extractLinksFromElement(tempEl, false);
   const entry = {
     videos, scripts,
@@ -1690,7 +1701,7 @@ function parseAllPosts(rootOverride, titleOverride, metaMapOverride) {
   for (let i = 0; i < posts.length; i++) {
     const { known, n: postNumber } = domNums[i];
     if (known) scannedPostNumbers.add(postNumber);
-    const el = posts[i].querySelector(".cooked");
+    const el = _unquoted(posts[i].querySelector(".cooked"));
     if (!el) continue;
     const isOP = i === opIdx;
     const { videos, scripts } = extractLinksFromElement(el, isOP);

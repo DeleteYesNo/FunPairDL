@@ -112,6 +112,17 @@ check("stray pack: a folder with a video of the post keeps its files",
   check("links: the host's video page still is", got.includes("https://www.pornhub.com/view_video.php?viewkey=abc123"), true);
 }
 
+// ── a reply's quote card of another topic offers none of its links ──
+{
+  const removed = [];
+  const copy = { querySelectorAll: (sel) => sel === "aside.quote" ? [{ remove: () => removed.push(1) }] : [] };
+  const quoting = { querySelector: (sel) => sel === "aside.quote" ? {} : null, cloneNode: () => copy };
+  check("quote: parsed from a copy", ctx._unquoted(quoting), copy);
+  check("quote: the quote card is gone from it", removed.length, 1);
+  const plain = { querySelector: () => null, cloneNode: () => { throw new Error("no copy needed"); } };
+  check("quote: a post without one is parsed as it is", ctx._unquoted(plain), plain);
+}
+
 // ── extractLinksFromElement: an AIRscripts share page is the post's script ──
 {
   const anchors = (hrefs) => ({
