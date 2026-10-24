@@ -46,6 +46,7 @@ class MainWindow(QMainWindow):
     sig_item_updated = Signal(str)
     sig_queue_changed = Signal()
     sig_quota_updated = Signal(str)
+    sig_low_space = Signal(object)
 
     def __init__(self, queue_manager: QueueManager, settings: Settings):
         super().__init__()
@@ -77,6 +78,10 @@ class MainWindow(QMainWindow):
         self.qm.on_pair_updated = self._on_pair_updated
         self.qm.on_item_updated = self._on_item_updated
         self.qm.on_queue_changed = self._on_queue_changed
+        self.qm.on_low_space = self._on_low_space
+        # The pump may have found the disk short before the window existed.
+        if self.qm.low_space:
+            self._show_low_space(self.qm.low_space)
 
         # Batch-overlay tab auto-close: the browser watches pair completion
         # to close topic tabs whose downloads have all finished.
@@ -193,6 +198,15 @@ class MainWindow(QMainWindow):
         # Status bar
         self.status_label = QLabel("Ready")
         self.statusBar().addWidget(self.status_label, 1)
+        # Shown while new downloads wait for disk space (QueueManager.low_space)
+        self.low_space_label = QLabel("")
+        self.low_space_label.setStyleSheet("color: #dc3545; margin-right: 6px;")
+        self.low_space_label.hide()
+        self.statusBar().addPermanentWidget(self.low_space_label)
+        self.low_space_btn = QPushButton("Download anyway")
+        self.low_space_btn.clicked.connect(self._on_download_anyway)
+        self.low_space_btn.hide()
+        self.statusBar().addPermanentWidget(self.low_space_btn)
         self.quota_label = QLabel("")
         self.quota_label.setStyleSheet("color: #888; margin-right: 12px;")
         self.statusBar().addPermanentWidget(self.quota_label)
@@ -314,6 +328,7 @@ class MainWindow(QMainWindow):
         self._queue_changed_timer.timeout.connect(self._refresh_all)
         self.sig_queue_changed.connect(self._on_queue_changed_debounced)
         self.sig_quota_updated.connect(self._on_quota_text)
+        self.sig_low_space.connect(self._show_low_space)
         # Flush pending updates immediately when switching to Downloads tab
         self.tabs.currentChanged.connect(self._on_main_tab_changed)
 
@@ -404,6 +419,9 @@ class MainWindow(QMainWindow):
 
     def _on_queue_changed(self):
         self.sig_queue_changed.emit()
+
+    def _on_low_space(self, info: dict | None):
+        self.sig_low_space.emit(info)
 
     # === GUI slots ===
 
@@ -801,6 +819,11 @@ class MainWindow(QMainWindow):
             self.show()
             self.activateWindow()
             self._open_pixeldrain_picker(initial_urls=urls)
+        elif self.qm.low_space and not self.qm.low_space_allowed:
+            # The "disk almost full" notice: show where "Download anyway" is.
+            self.show()
+            self.activateWindow()
+            self.tabs.setCurrentIndex(1)
 
     def _on_quit(self):
         """Quit gracefully, with a force-kill fallback if Qt event loop is stuck."""
@@ -860,6 +883,36 @@ class MainWindow(QMainWindow):
 
         text = "  |  ".join(parts) if parts else ""
         self.sig_quota_updated.emit(text)
+
+    # === Disk space ===
+
+    @Slot(object)
+    def _show_low_space(self, info: dict | None):
+        if not info:
+            self.low_space_label.hide()
+            self.low_space_btn.hide()
+            return
+        free = format_size(info["free"])
+        if self.qm.low_space_allowed:
+            self.low_space_label.setText(
+                f"{info['drive']} {free} free ({info['percent']:.0f}%) — downloading anyway")
+            self.low_space_btn.hide()
+        else:
+            self.low_space_label.setText(
+                f"{info['drive']} {free} free ({info['percent']:.0f}%, under "
+                f"{info['min_percent']}%) — new downloads wait")
+            self.low_space_btn.show()
+            if self.tray.isVisible():
+                self.tray.showMessage(
+                    "Download disk almost full",
+                    f"{info['drive']} has {free} free ({info['percent']:.0f}%). New downloads "
+                    "wait; click \"Download anyway\" in the window's status bar to go on.",
+                    QSystemTrayIcon.Warning, 10000,
+                )
+        self.low_space_label.show()
+
+    def _on_download_anyway(self):
+        self.qm.allow_low_space()
 
     @Slot(str)
     def _on_quota_text(self, text: str):

@@ -89,6 +89,19 @@ class SettingsDialog(QDialog):
         self.concurrent_pairs_spin.setToolTip("How many posts download simultaneously")
         form.addRow("Max concurrent downloads:", self.concurrent_pairs_spin)
 
+        # Free space a new download leaves on its disk
+        self.min_free_spin = QSpinBox()
+        self.min_free_spin.setRange(0, 50)
+        self.min_free_spin.setSuffix(" %")
+        self.min_free_spin.setSpecialValueText("Off")
+        self.min_free_spin.setValue(self.settings.min_free_space_percent)
+        self.min_free_spin.setToolTip(
+            "New downloads wait while the disk they write to has less free space "
+            "than this share of its size; the status bar then offers \"Download "
+            "anyway\". Off = never wait."
+        )
+        form.addRow("Keep free on download disk:", self.min_free_spin)
+
         # API port
         self.port_spin = QSpinBox()
         self.port_spin.setRange(1024, 65535)
@@ -323,6 +336,7 @@ class SettingsDialog(QDialog):
         s.reconcile_on_redownload = self.reconcile_check.isChecked()
         s.max_segments = self.segments_spin.value()
         s.max_concurrent_pairs = self.concurrent_pairs_spin.value()
+        s.min_free_space_percent = self.min_free_spin.value()
         s.api_port = self.port_spin.value()
         s.minimize_to_tray = self.tray_check.isChecked()
         s.cookies_from_browser = self.browser_edit.text()

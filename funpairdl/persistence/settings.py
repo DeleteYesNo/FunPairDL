@@ -156,6 +156,10 @@ class Settings:
     # "flat" = download the 2D one only, "vr" = the VR one only (passthrough
     # when that is all), "all" = every render, as variants of the work.
     vr_versions: str = "flat"
+    # New downloads wait while the disk they write to has less than this
+    # share of its size free (0 = never); the window offers "Download
+    # anyway", which holds until the disk has room again.
+    min_free_space_percent: int = 15
 
     @classmethod
     def load(cls, path: Path = CONFIG_FILE) -> Settings:

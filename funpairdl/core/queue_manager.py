@@ -29,6 +29,7 @@ from funpairdl.core.pair import (
 from funpairdl.providers.base import ResolvedFile
 from funpairdl.providers.registry import ProviderRegistry
 from funpairdl.core import library as lib
+from funpairdl.utils.disk_space import drive_usage
 from funpairdl.utils.filename import sanitize_filename
 from funpairdl.utils.url_parser import detect_provider
 
@@ -80,6 +81,13 @@ class QueueManager:
         self._pump_heartbeat: float = 0  # monotonic timestamp of last pump activity
         self._pump_wake = asyncio.Event()  # signal pump to check for new work
 
+        # The disk the next queued pair writes to, while less than
+        # Settings.min_free_space_percent of it is free: {"drive", "free",
+        # "total", "percent", "min_percent"}; None when there is room. New
+        # pairs wait unless the user allowed them (allow_low_space).
+        self.low_space: dict | None = None
+        self.low_space_allowed = False
+
         # Dedicated download thread with its own asyncio event loop
         # Keeps all download I/O off the Qt main thread
         self._dl_loop: asyncio.AbstractEventLoop | None = None
@@ -91,6 +99,9 @@ class QueueManager:
         self.on_item_updated: Callable[[PairItem], None] | None = None
         self.on_queue_changed: Callable[[], None] | None = None
         self.on_save_needed: Callable[[], None] | None = None
+        # Called with self.low_space when new downloads start or stop
+        # waiting for disk space, and when the user allows them anyway.
+        self.on_low_space: Callable[[dict | None], None] | None = None
         # Receives [pair_dict, ...] for pairs leaving the live queue
         # (app.py wires this to QueueStore.append_archive).
         self.archive_sink: Callable[[list[dict]], None] | None = None
@@ -956,6 +967,10 @@ class QueueManager:
                 next_pair = self._next_queued_pair()
                 if next_pair is None:
                     break
+                low = self._low_space_for(next_pair, settings.min_free_space_percent)
+                self._set_low_space(low)
+                if low and not self.low_space_allowed:
+                    break
 
                 # Mark DOWNLOADING *before* create_task so the same pair
                 # is never picked twice when max_concurrent_pairs > 1.
@@ -1528,6 +1543,48 @@ class QueueManager:
             if pair.state == PairState.QUEUED:
                 return pair
         return None
+
+    def _low_space_for(self, pair: Pair, min_percent: int) -> dict | None:
+        """The disk ``pair`` writes to, when less than ``min_percent`` of it
+        is free; None when there is room or the limit is off."""
+        if min_percent <= 0:
+            return None
+        target = pair.output_dir or str(self.download_dir)
+        usage = drive_usage(target)
+        if usage is None or usage.total <= 0:
+            return None
+        percent = usage.free * 100 / usage.total
+        if percent >= min_percent:
+            return None
+        return {"drive": Path(target).anchor or target, "free": usage.free, "total": usage.total,
+                "percent": round(percent, 1), "min_percent": min_percent}
+
+    def _set_low_space(self, info: dict | None) -> None:
+        """Record the pump's latest free-space check; tell the GUI when new
+        downloads start or stop waiting. Room again ends the user's
+        "download anyway", so the next shortage asks again."""
+        before = self.low_space
+        self.low_space = info
+        if info is None:
+            self.low_space_allowed = False
+        if (before is None) == (info is None) and (info is None or before["drive"] == info["drive"]):
+            return
+        if info:
+            logger.warning("%s has %.1f%% free (under %d%%): new downloads wait",
+                           info["drive"], info["percent"], info["min_percent"])
+        else:
+            logger.info("Disk has room again: new downloads go on")
+        if self.on_low_space:
+            self.on_low_space(info)
+
+    def allow_low_space(self) -> None:
+        """The user chose to download anyway: new pairs start until the disk
+        has room again."""
+        self.low_space_allowed = True
+        logger.info("Downloading despite low free space (user's choice)")
+        if self.on_low_space:
+            self.on_low_space(self.low_space)
+        self._wake_pump()
 
     async def _download_pair(self, pair: Pair) -> None:
         pair.state = PairState.DOWNLOADING

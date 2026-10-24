@@ -1432,3 +1432,77 @@ def test_guessed_pairings_of_one_length_are_one_work():
         durations={a.url: 40.0, b.url: 40.0, s1.url: 40.04, s2.url: 40.04})
     assert groups is not None and len(groups) == 1
     assert len(groups[0]["videos"]) == 2 and len(groups[0]["scripts"]) == 2
+
+
+class TestLowSpace:
+    """New downloads wait while the disk they write to is short of free
+    space; the user can let them go on until it has room again."""
+
+    def _qm(self, monkeypatch, free, total=1000, seen=None):
+        import shutil
+        import funpairdl.core.queue_manager as qmod
+
+        def usage(path):
+            if seen is not None:
+                seen.append(str(path))
+            return shutil._ntuple_diskusage(total, total - free, free)
+        monkeypatch.setattr(qmod, "drive_usage", usage)
+        return QueueManager(download_dir=Path("F:/Lib"))
+
+    def test_a_disk_under_the_limit_is_reported(self, monkeypatch):
+        info = self._qm(monkeypatch, free=100)._low_space_for(Pair(name="w"), 15)
+        assert info["drive"] == "F:\\" and info["percent"] == 10.0 and info["min_percent"] == 15
+
+    def test_enough_room_or_the_limit_off_holds_nothing(self, monkeypatch):
+        assert self._qm(monkeypatch, free=200)._low_space_for(Pair(name="w"), 15) is None
+        assert self._qm(monkeypatch, free=10)._low_space_for(Pair(name="w"), 0) is None
+
+    def test_the_pairs_own_folder_decides_the_disk(self, monkeypatch):
+        seen = []
+        qm = self._qm(monkeypatch, free=100, seen=seen)
+        pair = Pair(name="w")
+        pair.output_dir = r"H:\Lib\Work"
+        assert qm._low_space_for(pair, 15)["drive"] == "H:\\"
+        assert seen == [r"H:\Lib\Work"]
+
+    def test_download_anyway_lasts_until_the_disk_has_room(self, monkeypatch):
+        qm = self._qm(monkeypatch, free=100)
+        events = []
+        qm.on_low_space = events.append
+        info = qm._low_space_for(Pair(name="w"), 15)
+        qm._set_low_space(info)
+        qm.allow_low_space()
+        qm._set_low_space(dict(info))  # still short: no new notice, still allowed
+        assert qm.low_space_allowed and events == [info, info]
+        qm._set_low_space(None)
+        assert not qm.low_space_allowed and events == [info, info, None]
+
+    def test_the_pump_holds_a_pair_until_allowed(self, monkeypatch):
+        from funpairdl.persistence.settings import Settings
+        qm = self._qm(monkeypatch, free=50)
+        settings = Settings(min_free_space_percent=15, max_concurrent_pairs=2)
+        monkeypatch.setattr("funpairdl.persistence.settings.Settings.load", lambda *a, **k: settings)
+        started = []
+
+        async def run(pair):
+            started.append(pair.name)
+        monkeypatch.setattr(qm, "_run_pair_safe", run)
+        pair = Pair(name="w")
+        qm.pairs.append(pair)
+        events = []
+        qm.on_low_space = events.append
+
+        async def scenario():
+            qm._running = True
+            pump = asyncio.ensure_future(qm._pump())
+            await asyncio.sleep(0.05)
+            held = (list(started), pair.state, len(events))
+            qm.allow_low_space()
+            await asyncio.sleep(0.05)
+            qm._running = False
+            qm._pump_wake.set()
+            await pump
+            return held
+        held = asyncio.run(scenario())
+        assert held == ([], PairState.QUEUED, 1)
+        assert started == ["w"] and pair.state == PairState.DOWNLOADING
