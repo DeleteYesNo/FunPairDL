@@ -23,13 +23,21 @@ The core unit is a **Pair**: one post / work = one video + one or more `.funscri
 
 It is a Windows desktop **GUI** (PySide6) with a local **FastAPI** backend and an embedded tabbed browser.
 
-### Requirements
+### Download & run (no installs needed)
+
+1. Download `FunPairDL-<version>-windows-x64.zip` from [Releases](../../releases) and extract it to a folder you can write to (for example `Documents\FunPairDL`, not `Program Files`).
+2. Double-click **`FunPairDL.exe`**. The build is not code-signed, so Windows SmartScreen may say it "protected your PC": click **More info → Run anyway**.
+3. Open **Settings** to choose the download folder and add the credentials of the services you use (all optional).
+
+Python and every library are inside the folder. `config.json`, the queue and the log are written next to `FunPairDL.exe` (they hold your passwords and cookies: don't share that folder); the built-in browser keeps its cookies under `%APPDATA%\FunPairDL`. To **update**, extract the newer zip over the old folder: your settings and queue are kept. To view and play what you download, see [FunLib](https://github.com/DeleteYesNo/FunLib).
+
+### Requirements (running from source)
 
 - Python 3.11+
 - Windows (developed and used on Windows 11; other platforms untested)
 - Dependencies in `requirements.txt` (PySide6, aiohttp, yt-dlp, mega.py, fastapi, uvicorn, pydantic, qasync)
 
-### Install & run
+### Install & run from source
 
 **Easiest (Windows):** just double-click **`run.bat`**. On first run it
 checks for the required packages and installs them if needed, creates
@@ -68,6 +76,8 @@ auto-install `winshell` and `pywin32` if they are missing.
 
 A headless **server mode** is available via `python run_server.py`.
 
+**Building the release zip:** `python -m pip install -r packaging/requirements-lock.txt`, then `powershell -ExecutionPolicy Bypass -File packaging/build.ps1`; pushing a `v*` tag makes GitHub Actions build it and attach it to the release.
+
 ### Configuration
 
 Settings live in `config.json` (gitignored — it holds your API keys, passwords and session cookies, so it must never be committed). Start from `config.example.json` and fill in credentials only for the services you use.
@@ -95,13 +105,21 @@ Released under the **PolyForm Noncommercial License 1.0.0** — free for any non
 
 它是一個 Windows 桌面 **GUI**(PySide6),搭配本機 **FastAPI** 後端與內建分頁瀏覽器。
 
-### 系統需求
+### 下載與執行（不需要安裝任何東西）
+
+1. 從 [Releases](../../releases) 下載 `FunPairDL-<版本>-windows-x64.zip`，解壓到你有寫入權限的資料夾（例如 `文件\FunPairDL`，不要放 `Program Files`）。
+2. 雙擊 **`FunPairDL.exe`**。這個程式沒有數位簽章，Windows SmartScreen 可能會顯示「Windows 已保護您的電腦」，按 **其他資訊 → 仍要執行** 即可。
+3. 打開 **Settings** 選擇下載資料夾，並填入你會用到的服務帳號（都是選填）。
+
+Python 和所有套件都已經包在資料夾裡。`config.json`、佇列與 log 會寫在 `FunPairDL.exe` 旁邊；裡面有你的密碼與 cookie，不要把這個資料夾分享出去。內建瀏覽器的 cookie 存在 `%APPDATA%\FunPairDL`。**更新**時把新版 zip 解壓覆蓋到舊資料夾即可，設定和佇列都會保留。要瀏覽和播放下載的作品，請見 [FunLib](https://github.com/DeleteYesNo/FunLib)。
+
+### 系統需求（從原始碼執行）
 
 - Python 3.11 以上
 - Windows(在 Windows 11 上開發與使用;其他平台未測試)
 - 相依套件見 `requirements.txt`(PySide6、aiohttp、yt-dlp、mega.py、fastapi、uvicorn、pydantic、qasync)
 
-### 安裝與執行
+### 從原始碼安裝與執行
 
 **最簡單(Windows):** 直接雙擊 **`run.bat`**。首次執行時它會檢查所需套件、缺少就自動安裝,從範本建立 `config.json`,然後啟動 app(無主控台視窗);之後再執行就直接開啟。唯一前提是系統 PATH 上有 [Python 3.11 以上](https://www.python.org/downloads/)。
 
@@ -130,6 +148,8 @@ python create_shortcut.py
 會在桌面建立一個 `FunPairDL` 捷徑,用內附的 icon、以 `pythonw.exe` 啟動(無主控台視窗)。若缺少 `winshell`、`pywin32` 會自動安裝。
 
 另有無介面的 **server 模式**:`python run_server.py`。
+
+**自己打包發行版 zip：**先 `python -m pip install -r packaging/requirements-lock.txt`，再執行 `powershell -ExecutionPolicy Bypass -File packaging/build.ps1`；推送 `v*` 標籤時，GitHub Actions 會自動打包並掛到該版本的 Release。
 
 ### 設定
 
