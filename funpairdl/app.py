@@ -107,10 +107,11 @@ def _run_app():
     worker_loop = start_worker_loop()
 
     # The planners' inputs, kept locally for regression replay
-    # (tools/replay_plans.py).
-    from funpairdl.constants import CONFIG_DIR as _cfg_dir
+    # (tools/replay_plans.py, which the packaged build does not ship).
+    from funpairdl.constants import CONFIG_DIR as _cfg_dir, FROZEN
     from funpairdl.core import plan_cases
-    plan_cases.enable(_cfg_dir / "plan_cases")
+    if not FROZEN:
+        plan_cases.enable(_cfg_dir / "plan_cases")
 
     # Create queue manager
     from pathlib import Path

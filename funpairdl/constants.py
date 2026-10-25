@@ -1,11 +1,16 @@
+import sys
 from pathlib import Path
 
 APP_NAME = "FunPairDL"
 APP_VERSION = "0.1.0"
 
+# Packaged build (PyInstaller): the code is under _internal/, which an update
+# replaces; config, queue and logs stay next to FunPairDL.exe.
+FROZEN = getattr(sys, "frozen", False)
+
 # Default paths
 DEFAULT_DOWNLOAD_DIR = Path.home() / "Downloads" / "FunPairDL"
-CONFIG_DIR = Path(__file__).resolve().parent.parent
+CONFIG_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent.parent
 CONFIG_FILE = CONFIG_DIR / "config.json"
 QUEUE_FILE = CONFIG_DIR / "queue.json"
 QUEUE_ARCHIVE_FILE = CONFIG_DIR / "queue_archive.jsonl"

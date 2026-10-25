@@ -836,7 +836,9 @@ class BrowserWidget(QWidget):
 
     def _setup_profile(self):
         """Create persistent profile and bridge (shared across all tabs)."""
-        self._profile = QWebEngineProfile("funpairdl", self)
+        # FUNPAIRDL_PROFILE gives a second copy (a test build beside the
+        # one in use) its own cookies and cache.
+        self._profile = QWebEngineProfile(os.environ.get("FUNPAIRDL_PROFILE") or "funpairdl", self)
 
         # Let the named profile use its OWN default storage path (AppDataLocation).
         # Do NOT override with setPersistentStoragePath — that caused a mismatch
