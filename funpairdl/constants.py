@@ -56,6 +56,7 @@ RETRY_BASE_DELAY = 2.0  # seconds
 # Segment-level retry (round-based: only failed segments are retried each round)
 SEGMENT_MAX_ROUNDS = 6       # total download rounds per item
 SEGMENT_RETRY_DELAYS = [2, 5, 10, 20, 30]  # backoff (seconds) between rounds
+SEGMENT_THROTTLED_CONCURRENCY = 2  # segments at once once a host answered 429
 SEGMENT_SOCK_READ = 90       # seconds — per-read timeout for segment HTTP streams
 
 # Chunk size for reading/writing

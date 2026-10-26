@@ -28,13 +28,27 @@ def _no_retry_delay(monkeypatch):
 
 def _serve(mode):
     """mode: 'ok' | 'short-once' (each range's first answer is half, no
-    error) | 'ignore-range' (always 200 with the whole file)."""
+    error) | 'ignore-range' (always 200 with the whole file) | 'crowd-429'
+    (429 to a range asked while two others are in flight)."""
     seen = set()
+    inflight = [0]
 
     async def handler(req):
         if req.method == "HEAD":
             return web.Response(headers={"Content-Length": str(len(DATA)), "Accept-Ranges": "bytes"})
         rng = req.headers.get("Range")
+        if mode == "crowd-429" and rng:
+            if inflight[0] >= 2:
+                return web.Response(status=429)
+            inflight[0] += 1
+            try:
+                await asyncio.sleep(0.05)
+                a, b = rng.split("=")[1].split("-")
+                a, b = int(a), (int(b) if b else len(DATA) - 1)
+                return web.Response(status=206, body=DATA[a:b + 1], headers={
+                    "Content-Range": f"bytes {a}-{b}/{len(DATA)}", "Accept-Ranges": "bytes"})
+            finally:
+                inflight[0] -= 1
         if not rng or mode == "ignore-range":
             return web.Response(body=DATA)
         a, b = rng.split("=")[1].split("-")
@@ -47,7 +61,7 @@ def _serve(mode):
     return handler
 
 
-async def _download(tmp_path, mode, prep=None):
+async def _download(tmp_path, mode, prep=None, segments=8):
     app = web.Application()
     app.router.add_route("*", "/{name}", _serve(mode))
     runner = web.AppRunner(app)
@@ -56,7 +70,7 @@ async def _download(tmp_path, mode, prep=None):
     await site.start()
     port = site._server.sockets[0].getsockname()[1]
     item = PairItem(url=f"http://127.0.0.1:{port}/v.mp4", filename="v.mp4", file_type=FileType.VIDEO)
-    task = DownloadTask(item=item, output_dir=tmp_path, num_segments=8)
+    task = DownloadTask(item=item, output_dir=tmp_path, num_segments=segments)
     if prep:
         prep(task)
     import aiohttp
@@ -95,6 +109,15 @@ def test_oversized_leftover_parts_are_not_merged(tmp_path):
 def test_clean_but_short_stream_is_resumed(tmp_path):
     item, data = asyncio.run(_download(tmp_path, "short-once"))
     assert item.state == ItemState.COMPLETED and data == DATA
+
+
+def test_a_host_throttling_a_crowd_of_ranges_is_retried_a_few_at_a_time(tmp_path):
+    # 24 segments to a host that serves two ranges at once: retrying every
+    # failed segment together each round finished two per round and gave
+    # up after six with half the file missing.
+    item, data = asyncio.run(_download(tmp_path, "crowd-429", segments=24))
+    assert item.state == ItemState.COMPLETED
+    assert data == DATA
 
 
 def test_server_ignoring_range_fails_instead_of_stitching_garbage(tmp_path):

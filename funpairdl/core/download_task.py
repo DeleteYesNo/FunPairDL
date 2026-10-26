@@ -15,6 +15,7 @@ from funpairdl.constants import (
     PROGRESS_UPDATE_INTERVAL,
     SEGMENT_MAX_ROUNDS,
     SEGMENT_RETRY_DELAYS,
+    SEGMENT_THROTTLED_CONCURRENCY,
     SMALL_FILE_THRESHOLD,
 )
 from funpairdl.core.pair import ItemState, PairItem, SegmentInfo
@@ -364,13 +365,29 @@ class DownloadTask:
         """
         pending = list(self._segments)
         last_error: Exception | None = None
+        # A host that answers 429 to a crowd of ranges (gofile, gdrive, a
+        # video CDN) throttles a round of retries sent all at once just the
+        # same — six rounds of it left 17 of 32 segments failing. Once it
+        # has said 429, the remaining rounds go a few segments at a time.
+        limit: asyncio.Semaphore | None = None
+
+        async def _run(seg: SegmentDownloader) -> None:
+            if limit is None:
+                return await seg.download(session)
+            async with limit:
+                return await seg.download(session)
 
         for round_idx in range(SEGMENT_MAX_ROUNDS):
             if not pending or self._cancelled:
                 break
 
-            tasks = [asyncio.create_task(seg.download(session)) for seg in pending]
+            tasks = [asyncio.create_task(_run(seg)) for seg in pending]
             results = await asyncio.gather(*tasks, return_exceptions=True)
+            if limit is None and any(isinstance(r, aiohttp.ClientResponseError) and r.status == 429
+                                     for r in results):
+                limit = asyncio.Semaphore(SEGMENT_THROTTLED_CONCURRENCY)
+                logger.info("Host answered 429: retrying %s %d segment(s) at a time",
+                            self.item.filename, SEGMENT_THROTTLED_CONCURRENCY)
 
             failed: list[SegmentDownloader] = []
             for seg, result in zip(pending, results):
