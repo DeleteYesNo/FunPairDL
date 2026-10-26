@@ -655,6 +655,37 @@ class TestSecondMainVideoIsVariant:
         assert pair.alt_group_config == {}
 
 
+class TestVersionWithItsOwnScript:
+    """"Original & Extended" posts: each version a video and a script of
+    its own, the Extended ones named "<work> (Extended)"."""
+
+    def test_the_extended_video_takes_the_extended_script(self, tmp_path):
+        out = tmp_path / "Mock Wall (Original & Extended Ver.)"
+        out.mkdir()
+        (out / "Mock Wall.mp4").write_bytes(b"o" * 100)
+        (out / "Mock Wall (Extended).mp4").write_bytes(b"e" * 300)
+        short = b'{"actions":[{"at":10000,"pos":0}]}'
+        long_ = b'{"actions":[{"at":70000,"pos":0},{"at":70001,"pos":9}]}'
+        (out / "Maker Mock Wall.funscript").write_bytes(short)
+        (out / "Maker Mock Wall (Extended).funscript").write_bytes(long_)
+        pair = _make_pair(str(out), out.name, [
+            PairItem(url="https://rule34video.com/video/1/mock-wall/", filename="Mock Wall.mp4", file_type=FileType.VIDEO),
+            PairItem(url="https://pixeldrain.com/u/ext1", filename="Mock Wall (Extended).mp4", file_type=FileType.VIDEO),
+            PairItem(url="https://h/s1.funscript", filename="Maker Mock Wall.funscript", file_type=FileType.FUNSCRIPT),
+            PairItem(url="https://h/s2.funscript", filename="Maker Mock Wall (Extended).funscript", file_type=FileType.FUNSCRIPT),
+        ])
+
+        _organize(pair)
+
+        v = _variants(out)
+        assert sorted(v) == ["Extended", "Main"]
+        ext = v["Extended"]
+        assert (out / ext["video"]).read_bytes() == b"e" * 300
+        assert (out / ext["files"]["L0"]).read_bytes() == long_
+        assert (out / v["Main"]["video"]).read_bytes() == b"o" * 100
+        assert (out / v["Main"]["files"]["L0"]).read_bytes() == short
+
+
 class TestVariantTag:
     def test_tag_the_primary_lacks(self):
         assert QueueManager._variant_tag("Work (stockings).mp4", "Work (nude).mp4") == "stockings"

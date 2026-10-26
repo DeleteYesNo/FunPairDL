@@ -3344,6 +3344,17 @@ class QueueManager:
                 from funpairdl.core.video_plan import FORMAT_LABEL
                 if FORMAT_LABEL[fe].lower() not in (tag or "").lower():
                     tag = FORMAT_LABEL[fe]
+            # The script set of this label already has its group (the post's
+            # "<work> (Extended).funscript" beside "<work> (Extended).mp4"):
+            # the video is that set's. A group of its own played Main's
+            # script under the video, the set's script under none.
+            own = next((g for g, cfg in pair.alt_group_config.items()
+                        if tag and (cfg.get("display_name") or "").strip().casefold() == tag.strip().casefold()
+                        and not any(it.group == g and it.file_type == FileType.VIDEO for it in pair.items)), None)
+            if own:
+                extra.group = own
+                logger.info("Second Main video joins its script set: %s -> %s (%s)", extra.filename, own, tag)
+                continue
             pair.alt_group_config[alt_name] = {"inherit_multi_axis": True, "display_name": tag}
             extra.group = alt_name
             logger.info("Second Main video is a variant: %s -> %s (%s)",
