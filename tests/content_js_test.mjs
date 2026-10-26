@@ -850,6 +850,29 @@ check("other link: pixeldrain is no other link", ctx._otherLinkHost("https://pix
   check("paste: no scheme", ctx._pastedRow("pixeldrain.com/u/abc"), null);
 }
 
+// ── forum gate: a request that never answers does not hold the gate ──
+{
+  const timerCtx = makeCtx("discuss.eroscripts.com");
+  Object.assign(timerCtx, { setTimeout, clearTimeout, AbortController });
+  timerCtx.fetch = (url, init) => new Promise((resolve, reject) => {
+    if (url.includes("stalled")) {
+      // only an abort ends it
+      if (init && init.signal) init.signal.addEventListener("abort", () => reject(new Error("AbortError")));
+      return;
+    }
+    resolve({ ok: true, status: 200, url });
+  });
+  vm.createContext(timerCtx);
+  vm.runInContext(src, timerCtx, { filename: "content.js" });
+  const opts = { minGap: 0, timeout: 50 };
+  const stalled = timerCtx.forumFetch("/uploads/short-url/stalled.funscript", opts)
+    .then(() => "answered", () => "given up");
+  const next = timerCtx.forumFetch("/t/1.json", opts).then((r) => r.status, () => "failed");
+  const deadline = new Promise((r) => setTimeout(() => r("still waiting"), 2000));
+  check("forum gate: stalled request is given up", await Promise.race([stalled, deadline]), "given up");
+  check("forum gate: the next request still runs", await Promise.race([next, deadline]), 200);
+}
+
 if (failures) {
   console.error(`\n${failures} assertion(s) failed`);
   process.exit(1);

@@ -1048,6 +1048,10 @@ const _FORUM_429_RETRIES = 3;
 const _SHORT_URL_GAP_MS = 300;
 const _FORUM_RETRY_AFTER_DEFAULT_S = 30;
 const _FORUM_RETRY_AFTER_MAX_S = 180;
+// A request with no answer by then is given up: one stalled connection (a
+// short-url HEAD following its redirect to the CDN) held the gate, and so
+// every forum read after it, for good — a 114-topic batch stopped at card 2.
+const _FORUM_FETCH_TIMEOUT_MS = 30000;
 const _FORUM_SLOT_KEY = "funpairdl_forum_next_slot";
 const _FORUM_PAUSE_KEY = "funpairdl_forum_pause_until";
 let _forumGate = Promise.resolve();
@@ -1078,11 +1082,24 @@ function _retryAfterMs(header, now) {
   return Math.round(Math.min(Math.max(secs, 1), _FORUM_RETRY_AFTER_MAX_S) * 1000);
 }
 
+// fetch() that rejects (AbortError) when no response has arrived within ms.
+// The timer stops at the response headers: reading the body is the caller's.
+async function _fetchWithTimeout(url, init, ms) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  try {
+    return await fetch(url, { ...init, signal: ctl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // fetch() for a forum URL behind the gate. opts.minGap overrides the spacing
 // (short-url HEADs are light); opts.onWait(ms, reason) is told when the
-// caller is about to wait long enough to be worth showing.
+// caller is about to wait long enough to be worth showing; opts.timeout
+// overrides _FORUM_FETCH_TIMEOUT_MS.
 function forumFetch(url, opts = {}) {
-  const { minGap = _FORUM_MIN_GAP_MS, onWait, ...init } = opts;
+  const { minGap = _FORUM_MIN_GAP_MS, onWait, timeout = _FORUM_FETCH_TIMEOUT_MS, ...init } = opts;
   const run = _forumGate.then(async () => {
     for (let attempt = 0; ; attempt++) {
       const now = Date.now();
@@ -1097,7 +1114,7 @@ function forumFetch(url, opts = {}) {
         }
         await new Promise((r) => setTimeout(r, wait));
       }
-      const resp = await fetch(url, { credentials: "include", ...init });
+      const resp = await _fetchWithTimeout(url, { credentials: "include", ...init }, timeout);
       if (resp.status !== 429 || attempt >= _FORUM_429_RETRIES) return resp;
       const ms = _retryAfterMs(resp.headers && resp.headers.get("retry-after"));
       _forumPauseUntil = Date.now() + ms;
