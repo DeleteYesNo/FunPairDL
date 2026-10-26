@@ -121,6 +121,11 @@ def _work_duration(work_dir: Path, video: Path | None) -> float | None:
             _duration_cache[key] = d
         return d
 
+    cloud = _cloud_entries(work_dir)
+    if cloud is not None:
+        lens = [float(f.get("duration") or 0) for f in cloud
+                if video is not None and f["rel"] == video.name]
+        return (lens[0] or None) if lens else None
     if video is not None:
         d = _cached(video, local_media_duration)
         if d:
@@ -134,11 +139,25 @@ def _work_duration(work_dir: Path, video: Path | None) -> float | None:
     return _cached(plain[0], lambda f: funscript_info(f.read_bytes()).get("duration"))
 
 
+def _cloud_entries(d: Path) -> list[dict] | None:
+    """A cloud work's top-level files from its root's index ({"rel", "size",
+    "duration"?}); None for a local folder. Listing or reading a cloud work
+    through the drive is a cloud round trip each."""
+    files = lib.cloud_files(d)
+    if files is None:
+        return None
+    return [f for f in files if "/" not in str(f.get("rel") or "")]
+
+
 def _folder_video(d: Path) -> Path | None:
     """The work's main video: the one named after the folder, else the
     shortest stem (variants carry a " (Label)" suffix)."""
+    cloud = _cloud_entries(d)
     try:
-        vids = [f for f in d.iterdir() if f.is_file() and f.suffix.lower() in lib.VIDEO_EXTS]
+        if cloud is not None:
+            vids = [d / f["rel"] for f in cloud if Path(f["rel"]).suffix.lower() in lib.VIDEO_EXTS]
+        else:
+            vids = [f for f in d.iterdir() if f.is_file() and f.suffix.lower() in lib.VIDEO_EXTS]
     except OSError:
         return None
     if not vids:
@@ -150,6 +169,10 @@ def _folder_video(d: Path) -> Path | None:
 
 
 def _has_media(d: Path) -> bool:
+    cloud = _cloud_entries(d)
+    if cloud is not None:
+        return any(Path(f["rel"]).suffix.lower() in lib.VIDEO_EXTS
+                   or str(f["rel"]).lower().endswith(".funscript") for f in cloud)
     try:
         return any(f.is_file() and (f.suffix.lower() in lib.VIDEO_EXTS
                                     or f.name.lower().endswith(".funscript"))
@@ -170,14 +193,29 @@ def find_work_by_title(title: str, roots: list[Path], title_key, match_key) -> P
     return None
 
 
+# Roles of the post's own video (its chosen source and that one's mirrors):
+# only these say the work is this one — a variant or another render in the
+# library is another video.
+_WORK_ROLES = ("", "chosen", "alternate")
+
+
 def lookup(title: str, videos: list[dict], scripts: list[dict], live_pairs: list,
-           roots: list[Path], title_key, match_key, parse_axis) -> dict:
-    """videos: [{"url", "duration"?}], scripts: [{"url", "resolved"?, "name"?, "size"?}].
+           roots: list[Path], title_key, match_key, parse_axis,
+           video_index: dict[int, list[Path]] | None = None, same_length=None) -> dict:
+    """videos: [{"url", "duration"?, "size"?, "name"?, "role"?}],
+    scripts: [{"url", "resolved"?, "name"?, "size"?}].
+
+    The work is found by, in turn: a video URL the queue downloaded; a
+    library video of one of the post's video's exact byte count
+    (`video_index`: {size: [paths]}); a folder named like the post; a work
+    `same_length(names, duration)` names — named like the post, holding a
+    video of its length (another encode). A library folder renamed since
+    is found by the second and fourth.
 
     Returns::
 
         {"work": {"dir", "base", "video", "duration"} | None,
-         "match": "url" | "title" | "",
+         "match": "url" | "size" | "title" | "length" | "",
          "same_content": True | False | None,     # the post's video is this work's
          "scripts": {url: "identical" | "changed" | "new" | "unknown"}}
     """
@@ -197,9 +235,25 @@ def lookup(title: str, videos: list[dict], scripts: list[dict], live_pairs: list
                     break
         if work_dir:
             break
+    own = [v for v in videos if (v.get("role") or "") in _WORK_ROLES]
+    if work_dir is None and video_index:
+        for v in own:
+            size = int(v.get("size") or 0)
+            held = [p.parent for p in video_index.get(size, [])
+                    if size > 1_000_000 and not lib.in_trash(p.parent)]
+            if held:
+                work_dir, match = held[0], "size"
+                break
     if work_dir is None:
         work_dir = find_work_by_title(title, roots, title_key, match_key)
         match = "title" if work_dir else ""
+    if work_dir is None and same_length is not None:
+        for v in own:
+            if v.get("duration"):
+                d = same_length([title, v.get("name") or ""], float(v["duration"]))
+                if d is not None:
+                    work_dir, match = d, "length"
+                    break
     if work_dir is None:
         return {"work": None, "match": "", "same_content": None, "scripts": {}}
 
@@ -207,7 +261,7 @@ def lookup(title: str, videos: list[dict], scripts: list[dict], live_pairs: list
     duration = _work_duration(work_dir, video)
     base = video.stem if video else work_dir.name
 
-    if match == "url":
+    if match in ("url", "size", "length"):
         same = True
     else:
         # The post's length: its videos' probed durations, else its scripts'
@@ -223,15 +277,24 @@ def lookup(title: str, videos: list[dict], scripts: list[dict], live_pairs: list
         else:
             same = None
 
-    # Scripts on disk, by canonical axis, with sha1/size for identity.
-    on_disk: dict[str, list[Path]] = {}
-    try:
-        for f in work_dir.iterdir():
-            if f.is_file() and f.name.lower().endswith(".funscript"):
-                ax, _ = parse_axis(f.name)
-                on_disk.setdefault(ax, []).append(f)
-    except OSError:
-        pass
+    # Scripts on disk, by canonical axis: (name, size, local path — None for
+    # a cloud work, whose files are judged by size: never read through the drive).
+    on_disk: dict[str, list[tuple[str, int, Path | None]]] = {}
+    cloud = _cloud_entries(work_dir)
+    if cloud is not None:
+        listed = [(str(f["rel"]), int(f.get("size") or 0), None) for f in cloud]
+    else:
+        listed = []
+        try:
+            for f in work_dir.iterdir():
+                if f.is_file():
+                    listed.append((f.name, f.stat().st_size, f))
+        except OSError:
+            pass
+    for name, fsize, path in listed:
+        if name.lower().endswith(".funscript"):
+            ax, _ = parse_axis(name)
+            on_disk.setdefault(ax, []).append((name, fsize, path))
     verdicts: dict[str, str] = {}
     for s in scripts:
         url = s.get("url") or ""
@@ -251,15 +314,11 @@ def lookup(title: str, videos: list[dict], scripts: list[dict], live_pairs: list
             verdicts[url] = "new"
             continue
         identical = False
-        for f in cands:
-            try:
-                fsize = f.stat().st_size
-            except OSError:
-                continue
-            if sha1 and _file_sha1(f) == sha1:
+        for _name, fsize, f in cands:
+            if sha1 and f is not None and _file_sha1(f) == sha1:
                 identical = True
                 break
-            if not sha1 and size and fsize == size:
+            if (not sha1 or f is None) and size and fsize == size:
                 identical = True
                 break
         if identical:
@@ -269,13 +328,8 @@ def lookup(title: str, videos: list[dict], scripts: list[dict], live_pairs: list
         else:
             verdicts[url] = "unknown"
 
-    disk_scripts = []
-    for files in on_disk.values():
-        for f in files:
-            try:
-                disk_scripts.append({"name": f.name, "size": f.stat().st_size})
-            except OSError:
-                pass
+    disk_scripts = [{"name": name, "size": fsize}
+                    for files in on_disk.values() for name, fsize, _ in files]
     return {
         "work": {"dir": str(work_dir), "base": base,
                  "video": video.name if video else "", "duration": duration},

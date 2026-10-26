@@ -359,10 +359,17 @@ async def library_lookup(req: LibraryLookupRequest) -> dict:
     with qm._pairs_lock:
         live = list(qm.pairs)
     roots = await asyncio.to_thread(qm._library_dirs)
+    index = await asyncio.to_thread(qm._library_video_index)
+
+    def same_length(names: list[str], length: float):
+        cands = qm._same_name_works(names)
+        return qm._work_of_length(cands, length) if cands else None
+
     return await asyncio.to_thread(
         ll.lookup, req.title,
         [v.model_dump() for v in req.videos], [s.model_dump() for s in req.scripts],
-        live, roots, QueueManager._title_key, QueueManager._match_key, QueueManager._parse_axis)
+        live, roots, QueueManager._title_key, QueueManager._match_key, QueueManager._parse_axis,
+        index, same_length)
 
 
 @router.post("/probe")

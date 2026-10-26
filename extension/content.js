@@ -4476,6 +4476,17 @@ function _renderAskRow(panel, parsed, row, v, ask) {
 }
 
 // ── library lookup: is this work already on disk? ──
+// One of the post's videos as the lookup reads it: its exact size finds a
+// library work renamed since; its plan role says whether it is the post's
+// own video (a variant in the library is another video).
+function _lookupVideo(v, role) {
+  return {
+    url: v.url, resolved: v.resolvedUrl || "", duration: v.probedDuration || null,
+    size: v.probedSize || _probeSizeEntry(v.url) || 0,
+    name: v.probedFilename || v.label || "", role: role || "",
+  };
+}
+
 async function _runLibraryLookup(panel, parsed) {
   if (panel._lookupDone) return;
   panel._lookupDone = true;
@@ -4489,7 +4500,7 @@ async function _runLibraryLookup(panel, parsed) {
   const roles = (panel._videoPlan && panel._videoPlan.roles) || {};
   const videos = rows
     .filter(({ v }) => roles[v.url] !== "unrelated")
-    .map(({ v }) => ({ url: v.url, resolved: v.resolvedUrl || "", duration: v.probedDuration || null }));
+    .map(({ v }) => _lookupVideo(v, roles[v.url]));
   const scriptRows = _scriptRowsForLookup(panel, parsed);
   const scripts = scriptRows.map(({ s }) => ({
     url: s.url, resolved: s.resolvedUrl || "", name: s.filename || "",
@@ -4566,6 +4577,7 @@ async function _runLibraryLookup(panel, parsed) {
 // scripts, into that work; with nothing new it sends nothing.
 async function _runCollectionLookup(panel, parsed, prefs) {
   const rows = _videoRowsForPlan(panel, parsed);
+  const roles = (panel._videoPlan && panel._videoPlan.roles) || {};
   const scriptRows = _scriptRowsForLookup(panel, parsed);
   panel._sectionMerge = {};
   panel._skippedIdentical = panel._skippedIdentical || [];
@@ -4580,7 +4592,7 @@ async function _runCollectionLookup(panel, parsed, prefs) {
     try {
       res = await _sendMsg("library-lookup", {
         title: name,
-        videos: vids.map(({ v }) => ({ url: v.url, resolved: v.resolvedUrl || "", duration: v.probedDuration || null })),
+        videos: vids.map(({ v }) => _lookupVideo(v, roles[v.url])),
         scripts: scr.map(({ s }) => ({
           url: s.url, resolved: s.resolvedUrl || "", name: s.filename || "",
           size: s.probedSize || _probeSizeEntry(s.url) || 0, duration: s.probedDuration || null,

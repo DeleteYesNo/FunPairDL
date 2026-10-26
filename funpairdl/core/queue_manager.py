@@ -2881,15 +2881,31 @@ class QueueManager:
         """The library work named like `v` (or like its pair) that holds a
         video of v's length — probed from the host when the panel sent none."""
         from funpairdl.core.video_plan import video_format
-        from funpairdl.utils.media_duration import local_media_meta
-        words = [w for w in (self._name_words(pair.name), self._name_words(v.filename)) if len(w) >= 2]
-        if not words:
+        cands = self._same_name_works([pair.name, v.filename])
+        if not cands:
             return None
+        length, fmt = v.duration or 0.0, ""
+        if not length:
+            from funpairdl.providers.probe import probe_url_info
+            info = await probe_url_info(v.url, settings=settings)
+            length = float(info.get("duration") or 0)
+            fmt = video_format(int(info.get("width") or 0), int(info.get("height") or 0), v.filename)
+        if not length:
+            return None
+        return await asyncio.to_thread(self._work_of_length, cands, length, fmt,
+                                       getattr(settings, "vr_versions", "flat"))
+
+    def _same_name_works(self, names: list[str]) -> list[Path]:
+        """Library works named like one of `names`: all the words of one name
+        in the other (ids and encode words aside)."""
+        words = [w for w in (self._name_words(n) for n in names if n) if len(w) >= 2]
+        if not words:
+            return []
         # A post/file number is the name of a loop among its siblings
         # ("<Artist>-1203344_loop" is not "<Artist> Warning-1209955_loop",
         # though the words, ids aside, contain each other and the lengths agree).
         nums = lambda s: set(re.findall(r"(?<!\d)\d{5,}(?!\d)", s or ""))  # noqa: E731
-        own_nums = nums(v.filename) | nums(pair.name)
+        own_nums = set().union(*(nums(n) for n in names))
         cands: list[Path] = []
         for root in self._library_dirs():
             try:
@@ -2902,21 +2918,23 @@ class QueueManager:
                         cands.append(d)
             except OSError:
                 continue
-        if not cands:
-            return None
-        length, fmt = v.duration or 0.0, ""
-        if not length:
-            from funpairdl.providers.probe import probe_url_info
-            info = await probe_url_info(v.url, settings=settings)
-            length = float(info.get("duration") or 0)
-            fmt = video_format(int(info.get("width") or 0), int(info.get("height") or 0), v.filename)
-        if not length:
-            return None
-        order = {"flat": ("flat", "vr", "passthrough"), "vr": ("vr", "passthrough", "flat")}.get(
-            getattr(settings, "vr_versions", "flat"))
+        return cands
+
+    def _work_of_length(self, cands: list[Path], length: float, fmt: str = "",
+                        vr_versions: str = "flat") -> Path | None:
+        """The one work of `cands` holding a video of `length` to half a
+        second — not one whose render the vr_versions setting ranks below
+        `fmt` (the post's)."""
+        from funpairdl.core.video_plan import video_format
+        from funpairdl.utils.media_duration import local_media_meta
+        order = {"flat": ("flat", "vr", "passthrough"), "vr": ("vr", "passthrough", "flat")}.get(vr_versions)
         found: list[Path] = []
         for d in cands:
-            for f, meta in await asyncio.to_thread(self._work_videos, d, local_media_meta):
+            try:
+                vids = self._work_videos(d, local_media_meta)
+            except OSError:
+                continue
+            for f, meta in vids:
                 if not meta.get("duration") or abs(meta["duration"] - length) > 0.5:
                     continue
                 have = video_format(meta.get("width") or 0, meta.get("height") or 0, f.name) or "flat"

@@ -2,7 +2,10 @@
 title; scripts are judged identical / changed / new against the folder."""
 import hashlib
 import json
+import sys
 from pathlib import Path
+
+import pytest
 
 from funpairdl.core import library_lookup as ll
 from funpairdl.core.pair import FileType, ItemState, Pair, PairItem, PairState
@@ -120,3 +123,72 @@ class TestDurationsAndMainVideo:
         (d / "Work Title (stockings).mp4").write_bytes(b"v" * 500)
         res = _lookup("Work Title", [], [], [], [tmp_path])
         assert res["work"]["video"] == "Work Title.mp4" and res["work"]["base"] == "Work Title"
+
+
+class TestRenamedWork:
+    """A library folder renamed since the download (another title than the
+    post's) is found by the post's video: its exact bytes, or another
+    encode of its length in a folder named like the post."""
+
+    def _renamed(self, tmp_path):
+        d = _work(tmp_path, "(Maker) Garden Party - Studio HMV", video=b"v" * 1_100_000)
+        return d, {1_100_000: [d / f"{d.name}.mp4"]}
+
+    def test_same_bytes_find_the_folder(self, tmp_path):
+        d, index = self._renamed(tmp_path)
+        res = ll.lookup("(Maker) Studio - Garden Party (Requested, Soft & Hard)",
+                        [{"url": "https://pixeldrain.com/u/aaaa1111", "size": 1_100_000, "role": "alternate"}],
+                        [], [], [tmp_path], QueueManager._title_key, QueueManager._match_key,
+                        QueueManager._parse_axis, index)
+        assert res["match"] == "size" and res["same_content"] is True
+        assert res["work"]["dir"] == str(d)
+
+    def test_a_variant_of_those_bytes_is_another_video(self, tmp_path):
+        _d, index = self._renamed(tmp_path)
+        res = ll.lookup("Another Post", [{"url": "https://h/v", "size": 1_100_000, "role": "variant"}],
+                        [], [], [tmp_path], QueueManager._title_key, QueueManager._match_key,
+                        QueueManager._parse_axis, index)
+        assert res["work"] is None
+
+    def test_another_encode_of_its_length(self, tmp_path):
+        d, _index = self._renamed(tmp_path)
+        asked = []
+
+        def same_length(names, length):
+            asked.append((names, length))
+            return d if abs(length - 151.7) <= 0.5 else None
+
+        res = ll.lookup("(Maker) Studio/Extra Garden Party", [
+            {"url": "https://hanime1.me/watch?v=1", "duration": 151.744, "name": "Garden Party (4K)", "role": "chosen"},
+        ], [], [], [tmp_path], QueueManager._title_key, QueueManager._match_key,
+            QueueManager._parse_axis, {}, same_length)
+        assert res["match"] == "length" and res["same_content"] is True
+        assert asked == [(["(Maker) Studio/Extra Garden Party", "Garden Party (4K)"], 151.744)]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="directory junctions are Windows-only")
+def test_a_cloud_work_is_judged_from_its_index(tmp_path):
+    # a work on the cloud drive is a junction: its scripts and video length
+    # come from the root's cloud index, never read through the drive (the
+    # 5-byte script "on disk" here is not what the index says).
+    import _winapi
+    from funpairdl.core import library as lib
+    root, elsewhere = tmp_path / "lib", tmp_path / "elsewhere"
+    root.mkdir()
+    (elsewhere / "Cloud Work").mkdir(parents=True)
+    (elsewhere / "Cloud Work" / "Cloud Work.funscript").write_bytes(b"x" * 5)
+    _winapi.CreateJunction(str(elsewhere / "Cloud Work"), str(root / "Cloud Work"))
+    (root / lib.CLOUD_INDEX).write_text(json.dumps({"version": 1, "works": {"Cloud Work": {"files": [
+        {"rel": "Cloud Work.mp4", "size": 2_000_000, "duration": 61.5, "w": 1920, "h": 1080},
+        {"rel": "Cloud Work.funscript", "size": 4321},
+        {"rel": "Cloud Work (Soft).funscript", "size": 1234}]}}}), encoding="utf-8")
+    res = ll.lookup("Some Post", [{"url": "https://pixeldrain.com/u/v", "size": 2_000_000}], [
+        {"url": "https://pixeldrain.com/u/s1", "name": "Some Post.funscript", "size": 4321},
+        {"url": "https://pixeldrain.com/u/s2", "name": "Some Post (Hard).funscript", "size": 999},
+    ], [], [root], QueueManager._title_key, QueueManager._match_key, QueueManager._parse_axis,
+        {2_000_000: [root / "Cloud Work" / "Cloud Work.mp4"]})
+    assert res["work"] == {"dir": str(root / "Cloud Work"), "base": "Cloud Work",
+                           "video": "Cloud Work.mp4", "duration": 61.5}
+    assert res["scripts"] == {"https://pixeldrain.com/u/s1": "identical",
+                              "https://pixeldrain.com/u/s2": "changed"}
+    assert sorted(d["size"] for d in res["disk_scripts"]) == [1234, 4321]

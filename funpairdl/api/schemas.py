@@ -69,6 +69,9 @@ class LookupVideo(BaseModel):
     url: str
     resolved: str = ""
     duration: float | None = None
+    size: int = 0
+    name: str = ""
+    role: str = ""      # the video plan's role (chosen, alternate, variant, …)
 
 
 class LookupScript(BaseModel):
