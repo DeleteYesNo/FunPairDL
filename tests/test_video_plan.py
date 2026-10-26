@@ -669,6 +669,55 @@ class TestSiteIds:
         assert res["roles"]["https://www.iwara.tv/video/DDDDdddd4444"] == "chosen"
 
 
+class TestScriptsNamingOtherRenders:
+    """A reply resyncs the post's script to other renders of one motion and
+    names each script after its render's site id."""
+
+    def _scripts(self):
+        return [
+            {"name": "Mock Riding 3.funscript", "duration": 114.25},
+            {"name": "Mock Riding 3.pitch.funscript", "duration": 114.25},
+            {"name": "Iwara - Red Dress Riding [EEEEeeee5555] [Source].funscript", "duration": 114.0},
+            {"name": "Iwara - Demon Riding [FFFFffff6666] [Source].funscript", "duration": 114.067},
+        ]
+
+    def test_each_named_render_is_a_video_of_its_own(self):
+        # The renders run 117 s on the host, like the post's own link: by
+        # length all four were one video, the two named renders became its
+        # fallbacks — never downloaded, their scripts filed on another render.
+        res = plan_videos([
+            _v("https://mega.nz/file/mockfile#key", "Mock Riding 3.mp4", size=1_000_000_000, duration=114.0),
+            _v("https://www.iwara.tv/video/GGGGgggg7777", "Mock Demon Riding", duration=117.0),
+            _v("https://www.iwara.tv/video/EEEEeeee5555", "Red Dress Riding", duration=117.0),
+            _v("https://www.iwara.tv/video/FFFFffff6666", "Demon Riding", duration=117.0),
+        ], Prefs(), title="[Maker] Mock Demon Riding", scripts=self._scripts())
+        roles = res["roles"]
+        assert roles["https://www.iwara.tv/video/EEEEeeee5555"] == "chosen"
+        assert roles["https://www.iwara.tv/video/FFFFffff6666"] == "chosen"
+        assert _group_of(res, "https://www.iwara.tv/video/EEEEeeee5555")["alternates"] == []
+
+    def test_reply_links_scripts_name_by_id_are_the_posts(self):
+        # Kept apart from the OP's render, a reply's link is still this
+        # post's: a script of it carries its id.
+        res = plan_videos([
+            _v("https://pixeldrain.com/u/mockop01", "Mock Riding 3.mp4", duration=114.0),
+            _v("https://www.iwara.tv/video/EEEEeeee5555", "Red Dress Riding", duration=117.0, source="comment"),
+            _v("https://www.iwara.tv/video/FFFFffff6666", "Demon Riding", duration=117.0, source="comment"),
+        ], Prefs(), title="[Maker] Mock Riding 3", scripts=self._scripts())
+        assert res["roles"]["https://www.iwara.tv/video/EEEEeeee5555"] == "chosen"
+        assert res["roles"]["https://www.iwara.tv/video/FFFFffff6666"] == "chosen"
+
+    def test_one_named_render_still_takes_its_unnamed_copy(self):
+        # Only one video named: an unnamed link of its length is its copy.
+        res = plan_videos([
+            _v("https://www.iwara.tv/video/EEEEeeee5555", "Red Dress Riding", duration=117.0),
+            _v("https://pixeldrain.com/u/mockcopy", "Red Dress Riding.mp4", duration=117.0, size=50_000_000),
+        ], Prefs(), title="Red Dress Riding", scripts=[
+            {"name": "Iwara - Red Dress Riding [EEEEeeee5555] [Source].funscript", "duration": 117.0}])
+        g = _group_of(res, "https://www.iwara.tv/video/EEEEeeee5555")
+        assert len(g["members"]) == 2 and g["alternates"]
+
+
 class TestSameBytes:
     def test_a_reupload_of_the_same_bytes_is_a_mirror_whatever_its_name(self):
         # The OP's MEGA file and a reply's folder re-upload named after the

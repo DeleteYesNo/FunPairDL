@@ -601,6 +601,23 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
         tol = 1.0 if float(a).is_integer() or float(b).is_integer() else 0.5
         return abs(a - b) <= tol
     named = _script_named_ids(videos, scripts or [])
+    # Scripts naming two or more videos by site id are the scripts of
+    # those videos (a reply resyncing the post's scripts to two other
+    # renders of one motion): a named video then joins only a link named
+    # by the same id, never an unnamed link of its length — it is not a
+    # mirror of the post's own render.
+    several_named = len(set(named.values())) >= 2
+
+    def _named_apart(k1: str, k2: str) -> bool:
+        n1 = {named[v.url] for v in videos if v.key == k1 and v.url in named}
+        n2 = {named[v.url] for v in videos if v.key == k2 and v.url in named}
+        if n1 and n2 and not (n1 & n2):
+            # Each is the video of its own script set (the scripts carry
+            # each one's site id): two dances to one song, a second apart,
+            # not one video on two hosts.
+            return True
+        return several_named and n1 != n2
+
     for k1 in list(by_len):
         for k2 in list(by_len):
             if k1 < k2 and k1 in by_len and k2 in by_len and _same_len(by_len[k1], by_len[k2]):
@@ -608,12 +625,7 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
                     continue  # two files in packs are two videos
                 if marks.get(k1, set()) != marks.get(k2, set()):
                     continue  # "part2" is the sequel, not a copy (a series keeps one length)
-                n1 = {named[v.url] for v in videos if v.key == k1 and v.url in named}
-                n2 = {named[v.url] for v in videos if v.key == k2 and v.url in named}
-                if n1 and n2 and not (n1 & n2):
-                    # Each is the video of its own script set (the scripts
-                    # carry each one's site id): two dances to one song, a
-                    # second apart, not one video on two hosts.
+                if _named_apart(k1, k2):
                     continue
                 keep, drop = (k2, k1) if k2.startswith("pack:") else (k1, k2)
                 for v in videos:
@@ -658,7 +670,8 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
                 if k == target:
                     continue
                 if (_sequel_marks(rep[k].tokens) != _sequel_marks(rep[target].tokens)
-                        or (rep[k].fmt and rep[target].fmt and rep[k].fmt != rep[target].fmt)):
+                        or (rep[k].fmt and rep[target].fmt and rep[k].fmt != rep[target].fmt)
+                        or _named_apart(k, target)):
                     continue
                 for v in videos:
                     if v.key == k:
@@ -690,6 +703,8 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
 
     def _post_work(members: list[VideoSpec]) -> bool:
         for m in (m for m in members if not m.failed):
+            if m.url in named:
+                return True  # a script of the post carries its site id
             c = _core_tokens(m.stem)
             # "<OP work> part2" by a reply: the next part, played with the
             # post's script — a variant of the work, not someone else's.
