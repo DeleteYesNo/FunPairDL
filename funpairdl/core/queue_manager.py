@@ -3479,6 +3479,26 @@ class QueueManager:
                 h.update(chunk)
         return h.hexdigest()
 
+    @staticmethod
+    def _video_suffix(item: PairItem, path: Path) -> str:
+        """The extension a video keeps on rename: its own when it is a video
+        extension, else its file's on the host ("…/3624649/full.webm") — a
+        name cut short of its ".webm" ends in whatever dot its title had
+        (".ai, fluttershy, …")."""
+        from urllib.parse import urlparse
+
+        from funpairdl.constants import VIDEO_EXTENSIONS
+        if path.suffix.lower() in VIDEO_EXTENSIONS:
+            return path.suffix
+        for u in (item.resolved_url, item.url):
+            try:
+                ext = Path(urlparse(u or "").path).suffix.lower()
+            except ValueError:
+                continue
+            if ext in VIDEO_EXTENSIONS and ext != ".m3u8":
+                return ext
+        return ".mp4" if not path.suffix or " " in path.suffix else path.suffix
+
     @classmethod
     def _same_file(cls, a: Path, b: Path) -> bool:
         """True only when both paths hold byte-identical content. Size is
@@ -3874,7 +3894,7 @@ class QueueManager:
             if not old_path.exists():
                 continue
             if main_video_path is None:
-                new_name = f"{base_name}{old_path.suffix}"
+                new_name = f"{base_name}{self._video_suffix(item, old_path)}"
                 new_path = output_dir / new_name
                 if old_path != new_path:
                     if new_path.exists():
@@ -4004,7 +4024,7 @@ class QueueManager:
 
             if own_video is not None:
                 v, src = own_video
-                dest = output_dir / f"{base_name} ({label}){src.suffix}"
+                dest = output_dir / f"{base_name} ({label}){self._video_suffix(v, src)}"
                 if dest.exists() and dest != src:
                     logger.warning("Target exists, Alt video keeps its name: %s", dest)
                 elif dest != src:

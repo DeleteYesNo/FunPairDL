@@ -5,6 +5,7 @@ from pathlib import Path
 # Characters illegal in Windows filenames
 _ILLEGAL_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _TRAILING_DOTS_SPACES = re.compile(r'[\s.]+$')
+_EXT_RE = re.compile(r'\.[A-Za-z0-9]{1,5}$')
 
 
 def sanitize_filename(name: str, max_length: int = 200) -> str:
@@ -13,7 +14,13 @@ def sanitize_filename(name: str, max_length: int = 200) -> str:
     name = " ".join(name.split())  # collapse whitespace
 
     if len(name) > max_length:
-        name = name[:max_length].rstrip()
+        # Cut the name, not its extension: a host title of a hundred tags
+        # ("#3624649 - explicit, … fifteen.ai, fluttershy, ….webm") lost its
+        # ".webm", and the rename then took ".ai, fluttershy, …" for one —
+        # a video no player or library recognises.
+        m = _EXT_RE.search(name)
+        ext = m.group(0) if m else ""
+        name = name[:max_length - len(ext)].rstrip(" .,;-_") + ext
 
     return name or "unnamed"
 

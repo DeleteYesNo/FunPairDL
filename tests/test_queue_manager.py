@@ -1506,3 +1506,26 @@ class TestLowSpace:
         held = asyncio.run(scenario())
         assert held == ([], PairState.QUEUED, 1)
         assert started == ["w"] and pair.state == PairState.DOWNLOADING
+
+
+class TestLongHostTitles:
+    """A booru titles a video by its hundred tags; the file must keep its
+    extension (two derpibooru webm files were saved as "…(Complete)" and
+    "…(Complete).ai, fluttershy, …")."""
+
+    TITLE = "#1000101 - explicit, ai voice, artist_mock, fifteen.ai, " + "tag, " * 60 + "end"
+
+    def test_a_cut_name_keeps_its_extension(self):
+        from funpairdl.utils.filename import sanitize_filename
+        name = sanitize_filename(self.TITLE + ".webm")
+        assert len(name) <= 200 and name.endswith(".webm") and not name.endswith(",.webm")
+        assert sanitize_filename("x" * 300) == "x" * 200
+
+    def test_a_video_without_a_video_extension_takes_its_hosts(self):
+        item = PairItem(url="https://booru.example/images/1000101", filename="w", file_type=FileType.VIDEO)
+        item.resolved_url = "https://cdn.example/img/2026/1/1/1000101/full.webm"
+        assert QueueManager._video_suffix(item, Path("Work (Complete).ai, fluttershy, tag")) == ".webm"
+        assert QueueManager._video_suffix(item, Path("Work (Complete)")) == ".webm"
+        assert QueueManager._video_suffix(item, Path("Work.mkv")) == ".mkv"
+        item.resolved_url = ""
+        assert QueueManager._video_suffix(item, Path("Work (Complete)")) == ".mp4"
