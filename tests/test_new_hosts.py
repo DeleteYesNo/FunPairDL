@@ -260,8 +260,9 @@ class TestR34Xyz:
         assert R34XyzProvider.can_handle(self.POST)
         assert extract_post_id(self.POST) == 1234567
         assert not R34XyzProvider.can_handle("https://r-34.xyz/tags/sound")
-        # rule34.xyz is another site with another numbering
-        assert not R34XyzProvider.can_handle("https://rule34.xyz/post/1234567")
+        # rule34.xyz runs the same app (another numbering, another CDN)
+        assert R34XyzProvider.can_handle("https://rule34.xyz/post/1234567")
+        assert not R34XyzProvider.can_handle("https://rule34.xyz/tags/sound")
         assert not YtdlpGenericProvider.can_handle(self.POST)
         assert detect_provider(self.POST) == "r34xyz"
         assert ProviderRegistry().get_provider(self.POST).name == "r34xyz"
@@ -271,6 +272,23 @@ class TestR34Xyz:
         assert video_url(1234567) == "https://r34xyz.b-cdn.net/posts/1234/1234567/1234567.mp4"
         assert video_url(90564) == "https://r34xyz.b-cdn.net/posts/90/90564/90564.mp4"
         assert build_filename(1234567) == "r-34.xyz 1234567.mp4"
+
+    def test_rule34xyz(self):
+        # yt-dlp's generic extractor gave "Unsupported URL" for 21 of a
+        # post's 182 rule34.xyz clips; the CDN keeps the upload, else only a
+        # transcode, under names of its own.
+        from funpairdl.providers.r34xyz import build_filename, extract_post, file_frame, video_urls
+        from funpairdl.providers.registry import ProviderRegistry
+        url = "https://rule34.xyz/post/1234567"
+        assert extract_post(url) == ("rule34.xyz", 1234567)
+        assert not YtdlpGenericProvider.can_handle(url)
+        assert detect_provider(url) == "r34xyz"
+        assert ProviderRegistry().get_provider(url).name == "r34xyz"
+        base = "https://rule34xyz.b-cdn.net/posts/1234/1234567/1234567"
+        assert video_urls(1234567, "rule34.xyz") == [base + ".mov.mp4", base + ".mov720.mp4", base + ".mov480.mp4"]
+        assert build_filename(1234567, "rule34.xyz") == "rule34.xyz 1234567.mp4"
+        assert file_frame(base + ".mov480.mp4", 1920, 1080) == (853, 480)
+        assert file_frame(base + ".mov.mp4", 1920, 1080) == (1920, 1080)
 
 
 class TestAirscripts:

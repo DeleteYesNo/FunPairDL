@@ -50,6 +50,7 @@ const VIDEO_PRIORITY = {
   "e621.net": 7,
   "e926.net": 7,
   "r-34.xyz": 7,
+  "rule34.xyz": 7,
   // Own providers: JOI HLS streams, hentai episodes, free creator posts
   "the-joi-database.com": 7,
   "watchhentai.net": 7,
@@ -289,6 +290,7 @@ function getVideoLabel(url) {
     if (host.includes("mega")) return "MEGA";
     if (host.includes("gofile")) return "GoFile";
     if (host.includes("rule34video")) return "Rule34Video";
+    if (host === "rule34.xyz") return "Rule34.XYZ";
     if (host.includes("rule34")) return "Rule34";
     if (host.includes("iwara")) return "Iwara";
     if (host.includes("hanime")) return "Hanime1";

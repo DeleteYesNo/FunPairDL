@@ -25,6 +25,7 @@ def detect_provider(url: str) -> str:
         "e621.net": "e621",
         "e926.net": "e621",
         "r-34.xyz": "r34xyz",
+        "rule34.xyz": "r34xyz",
         "airscripts.fun": "airscripts",
         "the-joi-database.com": "joidb",
         "watchhentai.net": "watchhentai",

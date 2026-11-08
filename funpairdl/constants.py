@@ -84,6 +84,7 @@ VIDEO_HOSTS = [
     "e621.net",
     "e926.net",
     "r-34.xyz",
+    "rule34.xyz",
     "the-joi-database.com",
     "watchhentai.net",
     "fanbox.cc",

@@ -899,20 +899,21 @@ async def _probe_airscripts(url: str, session: aiohttp.ClientSession) -> dict:
 
 
 async def _probe_r34xyz(url: str, session: aiohttp.ClientSession) -> dict:
-    """r-34.xyz: the API gives length, size of frame and tags; a HEAD on the
-    CDN file gives its size."""
+    """r-34.xyz / rule34.xyz: the API gives length, size of frame and tags;
+    a HEAD on the CDN file gives its size."""
     try:
         from funpairdl.providers.r34xyz import (
-            build_filename, extract_post_id, fetch_post, fetch_size, tag_names, thumbnail_url,
+            build_filename, extract_post, fetch_file, fetch_post, file_frame, tag_names, thumbnail_url,
         )
 
-        post_id = extract_post_id(url)
-        if post_id is None:
+        found = extract_post(url)
+        if found is None:
             return {"success": False, "error": "Not a video"}
-        post = await fetch_post(post_id, session)
-        size = await fetch_size(post_id, session)
-        filename = build_filename(post_id)
-        height = int(post.get("height") or 0)
+        site, post_id = found
+        post = await fetch_post(post_id, session, site)
+        direct, size = await fetch_file(post_id, session, site)
+        filename = build_filename(post_id, site)
+        width, height = file_frame(direct, int(post.get("width") or 0), int(post.get("height") or 0))
         return {
             "success": True,
             "provider": "r34xyz",
@@ -920,14 +921,14 @@ async def _probe_r34xyz(url: str, session: aiohttp.ClientSession) -> dict:
             "filename": filename,
             "size": size,
             "formats": [{"height": height, "size": size, "format_id": "original"}],
-            "width": int(post.get("width") or 0) or None,
+            "width": width or None,
             "height": height or None,
             "tags": tag_names(post)[:120],
-            "thumbnail": thumbnail_url(post_id),
+            "thumbnail": thumbnail_url(post_id, site) or None,
             "duration": post.get("duration") or None,
         }
     except Exception as e:
-        logger.error("r-34.xyz probe failed for %s: %s", url[:80], e)
+        logger.error("r-34.xyz / rule34.xyz probe failed for %s: %s", url[:80], e)
         return {"success": False, "error": str(e)}
 
 
