@@ -765,3 +765,53 @@ class TestCharacterRenders:
     def test_a_title_no_link_carries_whole_leaves_the_size_rule(self):
         res = self._post("[DemoStudio] Garden Collection")
         assert res["roles"]["https://h/video/3/marigold-demostudio-4k/"] == "chosen"
+
+
+class TestClipsNamedByPostNumber:
+    """A collection of short booru clips, each script named by its clip's
+    post number ("1000101.funscript" beside "rule34.xyz/post/1000101")."""
+
+    def test_clips_of_one_length_are_not_copies_of_each_other(self):
+        # Under a minute and of near-equal lengths, the clips were folded
+        # together by the scripts' lengths: most became "fallbacks" of
+        # others and were never downloaded.
+        ids = [1000101, 1000202, 1000303, 1000404, 1000505]
+        res = plan_videos(
+            [_v(f"https://rule34.xyz/post/{n}", f"mock tags, heroine - Rule 34 XYZ ({i})", duration=8.0 + i * 0.1)
+             for i, n in enumerate(ids)],
+            Prefs(), title="Mock Clips Collection - 5 scripts",
+            scripts=[{"name": f"{n}.funscript", "duration": 8.0} for n in ids])
+        assert set(res["roles"].values()) == {"chosen"}
+        assert all(g["alternates"] == [] for g in res["groups"])
+
+    def test_a_number_inside_a_longer_one_names_nothing(self):
+        from funpairdl.core.video_plan import names_id
+        assert names_id("(Husk) 1000404.funscript", "1000404")
+        assert not names_id("11000404.funscript", "1000404")
+        assert not names_id("1000404.funscript", "100040")
+
+
+class TestScriptersArchiveBesideTheWorksLink:
+    def test_the_archives_other_works_are_not_the_posts(self):
+        # The post links its work's video and the scripter's whole folder,
+        # which holds other works with their scripts. The post's script has
+        # its video outside the folder: the folder's "Mock Heroine" files are
+        # not this post's (they were taken for its video, and the post's
+        # scripts merged into the library work holding them).
+        folder = "https://mega.nz/folder/mockfold#key"
+        own = _v("https://mega.nz/file/mockfile#key", "モック編.mp4", duration=738.0, size=1_400_000_000)
+        pack = []
+        for i, (name, dur) in enumerate([("Mock Heroine - Series.mp4", 50.0),
+                                         ("Mock Heroine - Series-longer.mp4", 500.0),
+                                         ("Another Work.mp4", 120.0)]):
+            v = _p(f"{folder}/file/f{i}", name, pack=folder)
+            v.duration = dur
+            pack.append(v)
+        res = plan_videos([own, *pack], Prefs(), title="【Free】【S001】【Multi-axis】モック編", scripts=[
+            {"name": "モック編.funscript", "duration": 738.0},
+            {"name": "モック編.roll.funscript", "duration": 738.0},
+            {"name": "Mock Heroine - Series.funscript", "duration": 50.0, "pack": True},
+            {"name": "Mock Heroine - Series-longer.funscript", "duration": 500.0, "pack": True},
+        ])
+        assert res["roles"][own.url] == "chosen"
+        assert all(res["roles"][v.url] == "unrelated" for v in pack)

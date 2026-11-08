@@ -550,6 +550,16 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
 
     for v in videos:
         v.key = _key_of(v)
+    # Scripts that name their videos by post number (a collection of 182
+    # clips, "2054889.funscript" each) say which link is which video: the
+    # number is the key, whatever the hosts' tag-list titles share. (Read by
+    # name and length, clips of a few seconds folded together — 72 were
+    # taken for copies of others and never downloaded.)
+    early_named = _script_named_ids(videos, scripts or [])
+    if len(set(early_named.values())) >= 2:
+        for v in videos:
+            if v.url in early_named:
+                v.key += " #id:" + early_named[v.url]
 
     # A pack (folder/list) holds the post's files by their real names: each
     # distinct file is its own video, and a plain link is another copy of
@@ -976,19 +986,41 @@ def _same_pack_twins(k1: str, k2: str) -> bool:
 
 _SITE_ID_RE = re.compile(r"(?:iwara\.tv|rule34video\.com)/videos?/([A-Za-z0-9]{6,})", re.IGNORECASE)
 _BRACKET_ID_RE = re.compile(r"\[([A-Za-z0-9]{10,24})\]")
+# A booru's post number: "rule34.xyz/post/2054889", "e621.net/posts/123456",
+# "rule34.xxx/index.php?page=post&s=view&id=9876543".
+_POST_NUM_RE = re.compile(
+    r"(?:(?:rule34\.xyz|r-34\.xyz)/post/|e(?:621|926)\.net/posts/|rule34\.xxx/index\.php\?[^#\s]*?\bid=)(\d{5,})",
+    re.IGNORECASE)
+
+
+def site_ids(url: str, name: str = "") -> list[str]:
+    """The ids a video goes by: its site's id from the link, a booru post
+    number, a "[<id>]" in its file name."""
+    return [*_SITE_ID_RE.findall(url or ""), *_POST_NUM_RE.findall(url or ""),
+            *_BRACKET_ID_RE.findall(name or "")]
+
+
+def names_id(script_name: str, vid: str) -> bool:
+    """A script's name carries the id: a post number as a whole number
+    ("(Husk) 2976724.funscript" is post 2976724's, not 297672's), any other
+    id as it is."""
+    if vid.isdigit():
+        return re.search(rf"(?<!\d){vid}(?!\d)", script_name) is not None
+    return len(vid) >= 8 and vid in script_name
 
 
 def _script_named_ids(videos: list[VideoSpec], scripts: list[dict]) -> dict[str, str]:
     """video url → its site id, for videos a script's name carries the id of
-    ("Iwara - <Song> [<id>] [Source].funscript"). The id comes from the
-    video's link or a "[<id>]" in its file name."""
+    ("Iwara - <Song> [<id>] [Source].funscript", a collection's
+    "2054889.funscript" beside "rule34.xyz/post/2054889"). The id comes from
+    the video's link or a "[<id>]" in its file name."""
     s_names = "\n".join(str(s.get("name") or "") for s in scripts)
     if not s_names:
         return {}
     out: dict[str, str] = {}
     for v in videos:
-        for vid in [*_SITE_ID_RE.findall(v.url or ""), *_BRACKET_ID_RE.findall(v.name or "")]:
-            if len(vid) >= 8 and vid in s_names:
+        for vid in site_ids(v.url, v.name):
+            if names_id(s_names, vid):
                 out[v.url] = vid
                 break
     return out
@@ -1058,7 +1090,19 @@ def _mark_crowded_and_strays(videos: list[VideoSpec], scripts: list[dict], title
     own = [(c, d) for c, d in own if c]
     anchored = _belongs(own)
     related = [v for v in videos if not v.pack or per_pack[v.pack] < 2]
-    related += anchored if anchored else _belongs(s_items)
+    # Nor do they when the post's own scripts have their video outside the
+    # folder (a work's own link, beside the scripter's whole archive): the
+    # archive's other works are not this post's. (Their scripts made three
+    # files of the archive "the post's video", and the post's scripts were
+    # merged into the library work one of them matched.)
+    own_words = frozenset().union(*[c for c, _ in own] or [frozenset()]) - _STOP_WORDS
+    own_lens = [d for _c, d in own if d]
+    covered = bool(own) and any(
+        not v.failed and not (v.pack and per_pack[v.pack] >= 2)
+        and (((_core_tokens(v.stem) - _STOP_WORDS) & own_words)
+             or (v.duration and any(not _duration_differs(v.duration, sl) for sl in own_lens)))
+        for v in videos)
+    related += anchored if (anchored or covered) else _belongs(s_items)
     rel_lens = [v.duration for v in related if v.duration and not v.failed]
     for v in in_big:
         if v in related:

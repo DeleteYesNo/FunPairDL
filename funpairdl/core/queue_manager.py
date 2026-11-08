@@ -2406,10 +2406,32 @@ class QueueManager:
                 return False
             return ds - dv > max(5.0, 0.1 * dv) or (dv - ds > 120 and ds < dv / 4)
 
+        # A script named by its video's site id ("2054889.funscript",
+        # "(Husk) 2976724.funscript" beside "rule34.xyz/post/2976724") is
+        # that video's — the one video whose id it carries. Clips of a few
+        # seconds tie on length and share no words with the host's tag-list
+        # titles, so without it a 182-clip collection was dealt out by
+        # position and nearly every folder got another clip's video.
+        from funpairdl.core.video_plan import names_id, site_ids
+        video_ids = [(v, [i for u in (v.url, v.resolved_url or "") for i in site_ids(u, v.filename)])
+                     for v, _, _ in video_info]
+
+        def _find_video_by_id(s: PairItem):
+            hits = [v for v, ids in video_ids if any(names_id(s.filename, i) for i in ids)]
+            return hits[0] if len(hits) == 1 else None
+        by_id: set[int] = set()
+
         for s in h_scripts:
             base = _strip_axis(s.filename)
             how = ""
             v = _find_video(_key(base))
+            if v is None:
+                v = _find_video_by_id(s)
+                if v is not None:
+                    matched[id(v)].append(s)
+                    basis[id(s)] = "name"
+                    by_id.add(id(s))
+                    continue
             if v is None:
                 v = _find_video(_key(base, strip_prefix=True))
             if v is not None:
@@ -2568,6 +2590,15 @@ class QueueManager:
                 # Cowgirl").
                 mains = [sc for sc in g_scripts if self._parse_axis(sc.filename)[0] == "L0"] or g_scripts
                 s_base = min((_strip_axis(sc.filename) for sc in mains), key=len)
+                # One video's scripts that differ only by a "(Label)" up
+                # front ("(Brute)/(Husk)/(Marauder) 2976724") are named by
+                # what they share; the labels tell the variants apart. The
+                # shortest one's label is not the work's name.
+                lead = re.compile(r"^\s*([(\[][^)\]]*[)\]])\s*")
+                heads = {(m.group(1) if (m := lead.match(_strip_axis(sc.filename))) else "") for sc in mains}
+                rests = {lead.sub("", _strip_axis(sc.filename)).strip() for sc in mains}
+                if len(heads) >= 2 and "" not in heads and len(rests) == 1 and next(iter(rests)):
+                    s_base = next(iter(rests))
                 if not (_tokens(real_stem) & _tokens(s_base)) or (
                         self._machine_title(real_stem) and self._worded_title(s_base)):
                     title_src = s_base
@@ -2668,6 +2699,20 @@ class QueueManager:
                 groups.append({"name": name, "label": "", "videos": [], "scripts": ss, "others": [],
                                "script_basis": {s.url: "none" for s in ss}})
             taken = {id(s) for ss in by_alt.values() for s in ss}
+            unmatched_scripts = [s for s in unmatched_scripts if id(s) not in taken]
+
+        # Scripts named by post number, their videos found by it: a leftover
+        # named by a number too is the script of a video the bundle lacks
+        # (its link died), a work of its own — not the first work's.
+        if len(groups) >= 2 and len(by_id) >= 2 and unmatched_scripts:
+            own: dict[str, list[PairItem]] = {}
+            for s in unmatched_scripts:
+                if re.search(r"(?<!\d)\d{5,}(?!\d)", _strip_axis(s.filename)):
+                    own.setdefault(_strip_axis(s.filename).strip(), []).append(s)
+            for base, ss in own.items():
+                groups.append({"name": sanitize_filename(base), "label": "", "videos": [], "scripts": ss,
+                               "others": [], "script_basis": {s.url: "none" for s in ss}})
+            taken = {id(s) for ss in own.values() for s in ss}
             unmatched_scripts = [s for s in unmatched_scripts if id(s) not in taken]
 
         # Scripts nobody claimed (likely shared/generic) go with the first

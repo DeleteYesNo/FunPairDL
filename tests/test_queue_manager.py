@@ -27,6 +27,37 @@ class TestPlanBundleSplit:
     """plan_bundle_split is the preview the panel shows AND the split the
     queue performs; a user plan (url → label) overrides the name heuristic."""
 
+    def test_clips_named_by_post_number_get_their_own_scripts(self):
+        # A collection of short booru clips, a script each named by the
+        # clip's post number; the hosts title the clips by tag lists that
+        # share nothing with the scripts, and the lengths all but tie. By
+        # position nearly every folder got another clip's video.
+        ids = [1000101, 1000202, 1000303, 1000404]
+        vids = []
+        for i, n in enumerate(ids):
+            v = PairItem(url=f"https://rule34.xyz/post/{n}", filename=f"mock tags, heroine {i} - Rule 34 XYZ (1)",
+                         file_type=FileType.VIDEO)
+            vids.append(v)
+        # Scripts out of the videos' order, one with three takes "(Label) <id>",
+        # one whose video is not in the bundle (its link died).
+        scripts = [_vi(n, FileType.FUNSCRIPT) for n in (
+            "1000303.funscript", "1000101.funscript", "(Alpha) 1000404.funscript",
+            "(Beta) 1000404.funscript", "1000202.funscript", "1000999.funscript")]
+        durations = {v.url: 8.0 for v in vids} | {s.url: 8.0 for s in scripts}
+        groups = QueueManager().plan_bundle_split(vids + scripts, None, "Mock Clips Collection",
+                                                  durations=durations)
+        by_video = {g["videos"][0].url: sorted(s.filename for s in g["scripts"]) for g in groups if g["videos"]}
+        assert by_video == {
+            "https://rule34.xyz/post/1000101": ["1000101.funscript"],
+            "https://rule34.xyz/post/1000202": ["1000202.funscript"],
+            "https://rule34.xyz/post/1000303": ["1000303.funscript"],
+            "https://rule34.xyz/post/1000404": ["(Alpha) 1000404.funscript", "(Beta) 1000404.funscript"],
+        }
+        takes = next(g for g in groups if g["videos"] and g["videos"][0].url.endswith("1000404"))
+        assert takes["name"] == "1000404"  # the labels are variants, not the work's name
+        lone = [g for g in groups if not g["videos"]]
+        assert [(g["name"], [s.filename for s in g["scripts"]]) for g in lone] == [("1000999", ["1000999.funscript"])]
+
     def test_a_replys_unmatched_script_is_its_own_work_in_a_split(self):
         # Two scenes and their scripts, plus a reply's combined script that
         # fits neither: it is not the first scene's variant.
