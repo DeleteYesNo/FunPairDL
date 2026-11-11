@@ -134,6 +134,15 @@ class YtdlpGenericProvider(BaseProvider):
                 if picked.get("url") and _get_height(picked) == target:
                     selected_format = picked
                     video_url = picked["url"]
+            if selected_format is None and not any(f.get("height") for f in formats):
+                # yt-dlp had no heights to rank by (the generic extractor on
+                # tnaflix lists 720p..144p), so its "best" is merely the last
+                # entry — 144p. Heights read from the format URLs rank them.
+                picked = _select_format(formats, preferred_resolution)
+                pre = next((f for f in formats if f.get("url") == video_url), {"url": video_url})
+                if picked.get("url") and _get_height(picked) > _get_height(pre):
+                    selected_format = picked
+                    video_url = picked["url"]
 
         if not video_url:
             raise ValueError(f"No video URL found for: {url}")
@@ -199,7 +208,8 @@ def _get_height(fmt: dict) -> int:
     if h:
         return h
     url = fmt.get("url", "")
-    m = re.search(r'[-_](\d{3,4})p?\.', url)
+    m = (re.search(r'[-_/](\d{3,4})p(?![a-z0-9])', url.split("?")[0], re.I)
+         or re.search(r'[-_](\d{3,4})p?\.', url))
     if m:
         return int(m.group(1))
     return 0
@@ -216,16 +226,24 @@ def _select_format(formats: list[dict], preferred_resolution: str) -> dict:
         candidates = formats
 
     if not preferred_resolution or preferred_resolution == "best":
-        return candidates[-1]
+        return _highest(candidates)
 
     try:
         target = int(preferred_resolution)
     except (ValueError, TypeError):
-        return candidates[-1]
+        return _highest(candidates)
 
     # Exact match → use it; otherwise → best quality
     exact = [f for f in candidates if _get_height(f) == target]
     if exact:
         return exact[-1]
 
+    return _highest(candidates)
+
+
+def _highest(candidates: list[dict]) -> dict:
+    """The tallest format; the last one when no height is known (yt-dlp
+    lists formats worst-to-best when it can rank them)."""
+    if any(_get_height(f) for f in candidates):
+        return max(reversed(candidates), key=_get_height)
     return candidates[-1]

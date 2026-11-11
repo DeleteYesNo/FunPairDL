@@ -69,3 +69,26 @@ def test_unavailable_height_keeps_the_extractor_choice(monkeypatch):
     # 2160p isn't offered; falling back to the pre-selected best is correct,
     # and must not silently pick some other format instead.
     assert _resolve(monkeypatch, "2160").direct_url == "https://cdn.example/1080p/video.m3u8"
+
+
+def _heightless_info():
+    """yt-dlp's generic extractor on tnaflix: five mp4s, no heights, listed
+    720p..144p, and the last (144p) hoisted to info["url"] as "best"."""
+    names = ("720p_60fps", "480p_60fps", "360p_60fps", "240p", "144p")
+    fmts = [{"format_id": str(i), "ext": "mp4",
+             "url": f"https://sl1.tube.example/72/7209014/clip-{n}.mp4?rs=1&secure=x"}
+            for i, n in enumerate(names)]
+    return {"title": "clip", "url": fmts[-1]["url"], "formats": fmts}
+
+
+@pytest.mark.parametrize("resolution", ["1080", "best"])
+def test_heightless_formats_rank_by_the_height_in_their_url(monkeypatch, resolution):
+    class _YDL(_FakeYDL):
+        def extract_info(self, url, download=False):
+            return _heightless_info()
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=_YDL))
+    from funpairdl.providers.ytdlp_generic import YtdlpGenericProvider
+    resolved = asyncio.run(YtdlpGenericProvider().resolve(
+        "https://www.tube.example/video7209014", preferred_resolution=resolution))
+    assert "clip-720p_60fps.mp4" in resolved.direct_url
+    assert "[720p]" in resolved.filename
