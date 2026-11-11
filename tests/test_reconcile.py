@@ -354,3 +354,38 @@ def test_a_new_multi_axis_set_keeps_its_axes_with_its_own_stroke(tmp_path, monke
     assert labels["Main"]["files"] == {"L0": "Work.funscript"}
     assert labels["Alt"]["files"] == {"L0": "Work (Alt).funscript", "surge": "Work (Alt).surge.funscript",
                                       "twist": "Work (Alt).twist.funscript"}
+
+
+def _another_posts_set(tmp_path, monkeypatch, meta):
+    """The work came from topic 100 (OP Alice); topic 200 posts a different
+    script set for the same video, attachments carrying no author."""
+    import funpairdl.utils.discourse as disc
+    _stub_settings(monkeypatch, reconcile_on_redownload=True)
+    monkeypatch.setattr(disc, "fetch_topic_meta_sync", lambda tid: meta)
+    qm = QueueManager(download_dir=tmp_path)
+    work = _existing_work(tmp_path, "Work", b"VIDEO", {"Work.funscript": "OLD"})
+    (work / "funlib.json").write_text(json.dumps({
+        "version": 3, "source": {"site": "eroscripts", "topic_id": 100},
+        "posted_by": "Alice"}), encoding="utf-8")
+    pair, _ = _redownload_pair(tmp_path, "Work", b"VIDEO",
+                               {"Work.funscript": "NEW", "Work.surge.funscript": "S"})
+    pair.source_url = "https://discuss.eroscripts.com/t/work-multi-axis/200"
+    return qm, work, pair
+
+
+def test_another_posts_script_set_is_labelled_by_its_op(tmp_path, monkeypatch):
+    qm, work, pair = _another_posts_set(tmp_path, monkeypatch, {"posted_by": "Bob"})
+    assert qm._reconcile_with_library(pair) is True
+    assert (work / "Work (Bob).funscript").read_text() == "NEW"
+    assert (work / "Work (Bob).surge.funscript").read_text() == "S"
+    sc = json.loads((work / "funlib.json").read_text(encoding="utf-8"))
+    bob = next(v for v in sc["variants"] if v["label"] == "Bob")
+    assert bob.get("author") == "Bob"
+    assert sc["posted_by"] == "Alice"            # the work's own OP stays
+
+
+def test_same_op_reposting_or_unreadable_topic_stays_alt(tmp_path, monkeypatch):
+    for meta in ({"posted_by": "alice"}, None):
+        qm, work, pair = _another_posts_set(tmp_path / str(bool(meta)), monkeypatch, meta)
+        assert qm._reconcile_with_library(pair) is True
+        assert (work / "Work (Alt).funscript").read_text() == "NEW"

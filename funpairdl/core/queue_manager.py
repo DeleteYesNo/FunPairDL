@@ -3767,6 +3767,10 @@ class QueueManager:
                 items = [e[2] for e in entries]
                 authors = {(i.author or "").strip() for i in items if (i.author or "").strip()}
                 if gname == "Main":
+                    if not authors:
+                        op = self._other_post_scripter(pair, dest)
+                        if op:
+                            authors = {op}
                     label = lib.sanitize_label(next(iter(authors))) if len(authors) == 1 else "Alt"
                 else:
                     label = self._group_label(pair, gname, items, main_authors)
@@ -3794,6 +3798,31 @@ class QueueManager:
             pair.name, dest.name, len(new_axis), len(changed),
         )
         return True
+
+    @staticmethod
+    def _other_post_scripter(pair: Pair, dest: Path) -> str:
+        """The OP of this pair's topic when it is another post than the one
+        the library work came from (someone else's script set for the same
+        video): their name labels the variant, not "(Alt)". Empty when the
+        topics match, the OP is the work's own, or the forum can't be read.
+        Runs on organize's worker thread, so a blocking fetch is fine."""
+        tid = lib.topic_id_from_url(pair.source_url or "")
+        if not tid:
+            return ""
+        sc = lib.read_sidecar(dest) or {}
+        src = sc.get("source") or {}
+        if not src.get("topic_id") or int(src["topic_id"]) == tid:
+            return ""
+        try:
+            from funpairdl.utils.discourse import fetch_topic_meta_sync
+            meta = fetch_topic_meta_sync(tid) or {}
+        except Exception as e:
+            logger.info("Topic %s OP lookup failed: %s", tid, e)
+            return ""
+        op = (meta.get("posted_by") or "").strip()
+        if not op or op.lower() == (sc.get("posted_by") or "").strip().lower():
+            return ""
+        return op
 
     def _group_label(self, pair: Pair, gname: str, items: list[PairItem],
                      main_authors: set[str]) -> str:
