@@ -815,3 +815,46 @@ class TestScriptersArchiveBesideTheWorksLink:
         ])
         assert res["roles"][own.url] == "chosen"
         assert all(res["roles"][v.url] == "unrelated" for v in pack)
+
+    def test_one_shared_word_is_a_sibling_work_not_the_posts(self):
+        # The post's script ("Full Twin Paizuri") has its video on a tube
+        # site; the scripter's backup list holds a copy of it and an earlier
+        # work, "Gyaru Palm Paizuri", already in the library. One shared word made
+        # that file the post's video: the post was merged into it and its
+        # own long video never fetched.
+        lst = "https://pixeldrain.com/l/mocklist"
+        tube = _v("https://tube.example/video/1/full-twin-paizuri/", "[Full] Twin Paizuri.mp4",
+                  duration=2747.0, size=1_300_000_000, height=1080)
+        sibling = _p("https://pixeldrain.com/u/mocksib", "Gyaru Palm Paizuri.mp4", pack=lst)
+        copy = _p("https://pixeldrain.com/u/mockcopy", "[Full] Twin Paizuri.mp4", pack=lst)
+        res = plan_videos([sibling, copy, tube], Prefs(), title="Twin Paizuri by MockArtist", scripts=[
+            {"name": "Full Twin Paizuri.funscript", "duration": 2746.7},
+            {"name": "[Smooth] Gyaru Palm Paizuri.funscript", "duration": 0, "pack": True},
+            {"name": "[Full] Twin Paizuri.funscript", "duration": 0, "pack": True},
+        ])
+        assert res["roles"][sibling.url] == "unrelated"
+        assert res["roles"][tube.url] == "chosen"
+        assert res["roles"][copy.url] == "alternate"
+
+    def test_a_length_a_second_off_is_chance_beside_an_archive(self):
+        # The post's own scripts sit in a scripts-only folder (so not
+        # "pack"); its video is a separate link. The archive's
+        # "animationextend.mp4" runs 243 s by the post's 244 s video —
+        # no shared word, so not a render of it.
+        folder = "https://mega.nz/folder/mockarch#key"
+        own = _v("https://mega.nz/file/mockown#key", "ClipSaver_abc123_(1282p).mp4", duration=244.0, size=46_000_000)
+        pack = []
+        for i, (name, dur, size) in enumerate([("Heroine - Series.mp4", 50.0, 29_000_000),
+                                               ("animation.mp4", 119.0, 128_000_000),
+                                               ("animationextend.mp4", 243.0, 326_000_000),
+                                               ("Another Work.mp4", 120.0, 60_000_000)]):
+            v = _p(f"{folder}/file/f{i}", name, pack=folder)
+            v.duration, v.size = dur, size
+            pack.append(v)
+        res = plan_videos([own, *pack], Prefs(), title="【Free】【S002】【Multi-axis】", scripts=[
+            {"name": "ClipSaver_abc123_(1282p).funscript", "duration": 0},
+            {"name": "ClipSaver_abc123_(1282p).pitch.funscript", "duration": 0},
+            {"name": "Heroine - Series.funscript", "duration": 0, "pack": True},
+        ])
+        assert res["roles"][own.url] == "chosen"
+        assert {res["roles"][v.url] for v in pack} == {"unrelated"}

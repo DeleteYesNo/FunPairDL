@@ -628,6 +628,10 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
             return True
         return several_named and n1 != n2
 
+    def _stray_key(k: str) -> bool:
+        live = [v for v in videos if v.key == k and not v.failed]
+        return bool(live) and all(v.stray for v in live)
+
     for k1 in list(by_len):
         for k2 in list(by_len):
             if k1 < k2 and k1 in by_len and k2 in by_len and _same_len(by_len[k1], by_len[k2]):
@@ -637,6 +641,8 @@ def plan_videos(videos: list[VideoSpec], prefs: Prefs | None = None,
                     continue  # "part2" is the sequel, not a copy (a series keeps one length)
                 if _named_apart(k1, k2):
                     continue
+                if _stray_key(k1) != _stray_key(k2):
+                    continue  # an archive's other work is no copy of the post's video
                 keep, drop = (k2, k1) if k2.startswith("pack:") else (k1, k2)
                 for v in videos:
                     if v.key == drop:
@@ -1102,13 +1108,34 @@ def _mark_crowded_and_strays(videos: list[VideoSpec], scripts: list[dict], title
         and (((_core_tokens(v.stem) - _STOP_WORDS) & own_words)
              or (v.duration and any(not _duration_differs(v.duration, sl) for sl in own_lens)))
         for v in videos)
+    if covered:
+        # With its video already found and a copy of it in the folder (a
+        # scripter's backup list: the post's work beside their earlier
+        # ones), another file of the folder is the post's by two words of
+        # one of its scripts, or a script's length. One shared word is a
+        # sibling work ("Full Double Paizuri" beside the list's "Gyaru
+        # No-hand Paizuri" — in the library, so the post was merged into
+        # it and its own 45-minute video never fetched).
+        own_sets = [w for w in (c - _STOP_WORDS for c, _ in own) if w]
+        words_of = {v.url: _core_tokens(v.stem) - _STOP_WORDS for v in in_big}
+        if any(w <= words_of[v.url] for v in in_big for w in own_sets):
+            anchored = [v for v in in_big
+                        if any(len(w & words_of[v.url]) >= 2 or w <= words_of[v.url] for w in own_sets)
+                        or (v.duration and any(not _duration_differs(v.duration, sl) for sl in own_lens))]
     related += anchored if (anchored or covered) else _belongs(s_items)
-    rel_lens = [v.duration for v in related if v.duration and not v.failed]
+    rel = [r for r in related if r.duration and not r.failed]
     for v in in_big:
         if v in related:
             continue
-        if v.duration and any(abs(v.duration - d) <= 1.0 for d in rel_lens):
-            continue  # a render of a video that belongs (character alt, VR copy)
+        # A render of a video that belongs (character alt, VR copy). Beside
+        # a scripter's archive whose post already has its video, a length a
+        # second off is chance unless the names meet too (the archive's
+        # "animationextend.mp4", 243 s, by the post's 244 s video).
+        if v.duration and any(
+                abs(v.duration - r.duration) <= 1.0
+                and (not covered or ((v.tokens & r.tokens) - _STOP_WORDS))
+                for r in rel):
+            continue
         v.stray = True
 
 

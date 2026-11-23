@@ -4026,6 +4026,20 @@ function _isVideoFileName(name) {
   return /\.(mp4|mkv|webm|mov|avi|m4v|wmv|flv|ts)$/i.test(name || "");
 }
 
+// Pure: the scripts of the panel's packs ([{name, key, duration}], key =
+// the pack's link) as video-plan scripts. "pack": a folder's scripts name
+// its own works — an uploader's whole archive holds one for each — so they
+// don't say a file is the post's. A folder of scripts alone ("Download
+// scripts on MEGA") is where the post keeps its own: those do. (S092's sat
+// beside the scripter's archive; the archive's Lauma script made Lauma the
+// post's video, and the post was merged into the library's Lauma.)
+function _packPlanScripts(files) {
+  const withVideos = new Set(files.filter((f) => _isVideoFileName(f.name)).map((f) => f.key));
+  return files
+    .filter((f) => /\.funscript$/i.test(f.name))
+    .map((f) => ({ name: f.name, duration: f.duration, pack: withVideos.has(f.key) }));
+}
+
 // Pure: how the plan treats a candidate's origin. A comment link is "OP"
 // when its own group carries scripts: the commenter posted another work
 // with its scripts (a compilation), not a mirror of the post's video.
@@ -4149,12 +4163,9 @@ async function _refreshVideoPlan(panel, parsed) {
   // beside the folder's "<Song> [<iwara id>].mp4"): without them a folder of
   // renders looked script-less, and two dances to one song a second apart
   // were taken for one video on two hosts.
-  panel.querySelectorAll(".funpairdl-bundle-cb").forEach((cb) => {
-    const name = cb.dataset.fileName || "";
-    // "pack": a folder's scripts name its own works — an uploader's whole
-    // archive holds one for each — so they don't say a file is the post's.
-    if (/\.funscript$/i.test(name)) planScripts.push({ name, duration: Number(cb.dataset.duration) || 0, pack: true });
-  });
+  planScripts.push(..._packPlanScripts([...panel.querySelectorAll(".funpairdl-bundle-cb")]
+    .map((cb) => ({ name: cb.dataset.fileName || "", key: cb.dataset.probeKey,
+                    duration: Number(cb.dataset.duration) || 0 }))));
   const decisions = panel._encodeDecisions || {};
   const specs = scopes.map((sc) => sc.map(({ v, src }) => spec(v, src)));
   const key = JSON.stringify([specs, prefs.video_pick_mode, prefs.min_resolution,

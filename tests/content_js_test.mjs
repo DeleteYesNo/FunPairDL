@@ -744,6 +744,21 @@ check("external script row shows its host", extRow.includes('<span class="funpai
   check("video file name", ctx._isVideoFileName("Work Title.mp4"), true);
   check("script is no video file", ctx._isVideoFileName("Work Title.funscript"), false);
   check("readme is no video file", ctx._isVideoFileName("readme.txt"), false);
+  // A scripts-only folder holds the post's own scripts; an archive's
+  // scripts name the archive's works.
+  const packScripts = typeof ctx._packPlanScripts === "function" ? ctx._packPlanScripts([
+    { name: "Work Title.funscript", key: "scripts-folder", duration: 0 },
+    { name: "Work Title.pitch.funscript", key: "scripts-folder", duration: 0 },
+    { name: "Other Work.mp4", key: "archive", duration: 50 },
+    { name: "Other Work.funscript", key: "archive", duration: 0 },
+    { name: "cover.jpg", key: "archive", duration: 0 },
+  ]) : [];
+  check("pack scripts: archive videos are not scripts", packScripts.length, 3);
+  check("pack scripts: a scripts-only folder's script is the post's",
+        packScripts.filter((s) => !s.pack).map((s) => s.name).join("|"),
+        "Work Title.funscript|Work Title.pitch.funscript");
+  check("pack scripts: an archive's script stays pack",
+        packScripts.filter((s) => s.pack).map((s) => s.name).join("|"), "Other Work.funscript");
   const parsed = {
     mode: "single",
     scripts: [{}, {}],
