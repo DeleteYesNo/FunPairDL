@@ -858,3 +858,36 @@ class TestScriptersArchiveBesideTheWorksLink:
         ])
         assert res["roles"][own.url] == "chosen"
         assert {res["roles"][v.url] for v in pack} == {"unrelated"}
+
+    def test_a_folder_file_with_a_script_of_its_name_is_the_posts(self):
+        # The post's only link is a list of two works, each a video with a
+        # script of its name; one is named by a bare number. With no words
+        # in "2", it was taken for another work and its script given to
+        # the other video.
+        lst = "https://pixeldrain.com/l/mocklst2"
+        two = _p("https://pixeldrain.com/u/mocktwo", "2.mp4", pack=lst)
+        remote = _p("https://pixeldrain.com/u/mockrc", "Remote Control.mp4", pack=lst)
+        res = plan_videos([two, remote], Prefs(), title="[Request] Mock Heroine PMV + Mock 4K HMV | MockArtist",
+                          scripts=[{"name": "2.funscript", "duration": 0, "pack": True},
+                                   {"name": "Remote Control.funscript", "duration": 0, "pack": True}])
+        assert res["roles"][two.url] == "chosen"
+        assert res["roles"][remote.url] == "chosen"
+
+
+class TestBooruHostInNames:
+    def test_a_host_name_shared_is_no_shared_work(self):
+        # A request filler's folder holds several fills; the post's own
+        # booru link is probed as "r-34.xyz <id>" and another fill is named
+        # "<tags> - R-34.XYZ.mp4". Sharing "r xyz" made the post's link a
+        # copy of that file, and it was downloaded with that file's script.
+        folder = "https://pixeldrain.com/d/mockfill"
+        post_vid = _p(f"{folder}/Mock Heroine wants a treat.mp4", "Mock Heroine wants a treat.mp4", pack=folder)
+        other = _p(f"{folder}/2d mockartist emoji race - R-34.XYZ.mp4", "2d mockartist emoji race - R-34.XYZ.mp4",
+                   pack=folder)
+        booru = _v("https://r-34.xyz/post/7000001?&d=mock", "r-34.xyz 7000001.mp4", duration=59.0)
+        res = plan_videos([post_vid, other, booru], Prefs(), title="Mock Heroine wants a treat (Request Fill)",
+                          scripts=[{"name": "Mock Heroine wants a treat.funscript", "duration": 59.0},
+                                   {"name": "2d mockartist emoji race - R-34.XYZ.funscript", "duration": 0, "pack": True},
+                                   {"name": "Mock Heroine wants a treat.funscript", "duration": 0, "pack": True}])
+        assert res["roles"][other.url] == "unrelated"
+        assert res["roles"][booru.url] != "unrelated"

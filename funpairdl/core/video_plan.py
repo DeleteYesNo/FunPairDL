@@ -207,7 +207,14 @@ def _core_tokens(stem: str) -> frozenset[str]:
     """The words that name the work: bracketed tags (an outfit, an id), encode
     words and version words dropped. "Work Title (nude) [1080p] v2" and
     "Work Title" agree on {"work", "title"}."""
-    return _words(_tokens(_BRACKET_RE.sub(" ", stem or "")))
+    return _words(_tokens(_BOORU_HOST_RE.sub(" ", _BRACKET_RE.sub(" ", stem or ""))))
+
+
+# A booru's host in a file name ("<tags> - R-34.XYZ.mp4", the probe's
+# "r-34.xyz 754950") names no work: two clips of one site shared "r xyz"
+# and a request filler's folder file took the post's own r-34.xyz link,
+# which then got that file's script.
+_BOORU_HOST_RE = re.compile(r"(?<![a-z0-9])(?:r-?34|rule-?34)\.(?:xyz|xxx)(?![a-z0-9])", re.IGNORECASE)
 
 
 _SQUARE_RE = re.compile(r"[\[【]([^\]】]*)[\]】]")
@@ -1122,7 +1129,18 @@ def _mark_crowded_and_strays(videos: list[VideoSpec], scripts: list[dict], title
             anchored = [v for v in in_big
                         if any(len(w & words_of[v.url]) >= 2 or w <= words_of[v.url] for w in own_sets)
                         or (v.duration and any(not _duration_differs(v.duration, sl) for sl in own_lens))]
-    related += anchored if (anchored or covered) else _belongs(s_items)
+    if anchored or covered:
+        related += anchored
+    else:
+        # Only the folder names the post's works: its files and their
+        # scripts. A file with a script of its very name is one of them,
+        # even a name with no words ("2.mp4" + "2.funscript" beside "Remote
+        # Control.mp4": without words "2" was another work, and its script
+        # went to Remote Control's video).
+        stems = {_script_stem(str(s.get("name") or "")).strip().lower() for s in scripts} - {""}
+        related += _belongs(s_items) + [
+            v for v in in_big
+            if v.name and Path(v.name).stem.strip().lower() in stems]
     rel = [r for r in related if r.duration and not r.failed]
     for v in in_big:
         if v in related:
