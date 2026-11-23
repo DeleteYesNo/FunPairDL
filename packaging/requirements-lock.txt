@@ -10,7 +10,7 @@ annotated-doc==0.0.4
 annotated-types==0.7.0
 anyio==4.9.0
 attrs==25.3.0
-certifi==2026.10.23
+certifi==2026.11.20
 cffi==2.0.0
 charset-normalizer==3.4.1
 click==8.1.8
@@ -52,4 +52,4 @@ uvicorn==0.38.0
 watchfiles==1.1.1
 websockets==16.0
 yarl==1.18.3
-yt-dlp==2026.10.21
+yt-dlp==2026.10.26
