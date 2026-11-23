@@ -217,9 +217,57 @@ async def fetch_post(url: str, session: aiohttp.ClientSession) -> dict:
             raise ValueError("e621 post not found")
         resp.raise_for_status()
         data = await resp.json(content_type=None)
-    post = data.get("post") if isinstance(data, dict) else None
-    if not isinstance(post, dict):
+    post = normalize_post(data)
+    if post is None:
         raise ValueError("Unexpected e621 API response")
+    return post
+
+
+def normalize_post(data) -> dict | None:
+    """The post in the shape the rest of this module reads, from either
+    API layout; None when ``data`` is neither.
+
+    Until November 2026 the JSON was ``{"post": {...}}`` with ``file``,
+    ``sample.alternates``, ``preview`` and tags grouped by category. The
+    site now answers with the post itself: ``files.meta`` (ext, size,
+    duration), ``files.original`` (url; null when hidden), ``files.video``
+    (the same ``variants``/``samples`` transcodes) and a flat tag list.
+    """
+    if not isinstance(data, dict):
+        return None
+    if isinstance(data.get("post"), dict):
+        return data["post"]
+    files = data.get("files")
+    if not isinstance(files, dict):
+        return None
+    meta = files.get("meta") or {}
+    original = files.get("original") or {}
+    video = files.get("video") or {}
+    post = {k: v for k, v in data.items() if k != "files"}
+    post["file"] = {
+        "url": original.get("url"),
+        "ext": meta.get("ext"),
+        "size": meta.get("size"),
+        "width": original.get("width"),
+        "height": original.get("height"),
+        "md5": meta.get("md5"),
+    }
+    post["sample"] = {
+        "url": (files.get("sample") or {}).get("jpg"),
+        "alternates": {
+            "variants": video.get("variants") or {},
+            "samples": video.get("samples") or {},
+        },
+    }
+    preview = files.get("preview") or {}
+    post["preview"] = {"url": preview.get("jpg") or preview.get("webp")}
+    post["duration"] = meta.get("duration")
+    tags = data.get("tags")
+    if isinstance(tags, list):
+        # No categories any more: character/artist names can't be told
+        # apart, so the tag-built title falls back to the id; the flat
+        # list still serves as scene hints.
+        post["tags"] = {"general": [t for t in tags if isinstance(t, str)]}
     return post
 
 

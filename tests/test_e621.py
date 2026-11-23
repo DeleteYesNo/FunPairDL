@@ -124,3 +124,56 @@ def test_title_from_tags_mirrors_e621_wording():
     assert title_from_tags({"tags": {"copyright": ["somegame"], "artist": ["a_b"]}}) \
         == "(somegame) created by a b"
     assert title_from_tags({"tags": {}}) == ""
+
+
+# The API's layout since November 2026: the post itself, no "post" wrapper;
+# files.meta / files.original / files.video instead of file / sample.alternates;
+# tags as one flat list.
+POST_2026 = {
+    "id": 7654321,
+    "files": {
+        "meta": {"md5": "1" * 32, "ext": "webm", "size": 30_000_000,
+                 "duration": 10.5, "has_sample": True},
+        "original": {"width": 2000, "height": 2000, "url": f"{CDN}/11/11/{'1' * 32}.webm"},
+        "preview": {"width": 256, "height": 256, "jpg": f"{CDN}/preview/11/11/{'1' * 32}.jpg"},
+        "sample": {"width": 850, "height": 850, "jpg": f"{CDN}/sample/11/11/{'1' * 32}.jpg"},
+        "video": {
+            "has": True,
+            "original": {"codec": "vp9", "size": 30_000_000, "width": 2000, "height": 2000,
+                         "url": f"{CDN}/11/11/{'1' * 32}.webm"},
+            "variants": {"mp4": {"codec": "avc1", "size": 2_000_000, "width": 1080,
+                                 "height": 1080, "url": f"{CDN}/sample/11/11/{'1' * 32}_alt.mp4"}},
+            "samples": {"480p": {"codec": "avc1", "size": 750_000, "width": 480, "height": 480,
+                                 "url": f"{CDN}/sample/11/11/{'1' * 32}_480p.mp4"}},
+        },
+    },
+    "flags": {"deleted": False},
+    "tags": ["animated", "bedroom", "someartist"],
+}
+
+
+def test_normalize_reads_both_api_layouts():
+    from funpairdl.providers.e621 import normalize_post
+    assert normalize_post({"post": POST}) is POST
+    assert normalize_post({"posts": []}) is None
+    assert normalize_post([]) is None
+
+    post = normalize_post(POST_2026)
+    fmts = build_formats(post)
+    assert [f["label"] for f in fmts] == ["480p", "mp4", "original"]
+    best = select_format(fmts, "best")
+    assert best["url"].endswith(f"{'1' * 32}.webm") and best["size"] == 30_000_000
+    assert post["duration"] == 10.5
+    assert post["preview"]["url"].endswith(".jpg")
+    assert post["tags"]["general"] == ["animated", "bedroom", "someartist"]
+    # No categories: the offline title can't name anyone, so the id names it.
+    assert build_filename(post, best) == "e621_7654321.webm"
+
+
+def test_new_layout_hidden_post_has_no_formats():
+    from funpairdl.providers.e621 import normalize_post
+    files = {**POST_2026["files"], "original": {"width": 2000, "height": 2000, "url": None},
+             "video": {"has": True}}
+    post = normalize_post({**POST_2026, "files": files})
+    assert build_formats(post) == []
+    assert "login" in describe_unavailable(post)
