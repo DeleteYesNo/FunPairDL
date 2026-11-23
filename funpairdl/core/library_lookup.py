@@ -199,6 +199,26 @@ def find_work_by_title(title: str, roots: list[Path], title_key, match_key) -> P
 _WORK_ROLES = ("", "chosen", "alternate")
 
 
+def _found_through_folder(found_by: dict | None, videos: list[dict],
+                         duration: float | None) -> bool:
+    """The work was found only through a file of a folder or list the post
+    links, while the post's own link — not in that folder — is a video of
+    another length (or of none known): the folder is the scripter's archive
+    or backup list, and the file found is one of their other works. Three
+    posts were merged into such works (S085 and S092 into "Lauma", a
+    45-minute "Double Paizuri" into the 15-minute "No-hands Boobjob") and
+    their own videos never fetched; the panel asks instead."""
+    if not found_by or not found_by.get("pack"):
+        return False
+    for v in videos:
+        if v is found_by or v.get("pack") or (v.get("role") or "") not in _WORK_ROLES:
+            continue
+        d = float(v.get("duration") or 0)
+        if not (d and duration and abs(d - duration) <= max(3.0, 0.02 * max(d, duration))):
+            return True
+    return False
+
+
 def lookup(title: str, videos: list[dict], scripts: list[dict], live_pairs: list,
            roots: list[Path], title_key, match_key, parse_axis,
            video_index: dict[int, list[Path]] | None = None, same_length=None) -> dict:
@@ -217,12 +237,14 @@ def lookup(title: str, videos: list[dict], scripts: list[dict], live_pairs: list
         {"work": {"dir", "base", "video", "duration"} | None,
          "match": "url" | "size" | "title" | "length" | "",
          "same_content": True | False | None,     # the post's video is this work's
+         "via_folder": bool,     # found only through a linked folder's file, see _found_through_folder
          "scripts": {url: "identical" | "changed" | "new" | "unknown"}}
     """
     _refresh_archive()
     live = _live_index(live_pairs)
     work_dir: Path | None = None
     match = ""
+    found_by: dict | None = None   # the post's video that found the work
     for v in videos:
         for u in (v.get("url"), v.get("resolved")):
             if not u:
@@ -231,7 +253,7 @@ def lookup(title: str, videos: list[dict], scripts: list[dict], live_pairs: list
             if e and e.get("dir"):
                 d = Path(e["dir"])
                 if d.is_dir() and not lib.in_trash(d) and _has_media(d):
-                    work_dir, match = d, "url"
+                    work_dir, match, found_by = d, "url", v
                     break
         if work_dir:
             break
@@ -242,7 +264,7 @@ def lookup(title: str, videos: list[dict], scripts: list[dict], live_pairs: list
             held = [p.parent for p in video_index.get(size, [])
                     if size > 1_000_000 and not lib.in_trash(p.parent)]
             if held:
-                work_dir, match = held[0], "size"
+                work_dir, match, found_by = held[0], "size", v
                 break
     if work_dir is None:
         work_dir = find_work_by_title(title, roots, title_key, match_key)
@@ -252,7 +274,7 @@ def lookup(title: str, videos: list[dict], scripts: list[dict], live_pairs: list
             if v.get("duration"):
                 d = same_length([title, v.get("name") or ""], float(v["duration"]))
                 if d is not None:
-                    work_dir, match = d, "length"
+                    work_dir, match, found_by = d, "length", v
                     break
     if work_dir is None:
         return {"work": None, "match": "", "same_content": None, "scripts": {}}
@@ -260,6 +282,7 @@ def lookup(title: str, videos: list[dict], scripts: list[dict], live_pairs: list
     video = _folder_video(work_dir)
     duration = _work_duration(work_dir, video)
     base = video.stem if video else work_dir.name
+    via_folder = _found_through_folder(found_by, videos, duration)
 
     if match in ("url", "size", "length"):
         same = True
@@ -335,6 +358,7 @@ def lookup(title: str, videos: list[dict], scripts: list[dict], live_pairs: list
                  "video": video.name if video else "", "duration": duration},
         "match": match,
         "same_content": same,
+        "via_folder": via_folder,
         "scripts": verdicts,
         # What the folder holds, for the panel to judge a bundle's files by size.
         "disk_scripts": disk_scripts,

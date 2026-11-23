@@ -4497,6 +4497,7 @@ function _lookupVideo(v, role) {
     url: v.url, resolved: v.resolvedUrl || "", duration: v.probedDuration || null,
     size: v.probedSize || _probeSizeEntry(v.url) || 0,
     name: v.probedFilename || v.label || "", role: role || "",
+    pack: v.pack || "",
   };
 }
 
@@ -4530,8 +4531,12 @@ async function _runLibraryLookup(panel, parsed) {
   }
   const work = panel._lookup.work;
   // A folder that holds only scripts (the video failed last time) does not
-  // have this work: the video is downloaded as usual and lands there.
-  const same = panel._lookup.same_content === true && !!work.video;
+  // have this work: the video is downloaded as usual and lands there. Nor
+  // does a work found only through a file of the scripter's folder while
+  // the post's own video is another length (their archive's other work):
+  // downloaded as a work of its own, and the card asks.
+  const viaFolder = !!panel._lookup.via_folder;
+  const same = panel._lookup.same_content === true && !!work.video && !viaFolder;
   const merge = same && prefs.merge_into_library;
   if (merge) {
     panel._mergeInto = work.dir;
@@ -4576,7 +4581,8 @@ async function _runLibraryLookup(panel, parsed) {
     }
   }
   let note = "";
-  if (merge) note = `🗂 影片已在媒體庫「${escapeAttr(work.base)}」：只下載腳本，併入該作品`;
+  if (viaFolder) note = `🗂 媒體庫的「${escapeAttr(work.base)}」只是從作者資料夾裡的檔案對到的，帖子自己的影片長度不同：照常下載成新作品，不併入`;
+  else if (merge) note = `🗂 影片已在媒體庫「${escapeAttr(work.base)}」：只下載腳本，併入該作品`;
   else if (same) note = `🗂 媒體庫已有「${escapeAttr(work.base)}」（相同影片）；送出後會併入`;
   else if (panel._lookup.same_content === true) note = `🗂 媒體庫的「${escapeAttr(work.base)}」只有腳本、沒有影片（上次影片沒下載成功）：照常下載，補上影片`;
   else if (panel._lookup.same_content === false) note = `媒體庫有同名作品「${escapeAttr(work.base)}」但長度不同，視為不同作品`;
@@ -4613,7 +4619,7 @@ async function _runCollectionLookup(panel, parsed, prefs) {
       });
     } catch (e) { res = null; }
     if (!panel.parentNode) return;
-    if (!res || res._error || !res.work || res.same_content !== true || !res.work.video) continue;
+    if (!res || res._error || !res.work || res.same_content !== true || !res.work.video || res.via_folder) continue;
     found.push(res.work.base);
     if (prefs.merge_into_library) {
       panel._sectionMerge[sec] = res.work.dir;
@@ -4712,6 +4718,11 @@ function _batchDecisions(st) {
   }
   if ((st.scriptLens || []).length < 2 && _lengthMismatch(st.videoDuration, st.mainScriptDur)) {
     out.push({ kind: "videolen", text: `影片 ${formatDuration(st.videoDuration)} 和腳本 ${formatDuration(st.mainScriptDur)} 長度對不上（預告片或別的剪輯？）：確認影片來源，或取消影片只送腳本` });
+  }
+  if (st.libraryViaFolder) {
+    // Never merged on that alone: three posts went into a scripter's other
+    // work this way and their own videos were never fetched.
+    out.push({ kind: "folderlib", text: `作者資料夾裡有一支是媒體庫的「${st.libraryViaFolder}」，但帖子自己的影片長度不同：照常下載成新作品。若其實就是同一部，取消勾選影片` });
   }
   if (st.otherAuthorCommentScripts > 0) {
     out.push({ kind: "comments", text: `留言區有 ${st.otherAuthorCommentScripts} 支腳本（合集帖），請拖到所屬作品或略過` });
@@ -4840,6 +4851,8 @@ function _batchAssess(card) {
     scriptLens, videoDuration, mainScriptDur,
     otherAuthorCommentScripts: parsed.mode === "collection" && prefs.collect_other_authors !== false
       ? (parsed.commentScripts || []).length : 0,
+    libraryViaFolder: (panel._lookup && panel._lookup.via_folder && panel._lookup.work)
+      ? panel._lookup.work.base || "" : "",
   };
   const decisions = _batchDecisions(st);
   // "Selected" means a file will go: a plain row ticked, or a pack file
@@ -4854,7 +4867,7 @@ function _batchAssess(card) {
   const lk = panel._lookup;
   const libraryHasWork = parsed.mode === "collection"
     ? sectionMerges > 0
-    : !!(lk && lk.work && lk.work.video && lk.same_content === true);
+    : !!(lk && lk.work && lk.work.video && lk.same_content === true && !lk.via_folder);
   const tier = panel._probesSettled && !_probesPending(panel)
     ? _batchTier(decisions, { nothingSelected: !anyChecked, libraryHasWork,
                               gone, goneAction: st.goneAction })

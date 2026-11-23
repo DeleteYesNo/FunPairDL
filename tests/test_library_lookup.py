@@ -192,3 +192,43 @@ def test_a_cloud_work_is_judged_from_its_index(tmp_path):
     assert res["scripts"] == {"https://pixeldrain.com/u/s1": "identical",
                               "https://pixeldrain.com/u/s2": "changed"}
     assert sorted(d["size"] for d in res["disk_scripts"]) == [1234, 4321]
+
+
+class TestFoundThroughAScriptersFolder:
+    """The post links its own video and the scripter's backup list; a file of
+    the list is a library work (their earlier one). Found only through that
+    file, the work is not the post's when the post's own video is another
+    length: the panel asks instead of merging."""
+
+    def _lib(self, tmp_path):
+        d = _work(tmp_path, "Gyaru Palm Paizuri", video=b"v" * 1_100_000)
+        return d, {1_100_000: [d / f"{d.name}.mp4"]}
+
+    def _run(self, tmp_path, own):
+        _d, index = self._lib(tmp_path)
+        return ll.lookup("Twin Paizuri by MockArtist", [
+            {"url": "https://pixeldrain.com/u/mocksib", "size": 1_100_000, "role": "chosen",
+             "pack": "https://pixeldrain.com/l/mocklist"},
+            *own,
+        ], [], [], [tmp_path], QueueManager._title_key, QueueManager._match_key,
+            QueueManager._parse_axis, index)
+
+    def test_own_video_of_another_length_asks(self, tmp_path):
+        res = self._run(tmp_path, [{"url": "https://tube.example/video/1/full-twin-paizuri/",
+                                    "duration": 2747.0, "role": "chosen"}])
+        assert res["match"] == "size" and res["via_folder"] is True
+
+    def test_own_video_of_unknown_length_asks(self, tmp_path):
+        res = self._run(tmp_path, [{"url": "https://mega.nz/file/mockown#k", "role": "chosen"}])
+        assert res["via_folder"] is True
+
+    def test_own_video_of_the_works_length_is_that_work(self, tmp_path):
+        # The work's script ends at 120 s: the post's own link is a copy of it.
+        res = self._run(tmp_path, [{"url": "https://tube.example/video/2/gyaru-palm-paizuri/",
+                                    "duration": 120.0, "role": "chosen"}])
+        assert res["via_folder"] is False
+
+    def test_a_folder_post_found_by_its_folder_is_that_work(self, tmp_path):
+        # The post's only link is the folder: nothing of its own disagrees.
+        res = self._run(tmp_path, [])
+        assert res["via_folder"] is False

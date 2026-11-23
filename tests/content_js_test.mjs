@@ -612,6 +612,10 @@ check("external script row shows its host", extRow.includes('<span class="funpai
   check("tier: ambiguous kind", amb[0].kind, "ambiguous");
   check("tier: ask", ctx._batchTier(amb, { nothingSelected: false }), "ask");
 
+  const viaFolder = ctx._batchDecisions({ hasVideos: true, checkedVideos: 1, libraryViaFolder: "Mock Earlier Work" });
+  check("tier: a library work found only through the scripter's folder asks",
+        viaFolder.map((d) => d.kind).join(","), "folderlib");
+
   const guessed = ctx._batchDecisions({ workPlanSplit: true, workBasis: "order", hasVideos: true, checkedVideos: 2 });
   check("tier: guessed pairing asks", guessed.map((d) => d.kind).join(","), "pairing");
   const named = ctx._batchDecisions({ workPlanSplit: true, workBasis: "name", hasVideos: true, checkedVideos: 2 });

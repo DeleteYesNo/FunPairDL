@@ -72,6 +72,7 @@ class LookupVideo(BaseModel):
     size: int = 0
     name: str = ""
     role: str = ""      # the video plan's role (chosen, alternate, variant, …)
+    pack: str = ""      # the folder/list link it is a file of ("" = the post's own link)
 
 
 class LookupScript(BaseModel):
